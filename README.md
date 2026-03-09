@@ -19,7 +19,6 @@ Jellyfin plugin that builds a local anime library from YummyAnime and plays epis
 - Releases: `https://github.com/queukat/YummyKodik/releases`
 - Actions: `https://github.com/queukat/YummyKodik/actions`
 - Issues: `https://github.com/queukat/YummyKodik/issues`
-- GitHub Pages manifest: `https://queukat.github.io/YummyKodik/manifest.json`
 - Raw manifest: `https://raw.githubusercontent.com/queukat/YummyKodik/gh-pages/manifest.json`
 - Logo asset used by Jellyfin plugin catalog: `https://raw.githubusercontent.com/queukat/YummyKodik/main/YummyKodik/Assets/logo.png`
 
@@ -33,25 +32,34 @@ Jellyfin plugin that builds a local anime library from YummyAnime and plays epis
 
 ## Install
 
-### Option A: Jellyfin plugin repository via GitHub Pages
+### Option A: raw GitHub manifest
 
-1. Enable GitHub Pages for this repository:
-   - `Settings -> Pages`
-   - Source: `Deploy from a branch`
-   - Branch: `gh-pages` / folder `/(root)`
-2. In Jellyfin open:
-   - `Dashboard -> Plugins -> Repositories -> Add`
-3. Add the repository URL:
-   - `https://queukat.github.io/YummyKodik/manifest.json`
+Use this repository URL in Jellyfin:
+
+```text
+https://raw.githubusercontent.com/queukat/YummyKodik/gh-pages/manifest.json
+```
 
 Then install:
-- `Dashboard -> Plugins -> Catalog -> YummyKodik -> Install`
-- Restart Jellyfin
 
-### Option B: raw GitHub manifest
+1. Open `Dashboard -> Plugins -> Repositories -> Add`
+2. Paste the manifest URL
+3. Open `Dashboard -> Plugins -> Catalog -> YummyKodik -> Install`
+4. Restart Jellyfin
 
-Use:
-- `https://raw.githubusercontent.com/queukat/YummyKodik/gh-pages/manifest.json`
+### Option B: GitHub Pages manifest (optional)
+
+This URL only works if GitHub Pages is enabled for the repository.
+
+```text
+https://queukat.github.io/YummyKodik/manifest.json
+```
+
+To enable it:
+
+1. Open `Settings -> Pages`
+2. Set `Source` to `Deploy from a branch`
+3. Choose branch `gh-pages` and folder `/(root)`
 
 ### Option C: manual ZIP install
 
