@@ -1,0 +1,12 @@
+[
+  {
+    "category": "General",
+    "guid": "6801ee3f-27f2-4d4e-ab37-e569c025b7c5",
+    "name": "YummyKodik",
+    "description": "Creates Jellyfin anime series cards from YummyAnime and streams episodes from Kodik.",
+    "owner": "queukat",
+    "overview": "Builds a local STRM/NFO library from YummyAnime and plays episodes via Kodik.",
+    "imageUrl": "https://queukat.github.io/YummyKodik/logo.svg",
+    "versions": []
+  }
+]

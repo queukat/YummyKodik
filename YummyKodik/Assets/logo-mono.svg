@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">YummyKodik monochrome logo</title>
+  <desc id="desc">Monochrome YK monogram inside a rounded badge.</desc>
+  <rect x="60" y="104" width="392" height="304" rx="72" fill="#102f5f" stroke="#f7f9fb" stroke-width="10"/>
+  <path d="M118 194 216 256 118 318c-5 3-12 0-12-6V200c0-6 7-9 12-6Z" fill="#f7f9fb"/>
+  <path d="M176 182h49l31 48 31-48h47l-55 84v90c0 10-8 18-18 18h-22c-10 0-18-8-18-18v-90l-45-68c-7-10 0-16 0-16Z" fill="#f7f9fb"/>
+  <path d="M320 180h39v72l57-72h63l-82 95 84 99h-60l-56-67v67h-45V180Z" fill="#f7f9fb" opacity="0.92"/>
+  <path d="M334 206 382 164" fill="none" stroke="#f7f9fb" stroke-linecap="round" stroke-width="18"/>
+  <path d="M354 302 430 378" fill="none" stroke="#f7f9fb" stroke-linecap="round" stroke-width="18"/>
+</svg>

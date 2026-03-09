@@ -1,0 +1,229 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+      - "*.*.*"
+      - "*.*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish, for example v1.0.0.0"
+        required: true
+      version:
+        description: "Optional explicit plugin version. Defaults to tag without leading v."
+        required: false
+
+permissions:
+  contents: write
+
+env:
+  PROJECT_PATH: ./YummyKodik/YummyKodik.csproj
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "9.0.x"
+
+      - name: Compute version from tag
+        id: ver
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ github.event.inputs.tag }}"
+          if [[ -z "$TAG" ]]; then
+            TAG="${GITHUB_REF_NAME}"
+          fi
+
+          V="${{ github.event.inputs.version }}"
+          if [[ -z "$V" ]]; then
+            V="${TAG#v}"
+          fi
+
+          # Normalize to 4-part version (Jellyfin plugin convention)
+          IFS='.' read -r a b c d <<<"$V"
+          if [[ -z "${d:-}" ]]; then
+            V="${V}.0"
+          fi
+
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "zip=YummyKodik_${V}.zip" >> "$GITHUB_OUTPUT"
+
+      - name: Restore
+        run: dotnet restore "${PROJECT_PATH}"
+
+      - name: Publish (Release)
+        run: |
+          dotnet publish "${PROJECT_PATH}" -c Release -o artifacts/publish \
+            -p:Version="${{ steps.ver.outputs.version }}" \
+            -p:AssemblyVersion="${{ steps.ver.outputs.version }}" \
+            -p:FileVersion="${{ steps.ver.outputs.version }}"
+
+      - name: Package ZIP + MD5
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          V="${{ steps.ver.outputs.version }}"
+          ZIP="${{ steps.ver.outputs.zip }}"
+
+          rm -rf artifacts/package
+          mkdir -p artifacts/package
+
+          # Main plugin assembly
+          cp "artifacts/publish/YummyKodik.dll" artifacts/package/
+
+          if [[ -f "artifacts/publish/YummyKodik.deps.json" ]]; then
+            cp "artifacts/publish/YummyKodik.deps.json" artifacts/package/
+          fi
+
+          if [[ -f "YummyKodik/Assets/logo.svg" ]]; then
+            cp "YummyKodik/Assets/logo.svg" artifacts/package/
+          fi
+
+          # Third-party deps (add more here if you introduce them)
+          if [[ -f "artifacts/publish/HtmlAgilityPack.dll" ]]; then
+            cp "artifacts/publish/HtmlAgilityPack.dll" artifacts/package/
+          fi
+
+          # Optional symbols/docs (handy for debugging; safe to omit)
+          if [[ -f "artifacts/publish/YummyKodik.pdb" ]]; then
+            cp "artifacts/publish/YummyKodik.pdb" artifacts/package/
+          fi
+
+          (cd artifacts/package && zip -r "../${ZIP}" .)
+
+          # Jellyfin uses an MD5 checksum in manifests
+          md5sum "artifacts/${ZIP}" | awk '{print $1}' > "artifacts/${ZIP}.md5"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: ${{ steps.ver.outputs.tag }}
+          generate_release_notes: true
+          append_body: |
+
+            ## Install
+
+            - GitHub Pages manifest: `https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/manifest.json`
+            - Raw manifest: `https://raw.githubusercontent.com/${{ github.repository }}/gh-pages/manifest.json`
+          files: |
+            artifacts/${{ steps.ver.outputs.zip }}
+            artifacts/${{ steps.ver.outputs.zip }}.md5
+
+      - name: Generate / update manifest.json (for gh-pages)
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TAG="${{ steps.ver.outputs.tag }}"
+          VERSION="${{ steps.ver.outputs.version }}"
+          ZIP="${{ steps.ver.outputs.zip }}"
+          CHECKSUM="$(cat "artifacts/${ZIP}.md5")"
+          TS="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+
+          GUID="6801ee3f-27f2-4d4e-ab37-e569c025b7c5"
+          NAME="YummyKodik"
+          CATEGORY="General"
+          OWNER="${{ github.repository_owner }}"
+          DESCRIPTION="Creates Jellyfin anime series cards from YummyAnime and streams episodes from Kodik."
+          OVERVIEW="Builds a local STRM/NFO library from YummyAnime and plays episodes via Kodik."
+          TARGET_ABI="10.11.0.0"
+
+          SOURCE_URL="https://github.com/${{ github.repository }}/releases/download/${TAG}/${ZIP}"
+          CHANGELOG="https://github.com/${{ github.repository }}/releases/tag/${TAG}"
+          IMAGE_URL="https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/logo.svg"
+
+          mkdir -p site
+
+          # Fetch previous manifest from gh-pages (if it exists) so we keep older versions.
+          OLD_URL="https://raw.githubusercontent.com/${{ github.repository }}/gh-pages/manifest.json"
+          if curl -fsSL "$OLD_URL" -o site/manifest.old.json; then
+            echo "Loaded existing manifest from gh-pages."
+          else
+            echo "[] " > site/manifest.old.json
+          fi
+
+          jq \
+            --arg guid "$GUID" \
+            --arg category "$CATEGORY" \
+            --arg name "$NAME" \
+            --arg description "$DESCRIPTION" \
+            --arg owner "$OWNER" \
+            --arg overview "$OVERVIEW" \
+            --arg version "$VERSION" \
+            --arg changelog "$CHANGELOG" \
+            --arg targetAbi "$TARGET_ABI" \
+            --arg sourceUrl "$SOURCE_URL" \
+            --arg checksum "$CHECKSUM" \
+            --arg timestamp "$TS" \
+            --arg imageUrl "$IMAGE_URL" \
+            '
+            def ver: {
+              version: $version,
+              changelog: $changelog,
+              targetAbi: $targetAbi,
+              sourceUrl: $sourceUrl,
+              checksum: $checksum,
+              timestamp: $timestamp
+            };
+
+            def upsert_plugin($arr):
+              ($arr | map(
+                if .guid == $guid then
+                  .category = $category
+                  | .name = $name
+                  | .description = $description
+                  | .owner = $owner
+                  | .overview = $overview
+                  | .imageUrl = $imageUrl
+                  | .versions = ([ver] + ((.versions // []) | map(select(.version != $version))))
+                else .
+                end
+              )) as $updated
+              | if ($updated | any(.guid == $guid)) then
+                  $updated
+                else
+                  $updated + [{
+                    category: $category,
+                    guid: $guid,
+                    name: $name,
+                    description: $description,
+                    owner: $owner,
+                    overview: $overview,
+                    imageUrl: $imageUrl,
+                    versions: [ver]
+                  }]
+                end;
+
+            upsert_plugin(.)
+            ' site/manifest.old.json > site/manifest.json
+
+          cp "YummyKodik/Assets/logo.svg" site/logo.svg
+          cp "YummyKodik/Assets/wordmark.svg" site/wordmark.svg
+
+          cat > site/index.html <<'HTML'
+          <!doctype html>
+          <meta charset="utf-8" />
+          <title>YummyKodik Jellyfin plugin repository</title>
+          <h1>YummyKodik Jellyfin plugin repository</h1>
+          <p><img src="./wordmark.svg" alt="YummyKodik logo" width="420" /></p>
+          <p>Manifest: <a href="./manifest.json">manifest.json</a></p>
+          HTML
+
+      - name: Publish manifest to gh-pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_branch: gh-pages
+          publish_dir: site

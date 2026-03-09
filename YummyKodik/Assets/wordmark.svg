@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 360" role="img" aria-labelledby="title desc">
+  <title id="title">YummyKodik wordmark</title>
+  <desc id="desc">YummyKodik wordmark with blue Yummy and orange Kodik text next to the badge icon.</desc>
+  <defs>
+    <linearGradient id="wordBlue" x1="220" y1="120" x2="620" y2="240" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#19cfff"/>
+      <stop offset="1" stop-color="#0b78d4"/>
+    </linearGradient>
+    <linearGradient id="wordOrange" x1="618" y1="110" x2="928" y2="232" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffc93f"/>
+      <stop offset="1" stop-color="#ff8e00"/>
+    </linearGradient>
+  </defs>
+  <g transform="translate(0 10) scale(0.62)">
+    <rect x="56" y="100" width="400" height="312" rx="74" fill="#0e7fd7" stroke="#07266f" stroke-width="8"/>
+    <rect x="74" y="118" width="364" height="276" rx="58" fill="#0a2d66"/>
+    <path d="M118 194 216 256 118 318c-5 3-12 0-12-6V200c0-6 7-9 12-6Z" fill="#18d7f6"/>
+    <path d="M176 182h49l31 48 31-48h47l-55 84v90c0 10-8 18-18 18h-22c-10 0-18-8-18-18v-90l-45-68c-7-10 0-16 0-16Z" fill="#f5f7fb"/>
+    <path d="M320 180h39v72l57-72h63l-82 95 84 99h-60l-56-67v67h-45V180Z" fill="#0a234e" opacity="0.7"/>
+    <path d="M332 249 401 180h59l-81 83-34-14c-9-4-13-14-8-21Z" fill="#ffac17"/>
+    <path d="M357 302c6-7 16-8 23-1l56 54c6 6 2 19-7 19h-70c-9 0-14-11-8-18l6-8Z" fill="#14cbe6"/>
+    <path d="M353 206c4-5 10-8 16-8h6c8 0 12 10 6 16l-31 31c-4 4-10 6-16 4l-4-1c-7-3-9-11-4-17l27-25Z" fill="#ffbd2c"/>
+  </g>
+  <text x="320" y="228" font-size="132" font-weight="800" font-family="Segoe UI, Trebuchet MS, Arial, sans-serif" fill="url(#wordBlue)">Yummy</text>
+  <text x="615" y="228" font-size="132" font-weight="800" font-family="Segoe UI, Trebuchet MS, Arial, sans-serif" fill="url(#wordOrange)">Kodik</text>
+</svg>

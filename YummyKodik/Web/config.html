@@ -1,0 +1,318 @@
+﻿<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8" />
+    <title>YummyKodik</title>
+    <style>
+        .fieldDescription {
+            font-size: .75em;
+            line-height: 1.3;
+            opacity: .8;
+            margin-top: .35em;
+        }
+        .spaced-buttons {
+            margin-top: 1.1em;
+            display: flex;
+            flex-wrap: wrap;
+            gap: .6em;
+        }
+        .mini {
+            font-size: .7em;
+            opacity: .75;
+            margin-top: .35em;
+        }
+        .hr {
+            height: 1px;
+            background: rgba(255,255,255,.08);
+            margin: 16px 0;
+        }
+    </style>
+</head>
+<body>
+<div class="page type-interior pluginConfigurationPage"
+     data-role="page"
+     id="YummyKodikConfigPage">
+    <div data-role="content">
+        <div class="content-primary">
+
+            <form id="YummyKodikConfigurationForm">
+                <div class="verticalSection verticalSection-extrabottompadding">
+                    <div class="sectionTitleContainer flex align-items-center">
+                        <h2 class="sectionTitle">YummyKodik configuration</h2>
+                    </div>
+
+                    <div class="inputContainer">
+                        <label for="yummyClientId">Yummy public token (X-Application)</label>
+                        <input id="yummyClientId" is="emby-input" type="text" autocomplete="off" />
+                    </div>
+
+                    <div class="inputContainer">
+                        <label for="yummyApiBaseUrl">Yummy API base URL</label>
+                        <input id="yummyApiBaseUrl" is="emby-input" type="text" autocomplete="off" placeholder="https://api.yani.tv" />
+                        <div class="fieldDescription">
+                            Оставляй <b>https://api.yani.tv</b>, если не используешь зеркало.
+                        </div>
+                    </div>
+
+                    <div class="inputContainer">
+                        <label for="outputRootPath">Output root path</label>
+                        <input id="outputRootPath" is="emby-input" type="text" autocomplete="off" placeholder="/media/YummyKodik или D:\Media\YummyKodik" />
+                        <div class="fieldDescription">
+                            Путь на машине, где крутится Jellyfin, куда плагин будет писать структуру
+                            <code>Series/Season 01/*.strm</code> и <code>*.nfo</code>.
+                        </div>
+                    </div>
+
+                    <div class="inputContainer">
+                        <label for="serverBaseUrl">Jellyfin server base URL</label>
+                        <input id="serverBaseUrl" is="emby-input" type="text" autocomplete="off" placeholder="https://jellyfin.example.com или http://192.168.1.10:8096" />
+                        <div class="fieldDescription">
+                            Внешний адрес Jellyfin, который должен быть доступен клиенту во время воспроизведения.
+                            Не указывай <code>127.0.0.1</code>, если смотришь не с самого сервера.
+                        </div>
+                    </div>
+
+                    <div class="inputContainer">
+                        <label for="preferredTranslationFilter">Preferred translation filter</label>
+                        <input id="preferredTranslationFilter" is="emby-input" type="text" autocomplete="off" placeholder="AniLibria | SHIZA | Субтитры" />
+                        <div class="fieldDescription">
+                            Подстрока для приоритизации источников. Можно несколько через <code>|</code>.
+                        </div>
+                    </div>
+
+                    <div class="inputContainer">
+                        <label>
+                            <input id="createStrmPerVoiceTranslation" type="checkbox" />
+                            Create separate STRM for each voice translation
+                        </label>
+                        <div class="fieldDescription">
+                            Если включено, refresh будет создавать отдельные файлы на каждую озвучку, например
+                            <code>S01E01 - AniLibria.strm</code>. Внутри будет ссылка со своим <code>tr=...</code>.
+                        </div>
+                    </div>
+
+                    <div class="inputContainer" style="max-width:320px">
+                        <label for="preferredQuality">Preferred quality (360/480/720/1080)</label>
+                        <input id="preferredQuality" is="emby-input" type="number" min="1" step="1" placeholder="720" />
+                    </div>
+
+                    <div class="inputContainer">
+                        <label>
+                            <input id="enableHttpDebugLogging" type="checkbox" />
+                            Enable Kodik HTTP request debug logs
+                        </label>
+                        <div class="fieldDescription">
+                            Включает подробные логи HTTP запросов/ответов к Kodik (url, form, bodySnippet).
+                            Может быть шумно — включай только для дебага.
+                        </div>
+                    </div>
+
+                    <div class="inputContainer">
+                        <label for="slugs">Yummy slugs (one per line)</label>
+                        <textarea id="slugs" is="emby-textarea" rows="8" placeholder="one-slug-per-line"></textarea>
+                    </div>
+
+                    <div class="hr"></div>
+
+                    <div class="inputContainer">
+                        <label>
+                            <input id="useUserListSubscription" type="checkbox" />
+                            Use user list subscription
+                        </label>
+                        <div class="fieldDescription">
+                            Если включено, плагин будет подтягивать аниме из списка пользователя через API <code>/users/{id}/lists/{list_id}</code>.
+                            Для этого нужен user token.
+                        </div>
+                    </div>
+
+                    <div class="inputContainer" style="max-width:320px">
+                        <label for="yummyUserId">Yummy user ID</label>
+                        <input id="yummyUserId" is="emby-input" type="number" min="1" step="1" placeholder="219413" />
+                    </div>
+
+                    <div class="inputContainer" style="max-width:320px">
+                        <label for="yummyUserListId">Yummy list ID</label>
+                        <input id="yummyUserListId" is="emby-input" type="number" min="0" step="1" placeholder="0" />
+                    </div>
+
+                    <div class="inputContainer">
+                        <label for="yummyAccessToken">Yummy access token (optional)</label>
+                        <input id="yummyAccessToken" is="emby-input" type="text" autocomplete="off" />
+                        <div class="fieldDescription">
+                            Если указан, будет использован как <code>Authorization: Bearer</code>. Иначе плагин попробует логиниться по учётке ниже.
+                        </div>
+                    </div>
+
+                    <div class="inputContainer">
+                        <label for="yummyLogin">Yummy login (optional)</label>
+                        <input id="yummyLogin" is="emby-input" type="text" autocomplete="off" />
+                    </div>
+
+                    <div class="inputContainer">
+                        <label for="yummyPassword">Yummy password (optional)</label>
+                        <input id="yummyPassword" is="emby-input" type="password" autocomplete="off" />
+                        <div class="fieldDescription">
+                            Пароль будет сохранён в конфиге Jellyfin. Если это не ок, используй только токен.
+                        </div>
+                    </div>
+
+                    <div class="inputContainer">
+                        <label for="yummyRecaptchaResponse">reCAPTCHA response (optional)</label>
+                        <input id="yummyRecaptchaResponse" is="emby-input" type="text" autocomplete="off" />
+                        <div class="fieldDescription">
+                            Оставь пустым, если не требуется.
+                        </div>
+                    </div>
+
+                    <div class="hr"></div>
+
+                    <div class="inputContainer" style="max-width:320px">
+                        <label for="refreshIntervalMinutes">Refresh interval (minutes)</label>
+                        <input id="refreshIntervalMinutes" is="emby-input" type="number" min="1" step="1" placeholder="360" />
+                    </div>
+
+                    <div class="spaced-buttons">
+                        <button class="raised button-submit" data-theme="b" is="emby-button" type="submit">
+                            💾 <span>Save</span>
+                        </button>
+                        <button class="raised" id="BtnReloadCfg" is="emby-button" type="button">
+                            ⟳ <span>Reload</span>
+                        </button>
+                        <button class="raised button-cancel" is="emby-button" type="button">
+                            ✖ <span>Cancel</span>
+                        </button>
+                    </div>
+                    <div class="mini">Reload discards unsaved edits.</div>
+                </div>
+            </form>
+
+        </div>
+    </div>
+
+    <script type="text/javascript">
+        /* global ApiClient, Dashboard */
+        (function () {
+            const pluginId = "6801ee3f-27f2-4d4e-ab37-e569c025b7c5";
+            const $ = id => document.getElementById(id);
+
+            const DEFAULTS = {
+                YummyClientId: "e_y7qb7p9d_z1mdw",
+                YummyApiBaseUrl: "https://api.yani.tv",
+                OutputRootPath: "D:\\video\\YummyKodik",
+                ServerBaseUrl: "",
+                PreferredQuality: 720,
+                RefreshIntervalMinutes: 360,
+                UseUserListSubscription: false,
+                YummyUserId: 219413,
+                YummyUserListId: 0,
+                CreateStrmPerVoiceTranslation: false,
+                EnableHttpDebugLogging: false
+            };
+
+            function toast(text) {
+                try {
+                    if (Dashboard?.showToast) return Dashboard.showToast({ text });
+                } catch {}
+                try { Dashboard.alert({ message: text }); } catch {}
+            }
+
+            async function loadCfg(showToast = false) {
+                Dashboard.showLoadingMsg();
+                try {
+                    const cfg = await ApiClient.getPluginConfiguration(pluginId);
+
+                    $("yummyClientId").value = cfg.YummyClientId || DEFAULTS.YummyClientId;
+                    $("yummyApiBaseUrl").value = cfg.YummyApiBaseUrl || DEFAULTS.YummyApiBaseUrl;
+                    $("outputRootPath").value = cfg.OutputRootPath || DEFAULTS.OutputRootPath;
+                    $("serverBaseUrl").value = cfg.ServerBaseUrl || DEFAULTS.ServerBaseUrl;
+                    $("preferredTranslationFilter").value = cfg.PreferredTranslationFilter || "";
+                    $("createStrmPerVoiceTranslation").checked = !!cfg.CreateStrmPerVoiceTranslation;
+                    $("preferredQuality").value = cfg.PreferredQuality || DEFAULTS.PreferredQuality;
+
+                    $("enableHttpDebugLogging").checked = !!cfg.EnableHttpDebugLogging;
+
+                    $("refreshIntervalMinutes").value = cfg.RefreshIntervalMinutes || DEFAULTS.RefreshIntervalMinutes;
+                    $("slugs").value = (cfg.Slugs || []).join("\n");
+
+                    $("useUserListSubscription").checked = !!cfg.UseUserListSubscription;
+                    $("yummyUserId").value = cfg.YummyUserId || DEFAULTS.YummyUserId;
+                    $("yummyUserListId").value = (cfg.YummyUserListId ?? DEFAULTS.YummyUserListId);
+
+                    $("yummyAccessToken").value = cfg.YummyAccessToken || "";
+                    $("yummyLogin").value = cfg.YummyLogin || "";
+                    $("yummyPassword").value = cfg.YummyPassword || "";
+                    $("yummyRecaptchaResponse").value = cfg.YummyRecaptchaResponse || "";
+
+                    if (showToast) toast("Configuration reloaded");
+                } catch (e) {
+                    console.error("[YummyKodik] loadCfg error:", e);
+                    toast("Load error: " + (e?.message || e));
+                } finally {
+                    Dashboard.hideLoadingMsg();
+                }
+            }
+
+            async function saveCfg() {
+                Dashboard.showLoadingMsg();
+                try {
+                    const cfg = await ApiClient.getPluginConfiguration(pluginId);
+
+                    cfg.YummyClientId = ($("yummyClientId").value || "").trim();
+
+                    const apiBase = ($("yummyApiBaseUrl").value || "").trim();
+                    cfg.YummyApiBaseUrl = apiBase || DEFAULTS.YummyApiBaseUrl;
+
+                    const out = ($("outputRootPath").value || "").trim();
+                    cfg.OutputRootPath = out || DEFAULTS.OutputRootPath;
+
+                    cfg.ServerBaseUrl = ($("serverBaseUrl").value || "").trim();
+                    cfg.PreferredTranslationFilter = ($("preferredTranslationFilter").value || "").trim();
+                    cfg.CreateStrmPerVoiceTranslation = !!$("createStrmPerVoiceTranslation").checked;
+
+                    cfg.PreferredQuality = parseInt($("preferredQuality").value, 10) || DEFAULTS.PreferredQuality;
+
+                    cfg.EnableHttpDebugLogging = !!$("enableHttpDebugLogging").checked;
+
+                    cfg.RefreshIntervalMinutes = parseInt($("refreshIntervalMinutes").value, 10) || DEFAULTS.RefreshIntervalMinutes;
+
+                    const slugsRaw = $("slugs").value || "";
+                    cfg.Slugs = slugsRaw
+                        .split(/\r?\n/)
+                        .map(s => s.trim())
+                        .filter(Boolean);
+
+                    cfg.UseUserListSubscription = !!$("useUserListSubscription").checked;
+                    cfg.YummyUserId = parseInt($("yummyUserId").value, 10) || DEFAULTS.YummyUserId;
+                    cfg.YummyUserListId = parseInt($("yummyUserListId").value, 10);
+                    if (isNaN(cfg.YummyUserListId)) cfg.YummyUserListId = DEFAULTS.YummyUserListId;
+
+                    cfg.YummyAccessToken = ($("yummyAccessToken").value || "").trim();
+                    cfg.YummyLogin = ($("yummyLogin").value || "").trim();
+                    cfg.YummyPassword = ($("yummyPassword").value || "");
+                    cfg.YummyRecaptchaResponse = ($("yummyRecaptchaResponse").value || "").trim();
+
+                    const result = await ApiClient.updatePluginConfiguration(pluginId, cfg);
+                    Dashboard.processPluginConfigurationUpdateResult(result);
+
+                    await loadCfg(false);
+                    toast("Settings saved");
+                } catch (e) {
+                    console.error("[YummyKodik] saveCfg error:", e);
+                    toast("Save error: " + (e?.message || e));
+                } finally {
+                    Dashboard.hideLoadingMsg();
+                }
+            }
+
+            $("YummyKodikConfigPage").addEventListener("pageshow", () => loadCfg(false));
+            $("YummyKodikConfigurationForm").addEventListener("submit", e => {
+                e.preventDefault();
+                saveCfg();
+            });
+            $("BtnReloadCfg").addEventListener("click", () => loadCfg(true));
+            document.querySelector("#YummyKodikConfigPage .button-cancel").addEventListener("click", () => Dashboard.close());
+        })();
+    </script>
+</div>
+</body>
+</html>

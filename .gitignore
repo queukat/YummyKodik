@@ -1,0 +1,12 @@
+bin/
+obj/
+artifacts/
+.nuget-cache/
+.idea/
+.vs/
+*.user
+*.suo
+*.cache
+*.log
+Thumbs.db
+Desktop.ini
