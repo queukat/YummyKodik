@@ -129,6 +129,10 @@ git tag v1.0.0.0
 git push origin v1.0.0.0
 ```
 
+## Acknowledgements
+
+Special thanks to [`YaNesyTortiK/AnimeParsers`](https://github.com/YaNesyTortiK/AnimeParsers), which helped show that building a plugin like this was possible in the first place.
+
 ## Notes
 
 - The plugin targets Jellyfin `10.11.x`.
