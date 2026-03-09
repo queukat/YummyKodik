@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">YummyKodik logo</title>
+  <desc id="desc">Rounded blue badge with YK monogram, cyan play-shaped Y and orange skip-shaped K accent.</desc>
+  <defs>
+    <linearGradient id="frame" x1="56" y1="100" x2="456" y2="412" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#42e4ff"/>
+      <stop offset="1" stop-color="#0c7dd8"/>
+    </linearGradient>
+    <linearGradient id="panel" x1="74" y1="118" x2="438" y2="394" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0a66ac"/>
+      <stop offset="1" stop-color="#0a245f"/>
+    </linearGradient>
+    <linearGradient id="cyan" x1="116" y1="184" x2="224" y2="328" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#36f0ff"/>
+      <stop offset="1" stop-color="#0aa7d7"/>
+    </linearGradient>
+    <linearGradient id="orange" x1="332" y1="194" x2="452" y2="300" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffc83a"/>
+      <stop offset="1" stop-color="#ff9200"/>
+    </linearGradient>
+    <linearGradient id="cyanAccent" x1="352" y1="262" x2="444" y2="360" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#35ebff"/>
+      <stop offset="1" stop-color="#0d99d1"/>
+    </linearGradient>
+    <filter id="softShadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="8" stdDeviation="10" flood-color="#05153f" flood-opacity="0.4"/>
+    </filter>
+  </defs>
+
+  <g filter="url(#softShadow)">
+    <rect x="56" y="100" width="400" height="312" rx="74" fill="url(#frame)" stroke="#07266f" stroke-width="8"/>
+    <rect x="74" y="118" width="364" height="276" rx="58" fill="url(#panel)"/>
+
+    <path d="M89 135c16-18 38-29 61-29h238c17 0 33 4 47 11" fill="none" stroke="#79f4ff" stroke-linecap="round" stroke-width="8" opacity="0.7"/>
+
+    <path d="M118 194 216 256 118 318c-5 3-12 0-12-6V200c0-6 7-9 12-6Z" fill="url(#cyan)"/>
+
+    <path d="M176 182h49l31 48 31-48h47l-55 84v90c0 10-8 18-18 18h-22c-10 0-18-8-18-18v-90l-45-68c-7-10 0-16 0-16Z" fill="#f5f7fb"/>
+    <path d="M221 182h30l5 8-37 58-31-48c-7-10 0-16 0-16h33l13 21Z" fill="#dbe2ef" opacity="0.55"/>
+
+    <path d="M320 180h39v72l57-72h63l-82 95 84 99h-60l-56-67v67h-45V180Z" fill="#082c73" opacity="0.65"/>
+
+    <path d="M332 249 401 180h59l-81 83-34-14c-9-4-13-14-8-21Z" fill="url(#orange)"/>
+    <path d="M353 206c4-5 10-8 16-8h6c8 0 12 10 6 16l-31 31c-4 4-10 6-16 4l-4-1c-7-3-9-11-4-17l27-25Z" fill="#ffb31d"/>
+
+    <path d="M357 302c6-7 16-8 23-1l56 54c6 6 2 19-7 19h-70c-9 0-14-11-8-18l6-8Z" fill="url(#cyanAccent)"/>
+
+    <path d="M125 194c-5 3-8 8-8 14v87" fill="none" stroke="#9fffff" stroke-linecap="round" stroke-width="5" opacity="0.55"/>
+    <path d="M382 182h64" fill="none" stroke="#ffe57b" stroke-linecap="round" stroke-width="5" opacity="0.5"/>
+    <path d="M401 305 433 336" fill="none" stroke="#a7fcff" stroke-linecap="round" stroke-width="5" opacity="0.55"/>
+  </g>
+</svg>
