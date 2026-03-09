@@ -34,6 +34,10 @@ if [[ -f "$ROOT/artifacts/publish/YummyKodik.deps.json" ]]; then
   cp "$ROOT/artifacts/publish/YummyKodik.deps.json" "$ROOT/artifacts/package/"
 fi
 
+if [[ -f "$ROOT/YummyKodik/Assets/logo.png" ]]; then
+  cp "$ROOT/YummyKodik/Assets/logo.png" "$ROOT/artifacts/package/"
+fi
+
 if [[ -f "$ROOT/YummyKodik/Assets/logo.svg" ]]; then
   cp "$ROOT/YummyKodik/Assets/logo.svg" "$ROOT/artifacts/package/"
 fi

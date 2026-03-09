@@ -13,7 +13,7 @@ namespace YummyKodik.Configuration
     public sealed class PluginConfiguration : BasePluginConfiguration
     {
         /// <summary>
-        /// YummyAnime client identifier (from https://yummyani.me/dev/applications).
+        /// YummyAnime client identifier (from https://site.yummyani.me/dev/applications).
         /// This is the public application token (X-Application).
         /// </summary>
         public string YummyClientId { get; set; } = "e_y7qb7p9d_z1mdw";

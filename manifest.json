@@ -6,7 +6,7 @@
     "description": "Creates Jellyfin anime series cards from YummyAnime and streams episodes from Kodik.",
     "owner": "queukat",
     "overview": "Builds a local STRM/NFO library from YummyAnime and plays episodes via Kodik.",
-    "imageUrl": "https://queukat.github.io/YummyKodik/logo.svg",
+    "imageUrl": "https://raw.githubusercontent.com/queukat/YummyKodik/main/YummyKodik/Assets/logo.png",
     "versions": []
   }
 ]

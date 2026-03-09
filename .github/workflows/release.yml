@@ -86,6 +86,10 @@ jobs:
             cp "artifacts/publish/YummyKodik.deps.json" artifacts/package/
           fi
 
+          if [[ -f "YummyKodik/Assets/logo.png" ]]; then
+            cp "YummyKodik/Assets/logo.png" artifacts/package/
+          fi
+
           if [[ -f "YummyKodik/Assets/logo.svg" ]]; then
             cp "YummyKodik/Assets/logo.svg" artifacts/package/
           fi
@@ -142,7 +146,7 @@ jobs:
 
           SOURCE_URL="https://github.com/${{ github.repository }}/releases/download/${TAG}/${ZIP}"
           CHANGELOG="https://github.com/${{ github.repository }}/releases/tag/${TAG}"
-          IMAGE_URL="https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/logo.svg"
+          IMAGE_URL="https://raw.githubusercontent.com/${{ github.repository_owner }}/${{ github.event.repository.name }}/main/YummyKodik/Assets/logo.png"
 
           mkdir -p site
 
@@ -209,6 +213,9 @@ jobs:
             upsert_plugin(.)
             ' site/manifest.old.json > site/manifest.json
 
+          cp "YummyKodik/Assets/logo.png" site/logo.png
+          cp "YummyKodik/Assets/logo-mono.png" site/logo-mono.png
+          cp "YummyKodik/Assets/wordmark.png" site/wordmark.png
           cp "YummyKodik/Assets/logo.svg" site/logo.svg
           cp "YummyKodik/Assets/wordmark.svg" site/wordmark.svg
 
@@ -217,7 +224,7 @@ jobs:
           <meta charset="utf-8" />
           <title>YummyKodik Jellyfin plugin repository</title>
           <h1>YummyKodik Jellyfin plugin repository</h1>
-          <p><img src="./wordmark.svg" alt="YummyKodik logo" width="420" /></p>
+          <p><img src="./wordmark.png" alt="YummyKodik logo" width="420" /></p>
           <p>Manifest: <a href="./manifest.json">manifest.json</a></p>
           HTML
 

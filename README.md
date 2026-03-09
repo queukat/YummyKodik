@@ -1,15 +1,27 @@
 # YummyKodik
 
-![YummyKodik wordmark](YummyKodik/Assets/wordmark.svg)
+![YummyKodik wordmark](YummyKodik/Assets/wordmark.png)
 
+[![CI](https://img.shields.io/github/actions/workflow/status/queukat/YummyKodik/ci.yml?branch=main&label=CI)](https://github.com/queukat/YummyKodik/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/queukat/YummyKodik?display_name=tag)](https://github.com/queukat/YummyKodik/releases)
+[![Last Commit](https://img.shields.io/github/last-commit/queukat/YummyKodik)](https://github.com/queukat/YummyKodik/commits/main)
+[![Issues](https://img.shields.io/github/issues/queukat/YummyKodik)](https://github.com/queukat/YummyKodik/issues)
 ![Jellyfin 10.11](https://img.shields.io/badge/Jellyfin-10.11-00A4DC)
 ![.NET 9](https://img.shields.io/badge/.NET-9.0-512BD4)
 ![Library STRM+NFO](https://img.shields.io/badge/Library-STRM%20%2B%20NFO-orange)
 ![Playback HLS](https://img.shields.io/badge/Playback-HLS-2ea44f)
 ![Segments Intro/Outro](https://img.shields.io/badge/Segments-Intro%20%2F%20Outro-blue)
-![Releases GitHub Actions](https://img.shields.io/badge/Releases-GitHub%20Actions-black)
 
 Jellyfin plugin that builds a local anime library from YummyAnime and plays episodes from Kodik through generated `.strm` files.
+
+## Quick Links
+
+- Releases: `https://github.com/queukat/YummyKodik/releases`
+- Actions: `https://github.com/queukat/YummyKodik/actions`
+- Issues: `https://github.com/queukat/YummyKodik/issues`
+- GitHub Pages manifest: `https://queukat.github.io/YummyKodik/manifest.json`
+- Raw manifest: `https://raw.githubusercontent.com/queukat/YummyKodik/gh-pages/manifest.json`
+- Logo asset used by Jellyfin plugin catalog: `https://raw.githubusercontent.com/queukat/YummyKodik/main/YummyKodik/Assets/logo.png`
 
 ## What It Does
 
@@ -55,8 +67,16 @@ Use:
 Open:
 - `Dashboard -> Plugins -> My Plugins -> YummyKodik -> Settings`
 
+Before configuring the plugin, get your Yummy public token:
+
+1. Sign in to Yummy.
+2. Open `https://site.yummyani.me/dev/applications`
+3. Create an application or open an existing one.
+4. Copy the public token from the `X-Application` field.
+5. Paste it into the plugin setting `Yummy public token (X-Application)`.
+
 Main settings:
-- `Yummy public token (X-Application)`: get it from `https://yummyani.me/dev/applications`
+- `Yummy public token (X-Application)`: public API token from `https://site.yummyani.me/dev/applications`
 - `Output root path`: folder where the plugin writes the local library
 - `Jellyfin server base URL`: externally reachable Jellyfin base URL used to build playback URLs
 - `Preferred translation filter`: substring tokens separated by `|`, for example `anilibria|aniliberty`

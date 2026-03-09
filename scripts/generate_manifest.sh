@@ -45,7 +45,7 @@ TARGET_ABI="10.11.0.0"
 
 SOURCE_URL="https://github.com/${OWNER}/${REPO}/releases/download/${TAG}/${ZIP}"
 CHANGELOG="https://github.com/${OWNER}/${REPO}/releases/tag/${TAG}"
-IMAGE_URL="https://${OWNER}.github.io/${REPO}/logo.svg"
+IMAGE_URL="https://raw.githubusercontent.com/${OWNER}/${REPO}/main/YummyKodik/Assets/logo.png"
 TS="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
 cat > "$OUT" <<JSON

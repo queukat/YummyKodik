@@ -64,9 +64,9 @@ namespace YummyKodik
                     return;
                 }
 
-                var logoPath = Path.Combine(pluginDir, "logo.svg");
+                var logoPath = ResolveLocalLogoPath(pluginDir);
                 var metaPath = Path.Combine(pluginDir, "meta.json");
-                if (!File.Exists(logoPath) || !File.Exists(metaPath))
+                if (logoPath is null || !File.Exists(metaPath))
                 {
                     return;
                 }
@@ -94,8 +94,20 @@ namespace YummyKodik
             }
             catch (Exception ex)
             {
-                Logger.LogDebug(ex, "[YummyKodik] Failed to update local plugin meta.json with logo.svg path.");
+                Logger.LogDebug(ex, "[YummyKodik] Failed to update local plugin meta.json with logo path.");
             }
+        }
+
+        private static string? ResolveLocalLogoPath(string pluginDir)
+        {
+            var pngPath = Path.Combine(pluginDir, "logo.png");
+            if (File.Exists(pngPath))
+            {
+                return pngPath;
+            }
+
+            var svgPath = Path.Combine(pluginDir, "logo.svg");
+            return File.Exists(svgPath) ? svgPath : null;
         }
     }
 }

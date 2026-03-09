@@ -29,6 +29,7 @@
     </ItemGroup>
 
     <ItemGroup>
+        <None Include="Assets\logo.png" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" TargetPath="logo.png" />
         <None Include="Assets\logo.svg" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" TargetPath="logo.svg" />
     </ItemGroup>
 </Project>
