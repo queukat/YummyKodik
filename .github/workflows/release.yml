@@ -109,6 +109,40 @@ jobs:
           # Jellyfin uses an MD5 checksum in manifests
           md5sum "artifacts/${ZIP}" | awk '{print $1}' > "artifacts/${ZIP}.md5"
 
+      - name: Build release notes
+        id: notes
+        shell: bash
+        run: |
+          cat > release-notes.md <<'MARKDOWN'
+          ## What changed
+
+          - Added blended provider coverage across Alloha, CVH, and Kodik. Users choose the anime source and desired quality; the plugin combines all available provider data to create as many episode files as possible.
+          - Added provider failover: if an episode is missing from one provider, one provider has fewer episodes, or playback resolution fails, the plugin can use a neighboring provider instead.
+          - Added per-user voice selection on Jellyfin series pages. Choose a voice once, or switch back to Auto.
+          - Added optional per-voice STRM generation so Jellyfin can show separate episode versions for different voice translations.
+          - Added intro/outro media segments from Yummy/Kodik skip timings for Jellyfin clients that support skip actions.
+          - Added automatic Kodik token resolution and refresh, while keeping manual token override support.
+          - Improved season/title layout resolution using Yummy viewing order and Shikimori metadata, including specials and multi-season titles.
+          - Improved generated file maintenance: stale artifacts are cleaned up, equivalent translation names are normalized, and duplicate Kodik episode links are deduplicated.
+          - Fixed Docker/base-image compatibility by targeting Jellyfin 10.11.0 shared assemblies.
+          - Fixed Docker/server URL handling so a trailing slash in ServerBaseUrl does not create //YummyKodik playback URLs.
+          - Added Windows PowerShell packaging script, regression test runner, and CI coverage for the solution.
+
+          ## After updating
+
+          - Restart Jellyfin after the plugin update.
+          - Open YummyKodik settings and verify Output root path and Jellyfin server base URL.
+          - In Docker, use container paths such as /media/yummykodik, not Windows host paths.
+          - Run Scheduled Tasks -> YummyKodik library refresh after changing slugs, user-list settings, ServerBaseUrl, or per-voice STRM mode.
+          - Scan the Jellyfin library that points at the generated folder.
+          MARKDOWN
+
+          {
+            echo "body<<EOF"
+            cat release-notes.md
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -116,8 +150,9 @@ jobs:
           name: ${{ steps.ver.outputs.tag }}
           generate_release_notes: true
           append_body: |
+            ${{ steps.notes.outputs.body }}
 
-            ## Install
+            ## Install / update
 
             Raw manifest (works without GitHub Pages):
 
@@ -154,7 +189,7 @@ jobs:
           TARGET_ABI="10.11.0.0"
 
           SOURCE_URL="https://github.com/${{ github.repository }}/releases/download/${TAG}/${ZIP}"
-          CHANGELOG="https://github.com/${{ github.repository }}/releases/tag/${TAG}"
+          CHANGELOG="$(cat release-notes.md)"
           IMAGE_URL="https://raw.githubusercontent.com/${{ github.repository_owner }}/${{ github.event.repository.name }}/main/YummyKodik/Assets/logo.png"
 
           mkdir -p site

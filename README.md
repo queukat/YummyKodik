@@ -26,13 +26,28 @@ YummyKodik is a Jellyfin plugin that builds a local anime library from YummyAnim
 
 - Creates a local Jellyfin TV library layout with `tvshow.nfo`, `Season XX/*.nfo`, and `Season XX/*.strm`.
 - Reads anime from manually configured Yummy slugs or from a Yummy user list.
-- Uses Yummy video metadata first and generates provider-aware stream URLs for Alloha and CVH.
-- Falls back across compatible Yummy providers when a selected provider cannot serve an episode.
-- Uses Kodik search/player data when Yummy provider data is not enough.
+- Combines episode availability from three provider families under the hood: Alloha, CVH, and Kodik.
+- Generates as many episode files as it can from all available provider data, instead of assuming one player has complete coverage.
+- Uses the requested quality as a preference, then asks the selected provider for the best matching HLS stream.
+- Falls back to another provider when an episode is missing, a selected provider has fewer episodes, or playback resolution fails.
 - Resolves and caches a Kodik token automatically, with an optional manual token override.
 - Adds intro/outro media segments from Yummy/Kodik skip timings for Jellyfin clients that support skip actions.
 - Injects a small Jellyfin Web series-page widget where each user can choose a preferred voice translation or return to auto mode.
 - Can create one episode file per episode, or one episode file per voice translation.
+
+## Provider Blending
+
+Anime providers rarely have identical coverage. One player may already have four aired episodes, another may have two, and a third may have only one or a different set of voice translations. YummyKodik is built around that reality.
+
+During refresh, the plugin asks Yummy for provider metadata and builds a combined picture of what is currently playable. It prefers direct Yummy-backed providers first:
+
+- `Alloha`: usually the first generated provider when Yummy exposes enough Alloha data.
+- `CVH`: used alongside Alloha and as a fallback when CVH has better episode/voice coverage.
+- `Kodik`: used as a fallback and supplement when Yummy provider data is incomplete or a Kodik id is the best available route.
+
+The result is that normal setup has no provider picker to babysit. You configure the anime source and desired quality, then let the plugin do the coverage work across all three providers. If episode 4 exists only in Kodik, refresh can still create the episode file even when Alloha has fewer episodes. If playback for a generated Alloha or CVH URL fails at runtime, the stream endpoint tries neighboring providers before giving up.
+
+Voice selection follows the same idea. The plugin first honors an explicit per-user choice from the Jellyfin Web widget, then `Preferred translation filter`, then automatic fallback. In per-voice mode it creates separate files for available voice translations; in normal mode it keeps one episode file and resolves the best voice when you press play.
 
 ## Requirements
 
@@ -123,7 +138,7 @@ Main settings:
 - `Jellyfin server base URL`: base URL inserted into generated `.strm` files.
 - `Preferred translation filter`: preferred voice tokens separated by `|`, for example `anilibria|aniliberty|shiza`.
 - `Create separate STRM for each voice translation`: changes library layout from one file per episode to one file per voice.
-- `Preferred quality`: target quality, usually `720` or `1080`.
+- `Preferred quality`: target quality, usually `720` or `1080`; providers may return the nearest available stream.
 - `Yummy slugs`: one Yummy slug per line for manual mode.
 
 Optional settings:
@@ -220,9 +235,9 @@ After changing slugs, user-list settings, `Output root path`, `Jellyfin server b
 
 Playback URL types:
 
-- `provider=alloha`: builds an Alloha HLS session and proxies playlists/segments through `/YummyKodik/alloha-proxy`.
-- `provider=cvh`: builds a CVH HLS session and proxies nested playlists/segments through `/YummyKodik/cvh-proxy`.
-- `type=...&id=...`: legacy Kodik-backed URL mode.
+- `provider=alloha`: builds an Alloha HLS session and proxies playlists/segments through `/YummyKodik/alloha-proxy`; can fall back to CVH/Kodik-compatible data when needed.
+- `provider=cvh`: builds a CVH HLS session and proxies nested playlists/segments through `/YummyKodik/cvh-proxy`; can fall back to Alloha/Kodik-compatible data when needed.
+- `type=...&id=...`: Kodik-backed URL mode, used as legacy playback and as a supplement when provider coverage is incomplete.
 
 ## Build And Package
 

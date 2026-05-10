@@ -8,6 +8,7 @@ set -euo pipefail
 #     --owner queukat --repo YummyKodik \
 #     --tag v1.0.0.0 --version 1.0.0.0 \
 #     --zip YummyKodik_1.0.0.0.zip --md5 <md5> \
+#     --changelog-file release-notes.md \
 #     --out manifest.json
 
 OWNER=""
@@ -16,6 +17,7 @@ TAG=""
 VERSION=""
 ZIP=""
 MD5=""
+CHANGELOG_FILE=""
 OUT="manifest.json"
 
 while [[ $# -gt 0 ]]; do
@@ -26,6 +28,7 @@ while [[ $# -gt 0 ]]; do
     --version) VERSION="$2"; shift 2 ;;
     --zip) ZIP="$2"; shift 2 ;;
     --md5) MD5="$2"; shift 2 ;;
+    --changelog-file) CHANGELOG_FILE="$2"; shift 2 ;;
     --out) OUT="$2"; shift 2 ;;
     *) echo "Unknown arg: $1" >&2; exit 2 ;;
   esac
@@ -44,32 +47,58 @@ OVERVIEW="Builds a local STRM/NFO library from YummyAnime and plays episodes via
 TARGET_ABI="10.11.0.0"
 
 SOURCE_URL="https://github.com/${OWNER}/${REPO}/releases/download/${TAG}/${ZIP}"
-CHANGELOG="https://github.com/${OWNER}/${REPO}/releases/tag/${TAG}"
+if [[ -n "$CHANGELOG_FILE" ]]; then
+  CHANGELOG="$(cat "$CHANGELOG_FILE")"
+else
+  CHANGELOG="What changed:
+- Added blended provider coverage across Alloha, CVH, and Kodik. Users choose the anime source and desired quality; the plugin combines all available provider data to create as many episode files as possible.
+- Added provider failover: if an episode is missing from one provider, one provider has fewer episodes, or playback resolution fails, the plugin can use a neighboring provider instead.
+- Added per-user voice selection, optional per-voice STRM generation, and intro/outro media segments.
+- Added automatic Kodik token resolution and refresh while keeping manual token override support.
+- Improved season/title layout resolution, generated file maintenance, stale artifact cleanup, translation normalization, and duplicate Kodik link deduplication.
+- Fixed Docker/base-image compatibility by targeting Jellyfin 10.11.0 shared assemblies.
+- Fixed Docker/server URL handling so a trailing slash in ServerBaseUrl does not create //YummyKodik playback URLs.
+- Added Windows PowerShell packaging script, regression test runner, and CI coverage for the solution.
+
+After updating:
+- Restart Jellyfin.
+- Verify Output root path and Jellyfin server base URL.
+- In Docker, use container paths such as /media/yummykodik.
+- Run Scheduled Tasks -> YummyKodik library refresh and scan the Jellyfin library."
+fi
 IMAGE_URL="https://raw.githubusercontent.com/${OWNER}/${REPO}/main/YummyKodik/Assets/logo.png"
 TS="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
-cat > "$OUT" <<JSON
-[
-  {
-    "category": "${CATEGORY}",
-    "guid": "${GUID}",
-    "name": "${NAME}",
-    "description": "${DESCRIPTION}",
-    "owner": "${OWNER}",
-    "overview": "${OVERVIEW}",
-    "imageUrl": "${IMAGE_URL}",
-    "versions": [
-      {
-        "checksum": "${MD5}",
-        "changelog": "${CHANGELOG}",
-        "targetAbi": "${TARGET_ABI}",
-        "sourceUrl": "${SOURCE_URL}",
-        "timestamp": "${TS}",
-        "version": "${VERSION}"
-      }
-    ]
-  }
-]
-JSON
+jq -n \
+  --arg category "$CATEGORY" \
+  --arg guid "$GUID" \
+  --arg name "$NAME" \
+  --arg description "$DESCRIPTION" \
+  --arg owner "$OWNER" \
+  --arg overview "$OVERVIEW" \
+  --arg imageUrl "$IMAGE_URL" \
+  --arg checksum "$MD5" \
+  --arg changelog "$CHANGELOG" \
+  --arg targetAbi "$TARGET_ABI" \
+  --arg sourceUrl "$SOURCE_URL" \
+  --arg timestamp "$TS" \
+  --arg version "$VERSION" \
+  '[{
+    category: $category,
+    guid: $guid,
+    name: $name,
+    description: $description,
+    owner: $owner,
+    overview: $overview,
+    imageUrl: $imageUrl,
+    versions: [{
+      checksum: $checksum,
+      changelog: $changelog,
+      targetAbi: $targetAbi,
+      sourceUrl: $sourceUrl,
+      timestamp: $timestamp,
+      version: $version
+    }]
+  }]' > "$OUT"
 
 echo "Wrote: $OUT"
