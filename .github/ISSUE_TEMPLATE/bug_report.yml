@@ -1,0 +1,45 @@
+name: Bug report
+description: Report a reproducible YummyKodik plugin problem.
+title: "[Bug]: "
+labels: ["bug", "support"]
+body:
+  - type: input
+    id: plugin-version
+    attributes:
+      label: Plugin version
+      placeholder: "1.1.1.0"
+    validations:
+      required: true
+  - type: input
+    id: jellyfin-version
+    attributes:
+      label: Jellyfin version
+      placeholder: "10.11.x"
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Installation/update
+        - Library scan or metadata
+        - Playback
+        - Docker/container runtime
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Include provider/source, item title, and relevant configuration.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or diagnostics
+      description: Paste relevant Jellyfin/plugin logs after removing secrets.
+    validations:
+      required: true
