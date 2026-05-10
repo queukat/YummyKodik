@@ -1,5 +1,9 @@
 # YummyKodik
 
+<!-- public-repo-status -->
+> Status: Active Jellyfin plugin. Releases are published through GitHub Releases and the plugin manifest; issues are open for reproducible bugs and focused feature requests.
+
+
 ![YummyKodik wordmark](YummyKodik/Assets/wordmark.png)
 
 [![CI](https://img.shields.io/github/actions/workflow/status/queukat/YummyKodik/ci.yml?branch=main&label=CI)](https://github.com/queukat/YummyKodik/actions/workflows/ci.yml)
