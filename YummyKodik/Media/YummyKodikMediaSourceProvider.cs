@@ -6,6 +6,7 @@ using System.Linq;
 using System.Net.Http;
 using System.Threading;
 using System.Threading.Tasks;
+using YummyKodik.Alloha;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.LiveTv;
@@ -15,6 +16,7 @@ using Microsoft.Extensions.Logging;
 using YummyKodik.Configuration;
 using YummyKodik.Kodik;
 using YummyKodik.Util;
+using YummyKodik.Yummy;
 
 namespace YummyKodik.Media;
 
@@ -27,13 +29,16 @@ public sealed class YummyKodikMediaSourceProvider : IMediaSourceProvider
 
     private readonly ILogger<YummyKodikMediaSourceProvider> _logger;
     private readonly IHttpClientFactory _httpClientFactory;
+    private readonly AllohaPlaybackService _allohaPlaybackService;
 
     public YummyKodikMediaSourceProvider(
         ILogger<YummyKodikMediaSourceProvider> logger,
-        IHttpClientFactory httpClientFactory)
+        IHttpClientFactory httpClientFactory,
+        AllohaPlaybackService allohaPlaybackService)
     {
         _logger = logger;
         _httpClientFactory = httpClientFactory;
+        _allohaPlaybackService = allohaPlaybackService;
     }
 
     public string Name => "YummyKodik media source";
@@ -51,6 +56,18 @@ public sealed class YummyKodikMediaSourceProvider : IMediaSourceProvider
         if (!TryGetLogicalUri(item, out var uri))
         {
             return Array.Empty<MediaSourceInfo>();
+        }
+
+        if (YummyKodikStreamUri.TryParseRequest(uri, out var request) &&
+            request.Provider == YummyStreamProviderKind.Cvh)
+        {
+            return await GetCvhMediaSourcesAsync(item, request, cancellationToken).ConfigureAwait(false);
+        }
+
+        if (YummyKodikStreamUri.TryParseRequest(uri, out request) &&
+            request.Provider == YummyStreamProviderKind.Alloha)
+        {
+            return await GetAllohaMediaSourcesAsync(item, request, cancellationToken).ConfigureAwait(false);
         }
 
         if (!TryParseLogicalUri(uri, out var idType, out var id, out var episode, out var explicitTranslationId))
@@ -173,6 +190,150 @@ public sealed class YummyKodikMediaSourceProvider : IMediaSourceProvider
         return sources;
     }
 
+    private async Task<IEnumerable<MediaSourceInfo>> GetCvhMediaSourcesAsync(
+        BaseItem item,
+        YummyStreamRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (!request.Episode.HasValue || request.Episode.Value <= 0 || request.AnimeId <= 0)
+        {
+            return Array.Empty<MediaSourceInfo>();
+        }
+
+        var cfg = Plugin.Instance.Configuration;
+        var baseUrl = (cfg.ServerBaseUrl ?? string.Empty).Trim().TrimEnd('/');
+        if (string.IsNullOrEmpty(baseUrl))
+        {
+            _logger.LogWarning("ServerBaseUrl is not configured. CVH media sources will not be exposed.");
+            return Array.Empty<MediaSourceInfo>();
+        }
+
+        var episode = request.Episode.Value;
+        var catalog = await LoadYummyVideoCatalogAsync(cfg, request.AnimeId.ToString(), cancellationToken).ConfigureAwait(false);
+        var explicitVoiceName = (request.VoiceName ?? string.Empty).Trim();
+        var defaultVoiceName = catalog.PickPreferredVoiceName(
+            episode,
+            explicitVoiceName: string.Empty,
+            savedVoiceName: string.Empty,
+            preferredFilter: cfg.PreferredTranslationFilter,
+            out _);
+
+        if (!string.IsNullOrWhiteSpace(explicitVoiceName))
+        {
+            return new[]
+            {
+                BuildSource(
+                    itemId: item.Id.ToString(),
+                    episode: episode,
+                    suffix: "cvh-explicit",
+                    name: explicitVoiceName,
+                    url: YummyKodikStreamUri.BuildCvhHttpUrl(baseUrl, request.AnimeId, episode, explicitVoiceName) + "&format=hls",
+                    container: "m3u8",
+                    supportsDirectPlay: false,
+                    runTimeTicks: ToRunTimeTicks(catalog.GetDurationSeconds(episode, explicitVoiceName)))
+            };
+        }
+
+        var sources = new List<MediaSourceInfo>(8);
+        sources.Add(BuildSource(
+            itemId: item.Id.ToString(),
+            episode: episode,
+            suffix: "cvh-auto",
+            name: "Auto",
+            url: YummyKodikStreamUri.BuildCvhHttpUrl(baseUrl, request.AnimeId, episode) + "&format=hls",
+            container: "m3u8",
+            supportsDirectPlay: false,
+            runTimeTicks: ToRunTimeTicks(catalog.GetDurationSeconds(episode, defaultVoiceName))));
+
+        foreach (var voiceName in catalog.GetSupportedVoiceNames(episode))
+        {
+            sources.Add(BuildSource(
+                itemId: item.Id.ToString(),
+                episode: episode,
+                suffix: "cvh-" + SafeIdPart(voiceName),
+                name: voiceName,
+                url: YummyKodikStreamUri.BuildCvhHttpUrl(baseUrl, request.AnimeId, episode, voiceName) + "&format=hls",
+                container: "m3u8",
+                supportsDirectPlay: false,
+                runTimeTicks: ToRunTimeTicks(catalog.GetDurationSeconds(episode, voiceName))));
+        }
+
+        _logger.LogInformation(
+            "Provided {Count} CVH media sources for '{ItemName}' (episode {Episode}).",
+            sources.Count,
+            item.Name,
+            episode);
+
+        return sources;
+    }
+
+    private async Task<IEnumerable<MediaSourceInfo>> GetAllohaMediaSourcesAsync(
+        BaseItem item,
+        YummyStreamRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (!request.Episode.HasValue || request.Episode.Value <= 0 || request.AnimeId <= 0)
+        {
+            return Array.Empty<MediaSourceInfo>();
+        }
+
+        var cfg = Plugin.Instance.Configuration;
+        var baseUrl = (cfg.ServerBaseUrl ?? string.Empty).Trim().TrimEnd('/');
+        if (string.IsNullOrEmpty(baseUrl))
+        {
+            _logger.LogWarning("ServerBaseUrl is not configured. Alloha media sources will not be exposed.");
+            return Array.Empty<MediaSourceInfo>();
+        }
+
+        var episode = request.Episode.Value;
+        var catalog = await LoadYummyVideoCatalogAsync(cfg, request.AnimeId.ToString(), cancellationToken).ConfigureAwait(false);
+        var explicitVoiceName = (request.VoiceName ?? string.Empty).Trim();
+        var embeddedSource = TryGetEmbeddedAllohaSource(request, out var directSource) ? directSource : null;
+        var chosenVoiceName = catalog.PickPreferredVoiceName(
+            YummyVideoProviderKind.Alloha,
+            episode,
+            explicitVoiceName,
+            savedVoiceName: string.Empty,
+            preferredFilter: cfg.PreferredTranslationFilter,
+            out _);
+        var chosenEntry = catalog.FindPreferredPlayableEntry(YummyVideoProviderKind.Alloha, episode, chosenVoiceName)
+                          ?? catalog.FindPreferredPlayableEntry(YummyVideoProviderKind.Alloha, episode);
+
+        if (chosenEntry?.Alloha == null)
+        {
+            return Array.Empty<MediaSourceInfo>();
+        }
+
+        var voiceLabel = !string.IsNullOrWhiteSpace(explicitVoiceName)
+            ? explicitVoiceName
+            : !string.IsNullOrWhiteSpace(chosenEntry.DisplayVoiceName)
+                ? chosenEntry.DisplayVoiceName
+                : "Auto";
+
+        var url =
+            $"{baseUrl}/YummyKodik/stream?provider={YummyKodikStreamUri.AllohaProvider}" +
+            $"&animeId={request.AnimeId}&ep={episode}";
+
+        if (!string.IsNullOrWhiteSpace(explicitVoiceName))
+        {
+            url = YummyKodikStreamUri.BuildAllohaHttpUrl(baseUrl, request.AnimeId, episode, explicitVoiceName, embeddedSource);
+        }
+
+        return new[]
+        {
+            BuildSource(
+                itemId: item.Id.ToString(),
+                episode: episode,
+                suffix: "alloha-" + SafeIdPart(voiceLabel),
+                name: voiceLabel,
+                url: url + "&format=hls",
+                container: "m3u8",
+                supportsDirectPlay: false,
+                runTimeTicks: ToRunTimeTicks(catalog.GetDurationSeconds(YummyVideoProviderKind.Alloha, episode, voiceLabel)),
+                supportsProbing: false)
+        };
+    }
+
     private static MediaSourceInfo BuildSource(
         string itemId,
         int episode,
@@ -181,7 +342,9 @@ public sealed class YummyKodikMediaSourceProvider : IMediaSourceProvider
         string url,
         string container = "mp4",
         bool supportsDirectPlay = true,
-        long? runTimeTicks = null)
+        long? runTimeTicks = null,
+        IReadOnlyDictionary<string, string>? requiredHttpHeaders = null,
+        bool supportsProbing = true)
     {
         var source = new MediaSourceInfo
         {
@@ -196,7 +359,11 @@ public sealed class YummyKodikMediaSourceProvider : IMediaSourceProvider
             SupportsDirectPlay = supportsDirectPlay,
             SupportsDirectStream = true,
             SupportsTranscoding = true,
-            Name = name
+            SupportsProbing = supportsProbing,
+            Name = name,
+            RequiredHttpHeaders = requiredHttpHeaders != null
+                ? new Dictionary<string, string>(requiredHttpHeaders, StringComparer.OrdinalIgnoreCase)
+                : new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         };
 
         SetOptionalRunTimeTicks(source, runTimeTicks);
@@ -318,14 +485,20 @@ public sealed class YummyKodikMediaSourceProvider : IMediaSourceProvider
         string id,
         CancellationToken cancellationToken)
     {
-        var key = $"{idType.ToString().ToLowerInvariant()}:{(id ?? string.Empty).Trim()}".ToLowerInvariant();
+        var normalizedId = (id ?? string.Empty).Trim();
+        if (normalizedId.Length == 0)
+        {
+            return Array.Empty<KodikTranslation>();
+        }
+
+        var key = $"{idType.ToString().ToLowerInvariant()}:{normalizedId}".ToLowerInvariant();
 
         if (TranslationCache.TryGetValue(key, out var cached) && cached.ExpiresAtUtc > DateTime.UtcNow)
         {
             return cached.Translations;
         }
 
-        var loaded = await LoadTranslationsAsync(idType, id, cancellationToken).ConfigureAwait(false);
+        var loaded = await LoadTranslationsAsync(idType, normalizedId, cancellationToken).ConfigureAwait(false);
 
         TranslationCache[key] = new TranslationCacheEntry
         {
@@ -374,6 +547,29 @@ public sealed class YummyKodikMediaSourceProvider : IMediaSourceProvider
 
         uri = item.Path.Trim();
         return !string.IsNullOrEmpty(uri);
+    }
+
+    private async Task<YummyVideoCatalog> LoadYummyVideoCatalogAsync(
+        PluginConfiguration cfg,
+        string animeKey,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(cfg.YummyClientId))
+        {
+            throw new InvalidOperationException("YummyClientId is not configured.");
+        }
+
+        var http = _httpClientFactory.CreateClient(HttpClientNames.Yummy);
+        var yummy = new YummyClient(http, cfg.YummyClientId, cfg.YummyApiBaseUrl);
+        yummy.SetAccessToken(cfg.YummyAccessToken);
+
+        var anime = await yummy.GetAnimeAsync(animeKey, includeVideos: true, cancellationToken).ConfigureAwait(false);
+        var allohaApiHttp = _httpClientFactory.CreateClient(HttpClientNames.AllohaApi);
+        var allohaApiEntries = await AllohaApiCatalogLoader
+            .LoadEntriesAsync(cfg, anime, allohaApiHttp, _logger, cancellationToken)
+            .ConfigureAwait(false);
+
+        return YummyVideoCatalog.Create(anime, allohaApiEntries);
     }
 
     private async Task<long?> ResolveRunTimeTicksAsync(
@@ -507,6 +703,54 @@ public sealed class YummyKodikMediaSourceProvider : IMediaSourceProvider
             episode);
 
         return string.IsNullOrWhiteSpace(translationId) ? "0" : translationId.Trim();
+    }
+
+    private static string SafeIdPart(string value)
+    {
+        var chars = value
+            .Where(ch => char.IsLetterOrDigit(ch) || ch == '-' || ch == '_')
+            .ToArray();
+
+        return chars.Length == 0 ? "voice" : new string(chars);
+    }
+
+    private static long? ToRunTimeTicks(int? durationSeconds)
+    {
+        return durationSeconds.HasValue && durationSeconds.Value > 0
+            ? TimeSpan.FromSeconds(durationSeconds.Value).Ticks
+            : null;
+    }
+
+    private static bool TryGetEmbeddedAllohaSource(YummyStreamRequest request, out YummyAllohaSource source)
+    {
+        source = null!;
+
+        if (request == null ||
+            request.Provider != YummyStreamProviderKind.Alloha ||
+            request.AnimeId <= 0 ||
+            !request.Episode.HasValue ||
+            request.Episode.Value <= 0 ||
+            string.IsNullOrWhiteSpace(request.AllohaMovieToken) ||
+            string.IsNullOrWhiteSpace(request.AllohaRequestToken) ||
+            request.AllohaTranslationId <= 0 ||
+            request.AllohaSeasonNumber <= 0 ||
+            string.IsNullOrWhiteSpace(request.AllohaRefererUrl))
+        {
+            return false;
+        }
+
+        source = new YummyAllohaSource
+        {
+            MovieToken = request.AllohaMovieToken,
+            RequestToken = request.AllohaRequestToken,
+            TranslationId = request.AllohaTranslationId,
+            SeasonNumber = request.AllohaSeasonNumber,
+            EpisodeNumber = request.Episode.Value,
+            Hidden = request.AllohaHidden,
+            RefererUrl = request.AllohaRefererUrl
+        };
+
+        return true;
     }
 
     private static string BuildExplicitTranslationName(

@@ -6,7 +6,7 @@ using System.Text.RegularExpressions;
 namespace YummyKodik.Kodik
 {
     /// <summary>
-    /// Resolves Kodik ID and ID type for a given anime title using kodikapi.com/search.
+    /// Resolves Kodik ID and ID type for a given anime title using kodik-api.com/search.
     /// </summary>
     public static class KodikTitleResolver
     {
@@ -23,7 +23,7 @@ namespace YummyKodik.Kodik
             using var http = new HttpClient();
 
             var token = await KodikTokenProvider.GetTokenAsync(http, cancellationToken).ConfigureAwait(false);
-            var uri = $"https://kodikapi.com/search?token={Uri.EscapeDataString(token)}&title={Uri.EscapeDataString(title)}";
+            var uri = $"https://kodik-api.com/search?token={Uri.EscapeDataString(token)}&title={Uri.EscapeDataString(title)}";
 
             using var resp = await http.GetAsync(uri, cancellationToken).ConfigureAwait(false);
             var json = await resp.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);

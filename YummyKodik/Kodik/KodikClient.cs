@@ -21,7 +21,8 @@ namespace YummyKodik.Kodik
     /// </summary>
     public sealed class KodikClient
     {
-        private const string KodikSearchUrl = "https://kodikapi.com/search";
+        private const string KodikSearchUrl = "https://kodik-api.com/search";
+        private const string KodikPlayerBaseUrl = "https://kodikplayer.com";
 
         // Verbose HTTP logging settings.
         private const int HttpLogBodyMaxLen = 1500;
@@ -56,6 +57,14 @@ namespace YummyKodik.Kodik
             };
         }
 
+        public KodikClient(HttpClient httpClient, string token, ILogger? logger, Func<bool> isHttpLogEnabled)
+        {
+            _httpClient = httpClient ?? throw new ArgumentNullException(nameof(httpClient));
+            _token = token ?? throw new ArgumentNullException(nameof(token));
+            _logger = logger;
+            _isHttpLogEnabled = isHttpLogEnabled ?? throw new ArgumentNullException(nameof(isHttpLogEnabled));
+        }
+
         /// <summary>
         /// Returns number of episodes and available translations for a given anime id.
         /// Prefer Kodik search endpoint because player page HTML changes frequently.
@@ -83,14 +92,17 @@ namespace YummyKodik.Kodik
                 var maxEpisode = 0;
 
                 // builder to accumulate per-translation info without mutating init-only model
-                var translationsMap = new Dictionary<string, (string Id, string Name, string Type, int MaxEp)>(StringComparer.Ordinal);
+                var translationsMap = new Dictionary<string, (string Id, string Name, string Type, int MaxEp, HashSet<int> Episodes)>(StringComparer.Ordinal);
 
                 foreach (var r in results)
                 {
                     var epCount = r.EpisodesCount.GetValueOrDefault(0);
                     var lastEp = r.LastEpisode.GetValueOrDefault(0);
+                    var explicitEpisodes = ExtractAvailableEpisodes(r);
 
-                    var epMax = Math.Max(epCount, lastEp);
+                    var epMax = explicitEpisodes.Count > 0
+                        ? explicitEpisodes.Max()
+                        : Math.Max(epCount, lastEp);
                     maxEpisode = Math.Max(maxEpisode, epMax);
 
                     var tr = r.Translation;
@@ -113,7 +125,7 @@ namespace YummyKodik.Kodik
 
                     if (!translationsMap.TryGetValue(key, out var cur))
                     {
-                        translationsMap[key] = (tid, tname, ttype, epMax);
+                        translationsMap[key] = (tid, tname, ttype, epMax, explicitEpisodes);
                     }
                     else
                     {
@@ -121,8 +133,9 @@ namespace YummyKodik.Kodik
                         var mergedName = string.IsNullOrWhiteSpace(cur.Name) ? tname : cur.Name;
                         var mergedType = string.IsNullOrWhiteSpace(cur.Type) ? ttype : cur.Type;
                         var mergedMax = Math.Max(cur.MaxEp, epMax);
+                        cur.Episodes.UnionWith(explicitEpisodes);
 
-                        translationsMap[key] = (mergedId, mergedName, mergedType, mergedMax);
+                        translationsMap[key] = (mergedId, mergedName, mergedType, mergedMax, cur.Episodes);
                     }
                 }
 
@@ -132,7 +145,10 @@ namespace YummyKodik.Kodik
                         Id = x.Id ?? string.Empty,
                         Name = x.Name ?? string.Empty,
                         Type = x.Type ?? string.Empty,
-                        MaxEpisode = x.MaxEp
+                        MaxEpisode = x.MaxEp,
+                        AvailableEpisodes = x.Episodes.Count > 0
+                            ? x.Episodes.OrderBy(ep => ep).ToArray()
+                            : Array.Empty<int>()
                     })
                     .Where(t => !string.IsNullOrWhiteSpace(t.Id) || !string.IsNullOrWhiteSpace(t.Name))
                     .ToList();
@@ -155,58 +171,67 @@ namespace YummyKodik.Kodik
 
                 return new KodikAnimeInfo(maxEpisode, translations);
             }
+            catch (KodikNoResultsException)
+            {
+                // Zero search hits are common for announcements and freshly added titles.
+                // Keep the fallback, but do not spam warning-level stack traces.
+                _logger?.LogInformation(
+                    "Kodik search returned no results, falling back to player HTML parsing. idType={IdType} id={Id}",
+                    idType,
+                    id);
+            }
             catch (Exception ex) when (ex is KodikException or HttpRequestException or TaskCanceledException or JsonException)
             {
                 // Fallback to old HTML parsing if search fails.
                 _logger?.LogWarning(ex, "Kodik search failed, falling back to player HTML parsing. idType={IdType} id={Id}", idType, id);
-
-                var playerUrl = await GetPlayerPageUrlAsync(id, idType, cancellationToken).ConfigureAwait(false);
-                var html = await GetStringAsync(playerUrl, cancellationToken).ConfigureAwait(false);
-
-                var doc = new HtmlDocument();
-                doc.LoadHtml(html);
-
-                var isSerial = IsSerialUrl(playerUrl);
-                var seriesCount = 0;
-                var translations = new List<KodikTranslation>();
-
-                if (isSerial)
-                {
-                    var seriesSelect = doc.DocumentNode
-                        .SelectSingleNode("//div[contains(@class,'serial-series-box')]//select");
-
-                    if (seriesSelect != null)
-                    {
-                        var episodeOptions = seriesSelect.SelectNodes(".//option");
-                        seriesCount = episodeOptions?.Count ?? 0;
-                    }
-
-                    translations.AddRange(ParseTranslations(doc, "//div[contains(@class,'serial-translations-box')]//select"));
-                }
-                else
-                {
-                    translations.AddRange(ParseTranslations(doc, "//div[contains(@class,'movie-translations-box')]//select"));
-                }
-
-                if (translations.Count == 0)
-                {
-                    translations.Add(new KodikTranslation
-                    {
-                        Id = "0",
-                        Name = "Unknown",
-                        Type = "unknown",
-                        MaxEpisode = seriesCount
-                    });
-                }
-
-                _logger?.LogInformation(
-                    "Kodik.GetAnimeInfoAsync done (html). isSerial={IsSerial} seriesCount={SeriesCount} translations={TrCount}",
-                    isSerial,
-                    seriesCount,
-                    translations.Count);
-
-                return new KodikAnimeInfo(seriesCount, translations);
             }
+
+            var playerUrl = await GetPlayerPageUrlAsync(id, idType, cancellationToken).ConfigureAwait(false);
+            var html = await GetStringAsync(playerUrl, cancellationToken).ConfigureAwait(false);
+
+            var doc = new HtmlDocument();
+            doc.LoadHtml(html);
+
+            var isSerial = IsSerialUrl(playerUrl);
+            var seriesCount = 0;
+            var htmlTranslations = new List<KodikTranslation>();
+
+            if (isSerial)
+            {
+                var seriesSelect = doc.DocumentNode
+                    .SelectSingleNode("//div[contains(@class,'serial-series-box')]//select");
+
+                if (seriesSelect != null)
+                {
+                    var episodeOptions = seriesSelect.SelectNodes(".//option");
+                    seriesCount = episodeOptions?.Count ?? 0;
+                }
+
+                htmlTranslations.AddRange(ParseTranslations(doc, "//div[contains(@class,'serial-translations-box')]//select"));
+            }
+            else
+            {
+                htmlTranslations.AddRange(ParseTranslations(doc, "//div[contains(@class,'movie-translations-box')]//select"));
+            }
+
+            if (htmlTranslations.Count == 0)
+            {
+                htmlTranslations.Add(new KodikTranslation
+                {
+                    Id = "0",
+                    Name = "Unknown",
+                    Type = "unknown",
+                    MaxEpisode = seriesCount
+                });
+            }
+
+            _logger?.LogInformation(
+                "Kodik.GetAnimeInfoAsync done (html). isSerial={IsSerial} seriesCount={SeriesCount} translations={TrCount}",
+                isSerial,
+                seriesCount,
+                htmlTranslations.Count);
+
+            return new KodikAnimeInfo(seriesCount, htmlTranslations);
         }
 
         /// <summary>
@@ -235,14 +260,14 @@ namespace YummyKodik.Kodik
                 throw new ArgumentOutOfRangeException(nameof(episode), "Episode must be non negative.");
             }
 
-            _logger?.LogInformation(
+            _logger?.LogDebug(
                 "Kodik.GetEpisodeLinkAsync: idType={IdType} id={Id} episode={Episode} tr={TrId}",
                 idType,
                 id,
                 episode,
                 translationId);
 
-            var playerPage = await GetEpisodePlayerPageAsync(
+            var playerUrls = await GetEpisodePlayerPageUrlCandidatesAsync(
                     id,
                     idType,
                     episode,
@@ -250,6 +275,57 @@ namespace YummyKodik.Kodik
                     cancellationToken)
                 .ConfigureAwait(false);
 
+            Exception? lastCandidateError = null;
+
+            foreach (var playerUrl in playerUrls)
+            {
+                try
+                {
+                    return await ResolveLinkFromPlayerUrlAsync(playerUrl, cancellationToken).ConfigureAwait(false);
+                }
+                catch (Exception ex) when (IsRetriablePlayerCandidateException(ex, cancellationToken))
+                {
+                    lastCandidateError = ex;
+
+                    _logger?.LogWarning(
+                        ex,
+                        "Kodik player candidate failed. type={Type} id={Id} episode={Episode} tr={TrId} url={Url}",
+                        idType,
+                        id,
+                        episode,
+                        translationId,
+                        SanitizeUrl(playerUrl));
+                }
+            }
+
+            throw lastCandidateError != null
+                ? new KodikServiceException("All Kodik player link candidates failed.", lastCandidateError)
+                : new KodikServiceException("All Kodik player link candidates failed.");
+        }
+
+        public async Task<KodikLinkInfo> GetPlayerLinkAsync(
+            string playerUrl,
+            int episode,
+            CancellationToken cancellationToken = default)
+        {
+            if (string.IsNullOrWhiteSpace(playerUrl))
+            {
+                throw new ArgumentException("Player url must be non empty.", nameof(playerUrl));
+            }
+
+            var absolute = EnsureAbsoluteKodikUrl(playerUrl);
+            var requestUrl = episode > 0 && IsEpisodeContainerUrl(absolute)
+                ? BuildSerialEpisodeUrlFromPlayerUrl(absolute, episode)
+                : absolute;
+
+            return await ResolveLinkFromPlayerUrlAsync(requestUrl, cancellationToken).ConfigureAwait(false);
+        }
+
+        private async Task<KodikLinkInfo> ResolveLinkFromPlayerUrlAsync(
+            string playerUrl,
+            CancellationToken cancellationToken)
+        {
+            var playerPage = await GetPlayerPageDocumentAsync(playerUrl, cancellationToken).ConfigureAwait(false);
             var urlParams = ExtractUrlParams(playerPage.Html);
             var (videoType, videoHash, videoId) = ExtractVideoData(playerPage.Document, playerPage.RequestUrl);
             var scriptUrls = ExtractScriptSrcCandidates(playerPage.Document);
@@ -277,7 +353,7 @@ namespace YummyKodik.Kodik
 
             var basePath = directUrl.Substring(0, lastSlash + 1);
 
-            _logger?.LogInformation(
+            _logger?.LogDebug(
                 "Kodik link resolved. basePath={BasePath} maxQ={MaxQ}",
                 Short(basePath, 200),
                 linkData.MaxQuality);
@@ -412,51 +488,98 @@ namespace YummyKodik.Kodik
                 throw new ArgumentOutOfRangeException(nameof(episode), "Episode must be non negative.");
             }
 
-            string playerUrl;
+            var candidates = await GetEpisodePlayerPageUrlCandidatesAsync(
+                    id,
+                    idType,
+                    episode,
+                    translationId,
+                    cancellationToken)
+                .ConfigureAwait(false);
+
+            return await GetPlayerPageDocumentAsync(candidates[0], cancellationToken).ConfigureAwait(false);
+        }
+
+        private async Task<List<string>> GetEpisodePlayerPageUrlCandidatesAsync(
+            string id,
+            KodikIdType idType,
+            int episode,
+            string translationId,
+            CancellationToken cancellationToken)
+        {
+            var result = new List<string>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            void AddCandidate(string? raw)
+            {
+                if (string.IsNullOrWhiteSpace(raw))
+                {
+                    return;
+                }
+
+                var absolute = EnsureAbsoluteKodikUrl(raw);
+                var requestUrl = episode > 0 && IsEpisodeContainerUrl(absolute)
+                    ? BuildSerialEpisodeUrlFromPlayerUrl(absolute, episode)
+                    : absolute;
+
+                if (seen.Add(requestUrl))
+                {
+                    result.Add(requestUrl);
+                }
+            }
 
             if (translationId == "0")
             {
-                playerUrl = await GetPlayerPageUrlAsync(id, idType, cancellationToken).ConfigureAwait(false);
+                AddCandidate(await GetPlayerPageUrlAsync(id, idType, cancellationToken).ConfigureAwait(false));
+                return result;
             }
-            else
+
+            var results = await SearchAsync(id, idType, cancellationToken).ConfigureAwait(false);
+            if (results.Count == 0)
             {
-                var results = await SearchAsync(id, idType, cancellationToken).ConfigureAwait(false);
-                if (results.Count == 0)
-                {
-                    throw new KodikNoResultsException($"Kodik search returned no results for {idType} id {id}.");
-                }
-
-                KodikSearchResult? hit = null;
-
-                foreach (var r in results)
-                {
-                    var trId = r.Translation?.Id.HasValue == true
-                        ? r.Translation!.Id!.Value.ToString(CultureInfo.InvariantCulture)
-                        : string.Empty;
-
-                    if (string.Equals(trId, translationId, StringComparison.Ordinal))
-                    {
-                        hit = r;
-                        break;
-                    }
-                }
-
-                hit ??= results.FirstOrDefault();
-
-                if (hit == null || string.IsNullOrWhiteSpace(hit.Link))
-                {
-                    throw new KodikNoResultsException($"Kodik search did not return usable player link for {idType} id {id}.");
-                }
-
-                playerUrl = EnsureAbsoluteKodikUrl(hit.Link);
+                throw new KodikNoResultsException($"Kodik search returned no results for {idType} id {id}.");
             }
 
-            var requestUrl = playerUrl;
-            if (IsSerialUrl(playerUrl) && episode > 0)
+            KodikSearchResult? hit = null;
+
+            foreach (var r in results)
             {
-                requestUrl = BuildSerialEpisodeUrlFromPlayerUrl(playerUrl, episode);
+                var trId = r.Translation?.Id.HasValue == true
+                    ? r.Translation!.Id!.Value.ToString(CultureInfo.InvariantCulture)
+                    : string.Empty;
+
+                if (string.Equals(trId, translationId, StringComparison.Ordinal))
+                {
+                    hit = r;
+                    break;
+                }
             }
 
+            hit ??= results.FirstOrDefault();
+
+            if (hit == null || string.IsNullOrWhiteSpace(hit.Link))
+            {
+                throw new KodikNoResultsException($"Kodik search did not return usable player link for {idType} id {id}.");
+            }
+
+            if (TryGetEpisodePlayerLink(hit, episode, out var episodePlayerLink))
+            {
+                AddCandidate(episodePlayerLink);
+            }
+
+            AddCandidate(hit.Link);
+
+            if (result.Count == 0)
+            {
+                throw new KodikNoResultsException($"Kodik search did not return usable player link for {idType} id {id}.");
+            }
+
+            return result;
+        }
+
+        private async Task<(string RequestUrl, string Html, HtmlDocument Document)> GetPlayerPageDocumentAsync(
+            string requestUrl,
+            CancellationToken cancellationToken)
+        {
             var html = await GetStringAsync(requestUrl, cancellationToken).ConfigureAwait(false);
 
             var doc = new HtmlDocument();
@@ -470,36 +593,33 @@ namespace YummyKodik.Kodik
             KodikIdType idType,
             CancellationToken cancellationToken)
         {
-            var builder = new StringBuilder("https://kodikapi.com/get-player?title=Player&hasPlayer=false&url=");
+            var builder = new StringBuilder(KodikPlayerBaseUrl + "/find-player?");
 
             switch (idType)
             {
                 case KodikIdType.Shikimori:
-                    builder.Append($"https%3A%2F%2Fkodikdb.com%2Ffind-player%3FshikimoriID%3D{id}");
-                    builder.Append("&token=");
-                    builder.Append(Uri.EscapeDataString(_token));
-                    builder.Append("&shikimoriID=");
+                    builder.Append("shikimoriID=");
                     builder.Append(Uri.EscapeDataString(id));
                     break;
 
                 case KodikIdType.Kinopoisk:
-                    builder.Append($"https%3A%2F%2Fkodikdb.com%2Ffind-player%3FkinopoiskID%3D{id}");
-                    builder.Append("&token=");
-                    builder.Append(Uri.EscapeDataString(_token));
-                    builder.Append("&kinopoiskID=");
+                    builder.Append("kinopoiskID=");
                     builder.Append(Uri.EscapeDataString(id));
                     break;
 
                 case KodikIdType.Imdb:
-                    builder.Append($"https%3A%2F%2Fkodikdb.com%2Ffind-player%3FimdbID%3D{id}");
-                    builder.Append("&token=");
-                    builder.Append(Uri.EscapeDataString(_token));
-                    builder.Append("&imdbID=");
+                    builder.Append("imdbID=");
                     builder.Append(Uri.EscapeDataString(id));
                     break;
 
                 default:
                     throw new ArgumentOutOfRangeException(nameof(idType), idType, "Unknown id type.");
+            }
+
+            if (!string.IsNullOrWhiteSpace(_token))
+            {
+                builder.Append("&token=");
+                builder.Append(Uri.EscapeDataString(_token));
             }
 
             var requestUrl = builder.ToString();
@@ -538,6 +658,30 @@ namespace YummyKodik.Kodik
 
                 throw new KodikServiceException(
                     $"Unexpected status code {response.StatusCode} while calling get-player.");
+            }
+
+            if (LooksLikeHtmlResponse(response, content))
+            {
+                var finalUrl = response.RequestMessage?.RequestUri?.ToString();
+                var resolvedHtmlUrl = !string.IsNullOrWhiteSpace(finalUrl) ? finalUrl : requestUrl;
+
+                if (!string.Equals(resolvedHtmlUrl, requestUrl, StringComparison.OrdinalIgnoreCase) ||
+                    LooksLikePlayerPageHtml(content))
+                {
+                    _logger?.LogInformation(
+                        "Kodik get-player returned HTML page. requestUrl={RequestUrl} finalUrl={FinalUrl}",
+                        SanitizeUrl(requestUrl),
+                        SanitizeUrl(resolvedHtmlUrl));
+
+                    return resolvedHtmlUrl;
+                }
+
+                _logger?.LogDebug(
+                    "Kodik get-player returned HTML that does not look like a player page. url={Url} bodySnippet={Body}",
+                    SanitizeUrl(requestUrl),
+                    Short(content, 350));
+
+                throw new KodikUnexpectedException("Kodik get-player returned HTML instead of JSON.");
             }
 
             using var document = JsonDocument.Parse(content);
@@ -587,11 +731,51 @@ namespace YummyKodik.Kodik
             return resolved;
         }
 
-        private static bool IsSerialUrl(string url)
+        private static bool LooksLikeHtmlResponse(HttpResponseMessage response, string content)
         {
+            var mediaType = response.Content.Headers.ContentType?.MediaType;
+            if (!string.IsNullOrWhiteSpace(mediaType) &&
+                mediaType.IndexOf("html", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return true;
+            }
+
+            var trimmed = (content ?? string.Empty).TrimStart();
+            return trimmed.StartsWith("<!DOCTYPE html", StringComparison.OrdinalIgnoreCase) ||
+                   trimmed.StartsWith("<html", StringComparison.OrdinalIgnoreCase) ||
+                   trimmed.StartsWith("<", StringComparison.Ordinal);
+        }
+
+        private static bool LooksLikePlayerPageHtml(string html)
+        {
+            if (string.IsNullOrWhiteSpace(html))
+            {
+                return false;
+            }
+
+            return html.IndexOf("serial-series-box", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   html.IndexOf("serial-translations-box", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   html.IndexOf("movie-translations-box", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private static bool IsSerialUrl(string url) => IsEpisodeContainerUrl(url);
+
+        private static bool IsEpisodeContainerUrl(string url)
+        {
+            if (!Uri.TryCreate(url, UriKind.Absolute, out var uri))
+            {
+                return false;
+            }
+
+            var path = uri.AbsolutePath.TrimStart('/');
+            if (path.StartsWith("serial/", StringComparison.OrdinalIgnoreCase) ||
+                path.StartsWith("season/", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
             const string marker = ".info/";
             var index = url.IndexOf(marker, StringComparison.Ordinal);
-
             if (index < 0 || index + marker.Length >= url.Length)
             {
                 return false;
@@ -619,8 +803,8 @@ namespace YummyKodik.Kodik
 
             foreach (var option in optionNodes)
             {
-                var valueId = option.GetAttributeValue("value", null);
-                var dataId = option.GetAttributeValue("data-id", null);
+                var valueId = option.GetAttributeValue("value", string.Empty);
+                var dataId = option.GetAttributeValue("data-id", string.Empty);
 
                 var translationId = !string.IsNullOrWhiteSpace(valueId)
                     ? valueId
@@ -707,6 +891,57 @@ namespace YummyKodik.Kodik
             };
 
             return rebuilt.Uri.ToString();
+        }
+
+        private static bool TryGetEpisodePlayerLink(KodikSearchResult result, int episode, out string playerUrl)
+        {
+            playerUrl = string.Empty;
+
+            if (episode <= 0 || result.Seasons == null || result.Seasons.Count == 0)
+            {
+                return false;
+            }
+
+            var episodeKey = episode.ToString(CultureInfo.InvariantCulture);
+
+            if (result.LastSeason.HasValue && result.LastSeason.Value > 0)
+            {
+                var lastSeasonKey = result.LastSeason.Value.ToString(CultureInfo.InvariantCulture);
+                if (TryGetEpisodePlayerLink(result.Seasons, lastSeasonKey, episodeKey, out playerUrl))
+                {
+                    return true;
+                }
+            }
+
+            foreach (var seasonKey in result.Seasons.Keys.OrderBy(x => x, StringComparer.Ordinal))
+            {
+                if (TryGetEpisodePlayerLink(result.Seasons, seasonKey, episodeKey, out playerUrl))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static bool TryGetEpisodePlayerLink(
+            IReadOnlyDictionary<string, KodikSearchSeason> seasons,
+            string seasonKey,
+            string episodeKey,
+            out string playerUrl)
+        {
+            playerUrl = string.Empty;
+
+            if (!seasons.TryGetValue(seasonKey, out var season) ||
+                season?.Episodes == null ||
+                !season.Episodes.TryGetValue(episodeKey, out var episode) ||
+                string.IsNullOrWhiteSpace(episode?.Link))
+            {
+                return false;
+            }
+
+            playerUrl = EnsureAbsoluteKodikUrl(episode.Link);
+            return !string.IsNullOrWhiteSpace(playerUrl);
         }
 
         private async Task<TimeSpan?> GetHlsRuntimeFromManifestAsync(
@@ -1140,7 +1375,7 @@ namespace YummyKodik.Kodik
                 ["cdn_is_working"] = "true"
             };
 
-            var postUrl = "https://kodik.info" + postPath;
+            var postUrl = KodikPlayerBaseUrl + postPath;
 
             LogHttpRequest("POST", postUrl, payload);
 
@@ -1272,7 +1507,12 @@ namespace YummyKodik.Kodik
                 }
             }
 
-            throw new KodikUnexpectedException("Failed to extract post link from any script src candidate.", last);
+            if (last != null)
+            {
+                throw new KodikUnexpectedException("Failed to extract post link from any script src candidate.", last);
+            }
+
+            throw new KodikUnexpectedException("Failed to extract post link from any script src candidate.");
         }
 
         private async Task<string> GetPostLinkAsync(string scriptUrl, CancellationToken cancellationToken)
@@ -1284,7 +1524,7 @@ namespace YummyKodik.Kodik
 
             var url = scriptUrl.StartsWith("http", StringComparison.OrdinalIgnoreCase)
                 ? scriptUrl
-                : (scriptUrl.StartsWith("//", StringComparison.Ordinal) ? "https:" + scriptUrl : "https://kodik.info" + (scriptUrl.StartsWith("/", StringComparison.Ordinal) ? scriptUrl : "/" + scriptUrl));
+                : (scriptUrl.StartsWith("//", StringComparison.Ordinal) ? "https:" + scriptUrl : KodikPlayerBaseUrl + (scriptUrl.StartsWith("/", StringComparison.Ordinal) ? scriptUrl : "/" + scriptUrl));
 
             LogHttpRequest("GET", url, null);
 
@@ -1504,7 +1744,7 @@ namespace YummyKodik.Kodik
 
             foreach (var n in nodes)
             {
-                var src = n.GetAttributeValue("src", null);
+                var src = n.GetAttributeValue("src", string.Empty);
                 if (string.IsNullOrWhiteSpace(src))
                 {
                     continue;
@@ -1512,7 +1752,7 @@ namespace YummyKodik.Kodik
 
                 var abs = src.StartsWith("http", StringComparison.OrdinalIgnoreCase)
                     ? src
-                    : (src.StartsWith("//", StringComparison.Ordinal) ? "https:" + src : "https://kodik.info" + (src.StartsWith("/", StringComparison.Ordinal) ? src : "/" + src));
+                    : (src.StartsWith("//", StringComparison.Ordinal) ? "https:" + src : KodikPlayerBaseUrl + (src.StartsWith("/", StringComparison.Ordinal) ? src : "/" + src));
 
                 if (seen.Add(abs))
                 {
@@ -1693,8 +1933,8 @@ namespace YummyKodik.Kodik
                 ["token"] = _token,
                 ["limit"] = "100",
                 ["all"] = "true",
-                ["with_episodes"] = "false",
-                ["with_episodes_data"] = "false"
+                ["with_episodes"] = "true",
+                ["with_episodes_data"] = "true"
             };
 
             switch (idType)
@@ -1800,10 +2040,49 @@ namespace YummyKodik.Kodik
 
             if (s.StartsWith("/", StringComparison.Ordinal))
             {
-                return "https://kodik.info" + s;
+                return KodikPlayerBaseUrl + s;
             }
 
             return "https://" + s.TrimStart('/');
+        }
+
+        private static HashSet<int> ExtractAvailableEpisodes(KodikSearchResult? result)
+        {
+            var episodes = new HashSet<int>();
+            if (result?.Seasons == null || result.Seasons.Count == 0)
+            {
+                return episodes;
+            }
+
+            IEnumerable<KodikSearchSeason> seasonsToInspect = result.Seasons.Values;
+
+            if (result.LastSeason.HasValue && result.LastSeason.Value > 0)
+            {
+                var lastSeasonKey = result.LastSeason.Value.ToString(CultureInfo.InvariantCulture);
+                if (result.Seasons.TryGetValue(lastSeasonKey, out var lastSeason) && lastSeason != null)
+                {
+                    seasonsToInspect = new[] { lastSeason };
+                }
+            }
+
+            foreach (var season in seasonsToInspect)
+            {
+                if (season?.Episodes == null || season.Episodes.Count == 0)
+                {
+                    continue;
+                }
+
+                foreach (var episodeKey in season.Episodes.Keys)
+                {
+                    if (int.TryParse(episodeKey, NumberStyles.Integer, CultureInfo.InvariantCulture, out var episodeNumber) &&
+                        episodeNumber > 0)
+                    {
+                        episodes.Add(episodeNumber);
+                    }
+                }
+            }
+
+            return episodes;
         }
 
         private static bool TryExtractKodikError(string? json, out string error)
@@ -1846,6 +2125,18 @@ namespace YummyKodik.Kodik
             }
         }
 
+        private static bool IsRetriablePlayerCandidateException(Exception ex, CancellationToken cancellationToken)
+        {
+            if (cancellationToken.IsCancellationRequested)
+            {
+                return false;
+            }
+
+            return (ex is KodikException && ex is not KodikTokenException) ||
+                   ex is HttpRequestException ||
+                   ex is TaskCanceledException;
+        }
+
         private static bool IsTokenError(string? error)
         {
             var e = (error ?? string.Empty).Trim();
@@ -1866,14 +2157,32 @@ namespace YummyKodik.Kodik
             [JsonPropertyName("link")]
             public string? Link { get; set; }
 
+            [JsonPropertyName("last_season")]
+            public int? LastSeason { get; set; }
+
             [JsonPropertyName("episodes_count")]
             public int? EpisodesCount { get; set; }
 
             [JsonPropertyName("last_episode")]
             public int? LastEpisode { get; set; }
 
+            [JsonPropertyName("seasons")]
+            public Dictionary<string, KodikSearchSeason>? Seasons { get; set; }
+
             [JsonPropertyName("translation")]
             public KodikSearchTranslation? Translation { get; set; }
+        }
+
+        private sealed class KodikSearchSeason
+        {
+            [JsonPropertyName("episodes")]
+            public Dictionary<string, KodikSearchEpisode>? Episodes { get; set; }
+        }
+
+        private sealed class KodikSearchEpisode
+        {
+            [JsonPropertyName("link")]
+            public string? Link { get; set; }
         }
 
         private sealed class KodikSearchTranslation

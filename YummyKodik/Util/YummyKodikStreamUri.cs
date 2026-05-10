@@ -2,12 +2,15 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using YummyKodik.Kodik;
+using YummyKodik.Yummy;
 
 namespace YummyKodik.Util;
 
 public static class YummyKodikStreamUri
 {
     public const string OldScheme = "yummy-kodik://";
+    public const string CvhProvider = "cvh";
+    public const string AllohaProvider = "alloha";
 
     /// <summary>
     /// Parses both:
@@ -22,6 +25,21 @@ public static class YummyKodikStreamUri
         id = string.Empty;
         episode = null;
 
+        if (!TryParseRequest(uri, out var request) || request.Provider != YummyStreamProviderKind.Kodik)
+        {
+            return false;
+        }
+
+        idType = request.KodikIdType;
+        id = request.KodikId;
+        episode = request.Episode;
+        return true;
+    }
+
+    public static bool TryParseRequest(string uri, out YummyStreamRequest request)
+    {
+        request = new YummyStreamRequest();
+
         var s = (uri ?? string.Empty).Trim();
         if (s.Length == 0)
         {
@@ -30,7 +48,20 @@ public static class YummyKodikStreamUri
 
         if (s.StartsWith(OldScheme, StringComparison.OrdinalIgnoreCase))
         {
-            return TryParseOldScheme(s, out idType, out id, out episode);
+            if (!TryParseOldScheme(s, out var oldIdType, out var oldId, out var oldEpisode))
+            {
+                return false;
+            }
+
+            request = new YummyStreamRequest
+            {
+                Provider = YummyStreamProviderKind.Kodik,
+                KodikIdType = oldIdType,
+                KodikId = oldId,
+                Episode = oldEpisode
+            };
+
+            return true;
         }
 
         if (!Uri.TryCreate(s, UriKind.Absolute, out var u))
@@ -38,7 +69,72 @@ public static class YummyKodikStreamUri
             return false;
         }
 
-        return TryParseHttpUrl(u, out idType, out id, out episode);
+        return TryParseHttpUrl(u, out request);
+    }
+
+    public static string BuildCvhHttpUrl(string baseUrl, long animeId, int episode, string? voiceName = null)
+    {
+        return BuildYummyProviderHttpUrl(baseUrl, CvhProvider, animeId, episode, voiceName);
+    }
+
+    public static string BuildAllohaHttpUrl(
+        string baseUrl,
+        long animeId,
+        int episode,
+        string? voiceName = null,
+        YummyAllohaSource? source = null)
+    {
+        var url = BuildYummyProviderHttpUrl(baseUrl, AllohaProvider, animeId, episode, voiceName);
+        if (string.IsNullOrWhiteSpace(url) ||
+            source == null ||
+            string.IsNullOrWhiteSpace(source.MovieToken) ||
+            string.IsNullOrWhiteSpace(source.RequestToken) ||
+            source.TranslationId <= 0 ||
+            source.SeasonNumber <= 0 ||
+            string.IsNullOrWhiteSpace(source.RefererUrl))
+        {
+            return url;
+        }
+
+        url = AppendQueryParameter(url, "allohaMovieToken", source.MovieToken);
+        url = AppendQueryParameter(url, "allohaRequestToken", source.RequestToken);
+        url = AppendQueryParameter(url, "allohaTranslationId", source.TranslationId.ToString(CultureInfo.InvariantCulture));
+        url = AppendQueryParameter(url, "allohaSeason", source.SeasonNumber.ToString(CultureInfo.InvariantCulture));
+
+        if (!string.IsNullOrWhiteSpace(source.Hidden))
+        {
+            url = AppendQueryParameter(url, "allohaHidden", source.Hidden);
+        }
+
+        return AppendQueryParameter(url, "allohaRefererUrl", source.RefererUrl);
+    }
+
+    private static string BuildYummyProviderHttpUrl(string baseUrl, string provider, long animeId, int episode, string? voiceName = null)
+    {
+        var root = (baseUrl ?? string.Empty).Trim().TrimEnd('/');
+        if (string.IsNullOrWhiteSpace(root))
+        {
+            return string.Empty;
+        }
+
+        var url = $"{root}/YummyKodik/stream?provider={provider}&animeId={animeId}&ep={episode}";
+        var voice = (voiceName ?? string.Empty).Trim();
+        if (!string.IsNullOrWhiteSpace(voice))
+        {
+            url += "&voice=" + Uri.EscapeDataString(voice);
+        }
+
+        return url;
+    }
+
+    private static string AppendQueryParameter(string url, string name, string value)
+    {
+        if (string.IsNullOrWhiteSpace(url) || string.IsNullOrWhiteSpace(name) || string.IsNullOrWhiteSpace(value))
+        {
+            return url;
+        }
+
+        return url + "&" + Uri.EscapeDataString(name) + "=" + Uri.EscapeDataString(value);
     }
 
     private static bool TryParseOldScheme(string uri, out KodikIdType idType, out string id, out int? episode)
@@ -78,20 +174,90 @@ public static class YummyKodikStreamUri
         return true;
     }
 
-    private static bool TryParseHttpUrl(Uri u, out KodikIdType idType, out string id, out int? episode)
+    private static bool TryParseHttpUrl(Uri u, out YummyStreamRequest request)
     {
-        idType = default;
-        id = string.Empty;
-        episode = null;
+        request = new YummyStreamRequest();
 
         var dict = ParseQueryToDictionary(u.Query);
+
+        if (dict.TryGetValue("provider", out var providerRaw) &&
+            TryParseYummyProviderKind(providerRaw, out var providerKind))
+        {
+            if ((!dict.TryGetValue("animeId", out var animeIdRaw) &&
+                 !dict.TryGetValue("anime_id", out animeIdRaw)) ||
+                !long.TryParse(animeIdRaw?.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var animeId) ||
+                animeId <= 0)
+            {
+                return false;
+            }
+
+            int? cvhEpisode = null;
+            string? cvhEpisodeRaw = null;
+            if (dict.TryGetValue("ep", out var cvhEp1))
+            {
+                cvhEpisodeRaw = cvhEp1;
+            }
+            else if (dict.TryGetValue("episode", out var cvhEp2))
+            {
+                cvhEpisodeRaw = cvhEp2;
+            }
+
+            if (!string.IsNullOrWhiteSpace(cvhEpisodeRaw) &&
+                int.TryParse(cvhEpisodeRaw.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var cvhEp) &&
+                cvhEp > 0)
+            {
+                cvhEpisode = cvhEp;
+            }
+
+            dict.TryGetValue("voice", out var voice);
+            dict.TryGetValue("allohaMovieToken", out var allohaMovieToken);
+            dict.TryGetValue("allohaRequestToken", out var allohaRequestToken);
+            dict.TryGetValue("allohaHidden", out var allohaHidden);
+            dict.TryGetValue("allohaRefererUrl", out var allohaRefererUrl);
+
+            var allohaTranslationId = 0;
+            if (dict.TryGetValue("allohaTranslationId", out var allohaTranslationIdRaw))
+            {
+                int.TryParse(
+                    allohaTranslationIdRaw?.Trim(),
+                    NumberStyles.Integer,
+                    CultureInfo.InvariantCulture,
+                    out allohaTranslationId);
+            }
+
+            var allohaSeasonNumber = 0;
+            if (dict.TryGetValue("allohaSeason", out var allohaSeasonRaw))
+            {
+                int.TryParse(
+                    allohaSeasonRaw?.Trim(),
+                    NumberStyles.Integer,
+                    CultureInfo.InvariantCulture,
+                    out allohaSeasonNumber);
+            }
+
+            request = new YummyStreamRequest
+            {
+                Provider = providerKind,
+                AnimeId = animeId,
+                Episode = cvhEpisode,
+                VoiceName = (voice ?? string.Empty).Trim(),
+                AllohaMovieToken = (allohaMovieToken ?? string.Empty).Trim(),
+                AllohaRequestToken = (allohaRequestToken ?? string.Empty).Trim(),
+                AllohaTranslationId = allohaTranslationId > 0 ? allohaTranslationId : 0,
+                AllohaSeasonNumber = allohaSeasonNumber > 0 ? allohaSeasonNumber : 0,
+                AllohaHidden = (allohaHidden ?? string.Empty).Trim(),
+                AllohaRefererUrl = (allohaRefererUrl ?? string.Empty).Trim()
+            };
+
+            return true;
+        }
 
         if (!dict.TryGetValue("type", out var typeRaw) || string.IsNullOrWhiteSpace(typeRaw))
         {
             return false;
         }
 
-        if (!Enum.TryParse(typeRaw.Trim(), ignoreCase: true, out idType))
+        if (!Enum.TryParse(typeRaw.Trim(), ignoreCase: true, out KodikIdType idType))
         {
             return false;
         }
@@ -101,7 +267,7 @@ public static class YummyKodikStreamUri
             return false;
         }
 
-        id = idRaw.Trim();
+        var id = idRaw.Trim();
 
         // Episode is optional for some call sites.
         string? epRaw = null;
@@ -118,8 +284,23 @@ public static class YummyKodikStreamUri
             int.TryParse(epRaw.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var ep) &&
             ep > 0)
         {
-            episode = ep;
+            request = new YummyStreamRequest
+            {
+                Provider = YummyStreamProviderKind.Kodik,
+                KodikIdType = idType,
+                KodikId = id,
+                Episode = ep
+            };
+
+            return true;
         }
+
+        request = new YummyStreamRequest
+        {
+            Provider = YummyStreamProviderKind.Kodik,
+            KodikIdType = idType,
+            KodikId = id
+        };
 
         return true;
     }
@@ -179,5 +360,30 @@ public static class YummyKodikStreamUri
         {
             return s;
         }
+    }
+
+    private static bool TryParseYummyProviderKind(string? value, out YummyStreamProviderKind providerKind)
+    {
+        providerKind = YummyStreamProviderKind.Unknown;
+
+        var normalized = (value ?? string.Empty).Trim();
+        if (normalized.Length == 0)
+        {
+            return false;
+        }
+
+        if (string.Equals(normalized, CvhProvider, StringComparison.OrdinalIgnoreCase))
+        {
+            providerKind = YummyStreamProviderKind.Cvh;
+            return true;
+        }
+
+        if (string.Equals(normalized, AllohaProvider, StringComparison.OrdinalIgnoreCase))
+        {
+            providerKind = YummyStreamProviderKind.Alloha;
+            return true;
+        }
+
+        return false;
     }
 }

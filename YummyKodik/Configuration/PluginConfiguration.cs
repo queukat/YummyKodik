@@ -25,6 +25,16 @@ namespace YummyKodik.Configuration
         public string YummyApiBaseUrl { get; set; } = "https://api.yani.tv";
 
         /// <summary>
+        /// Optional Alloha API token used to augment Alloha episodes/translations by kp/imdb ids.
+        /// </summary>
+        public string AllohaApiToken { get; set; } = string.Empty;
+
+        /// <summary>
+        /// Base URL for Alloha API.
+        /// </summary>
+        public string AllohaApiBaseUrl { get; set; } = "https://api.alloha.tv";
+
+        /// <summary>
         /// Root output path for generated STRM/NFO structure.
         /// Jellyfin library should point to this directory.
         /// </summary>
@@ -55,6 +65,12 @@ namespace YummyKodik.Configuration
         /// and response body snippet (may be large/noisy).
         /// </summary>
         public bool EnableHttpDebugLogging { get; set; } = false;
+
+        /// <summary>
+        /// Enables refresh performance diagnostics so slow stages, file churn, and expensive
+        /// Kodik link validation become visible in logs.
+        /// </summary>
+        public bool EnablePerformanceDebugLogging { get; set; } = false;
 
         /// <summary>
         /// If enabled, library refresh creates separate STRM and NFO files per voice translation for each episode.

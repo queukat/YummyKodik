@@ -39,11 +39,12 @@ namespace YummyKodik.Yummy
 
         /// <summary>
         /// Gets anime metadata by alias or numeric ID.
-        /// Uses GET /anime/{url}?need_videos=false
+        /// Uses GET /anime/{url}?need_videos={true|false}
         /// Retries transient upstream errors (including Cloudflare 522) a few times.
         /// </summary>
         public async Task<YummyAnimeResponse> GetAnimeAsync(
             string urlOrAliasOrId,
+            bool includeVideos = false,
             CancellationToken cancellationToken = default)
         {
             if (string.IsNullOrWhiteSpace(urlOrAliasOrId))
@@ -52,7 +53,7 @@ namespace YummyKodik.Yummy
             }
 
             var key = ExtractSlugOrId(urlOrAliasOrId);
-            var requestUri = $"{_baseUrl}/anime/{Uri.EscapeDataString(key)}?need_videos=false";
+            var requestUri = $"{_baseUrl}/anime/{Uri.EscapeDataString(key)}?need_videos={(includeVideos ? "true" : "false")}";
 
             for (var attempt = 0; attempt < 3; attempt++)
             {

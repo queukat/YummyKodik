@@ -55,6 +55,20 @@
                     </div>
 
                     <div class="inputContainer">
+                        <label for="allohaApiToken">Alloha API token (optional)</label>
+                        <input id="allohaApiToken" is="emby-input" type="text" autocomplete="off" />
+                        <div class="fieldDescription">
+                            Если указан, плагин сможет добирать <code>Alloha</code> серии и озвучки напрямую по <code>kp_id</code>,
+                            даже когда в <code>Yummy videos[]</code> часть записей отсутствует.
+                        </div>
+                    </div>
+
+                    <div class="inputContainer">
+                        <label for="allohaApiBaseUrl">Alloha API base URL</label>
+                        <input id="allohaApiBaseUrl" is="emby-input" type="text" autocomplete="off" placeholder="https://api.alloha.tv" />
+                    </div>
+
+                    <div class="inputContainer">
                         <label for="outputRootPath">Output root path</label>
                         <input id="outputRootPath" is="emby-input" type="text" autocomplete="off" placeholder="/media/YummyKodik или D:\Media\YummyKodik" />
                         <div class="fieldDescription">
@@ -104,6 +118,17 @@
                         <div class="fieldDescription">
                             Включает подробные логи HTTP запросов/ответов к Kodik (url, form, bodySnippet).
                             Может быть шумно — включай только для дебага.
+                        </div>
+                    </div>
+
+                    <div class="inputContainer">
+                        <label>
+                            <input id="enablePerformanceDebugLogging" type="checkbox" />
+                            Enable refresh performance diagnostics
+                        </label>
+                        <div class="fieldDescription">
+                            Добавляет тайминги по этапам refresh, счётчики операций с файлами и количество
+                            дорогих Kodik-проверок. Нужен, когда refresh “замирает” на одном проценте.
                         </div>
                     </div>
 
@@ -198,6 +223,7 @@
             const DEFAULTS = {
                 YummyClientId: "e_y7qb7p9d_z1mdw",
                 YummyApiBaseUrl: "https://api.yani.tv",
+                AllohaApiBaseUrl: "https://api.alloha.tv",
                 OutputRootPath: "D:\\video\\YummyKodik",
                 ServerBaseUrl: "",
                 PreferredQuality: 720,
@@ -206,7 +232,8 @@
                 YummyUserId: 219413,
                 YummyUserListId: 0,
                 CreateStrmPerVoiceTranslation: false,
-                EnableHttpDebugLogging: false
+                EnableHttpDebugLogging: false,
+                EnablePerformanceDebugLogging: false
             };
 
             function toast(text) {
@@ -223,6 +250,8 @@
 
                     $("yummyClientId").value = cfg.YummyClientId || DEFAULTS.YummyClientId;
                     $("yummyApiBaseUrl").value = cfg.YummyApiBaseUrl || DEFAULTS.YummyApiBaseUrl;
+                    $("allohaApiToken").value = cfg.AllohaApiToken || "";
+                    $("allohaApiBaseUrl").value = cfg.AllohaApiBaseUrl || DEFAULTS.AllohaApiBaseUrl;
                     $("outputRootPath").value = cfg.OutputRootPath || DEFAULTS.OutputRootPath;
                     $("serverBaseUrl").value = cfg.ServerBaseUrl || DEFAULTS.ServerBaseUrl;
                     $("preferredTranslationFilter").value = cfg.PreferredTranslationFilter || "";
@@ -230,6 +259,7 @@
                     $("preferredQuality").value = cfg.PreferredQuality || DEFAULTS.PreferredQuality;
 
                     $("enableHttpDebugLogging").checked = !!cfg.EnableHttpDebugLogging;
+                    $("enablePerformanceDebugLogging").checked = !!cfg.EnablePerformanceDebugLogging;
 
                     $("refreshIntervalMinutes").value = cfg.RefreshIntervalMinutes || DEFAULTS.RefreshIntervalMinutes;
                     $("slugs").value = (cfg.Slugs || []).join("\n");
@@ -261,6 +291,8 @@
 
                     const apiBase = ($("yummyApiBaseUrl").value || "").trim();
                     cfg.YummyApiBaseUrl = apiBase || DEFAULTS.YummyApiBaseUrl;
+                    cfg.AllohaApiToken = ($("allohaApiToken").value || "").trim();
+                    cfg.AllohaApiBaseUrl = ($("allohaApiBaseUrl").value || "").trim() || DEFAULTS.AllohaApiBaseUrl;
 
                     const out = ($("outputRootPath").value || "").trim();
                     cfg.OutputRootPath = out || DEFAULTS.OutputRootPath;
@@ -272,6 +304,7 @@
                     cfg.PreferredQuality = parseInt($("preferredQuality").value, 10) || DEFAULTS.PreferredQuality;
 
                     cfg.EnableHttpDebugLogging = !!$("enableHttpDebugLogging").checked;
+                    cfg.EnablePerformanceDebugLogging = !!$("enablePerformanceDebugLogging").checked;
 
                     cfg.RefreshIntervalMinutes = parseInt($("refreshIntervalMinutes").value, 10) || DEFAULTS.RefreshIntervalMinutes;
 

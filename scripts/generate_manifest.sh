@@ -39,8 +39,8 @@ fi
 GUID="6801ee3f-27f2-4d4e-ab37-e569c025b7c5"
 NAME="YummyKodik"
 CATEGORY="General"
-DESCRIPTION="Creates Jellyfin anime series cards from YummyAnime and streams episodes from Kodik."
-OVERVIEW="Builds a local STRM/NFO library from YummyAnime and plays episodes via Kodik."
+DESCRIPTION="Creates Jellyfin anime series cards from YummyAnime and streams episodes from Alloha, CVH, and Kodik-backed sources."
+OVERVIEW="Builds a local STRM/NFO library from YummyAnime and plays episodes via Alloha, CVH, and Kodik-backed sources."
 TARGET_ABI="10.11.0.0"
 
 SOURCE_URL="https://github.com/${OWNER}/${REPO}/releases/download/${TAG}/${ZIP}"

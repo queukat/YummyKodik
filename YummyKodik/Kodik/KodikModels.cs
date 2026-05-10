@@ -34,6 +34,32 @@ namespace YummyKodik.Kodik
         /// Max available episode number for this translation (0 if unknown).
         /// </summary>
         public int MaxEpisode { get; init; }
+
+        /// <summary>
+        /// Exact episode numbers reported by Kodik for this translation, when available.
+        /// Falls back to MaxEpisode when the search API does not include per-episode data.
+        /// </summary>
+        public IReadOnlyCollection<int> AvailableEpisodes { get; init; } = Array.Empty<int>();
+
+        public bool CoversEpisode(int episode)
+        {
+            var ep = episode <= 0 ? 1 : episode;
+
+            if (AvailableEpisodes.Count > 0)
+            {
+                foreach (var availableEpisode in AvailableEpisodes)
+                {
+                    if (availableEpisode == ep)
+                    {
+                        return true;
+                    }
+                }
+
+                return false;
+            }
+
+            return MaxEpisode <= 0 || ep <= MaxEpisode;
+        }
     }
 
     public sealed class KodikAnimeInfo

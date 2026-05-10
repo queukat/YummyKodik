@@ -2,16 +2,21 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Net.Http;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Xml;
 using MediaBrowser.Model.Tasks;
 using Microsoft.Extensions.Logging;
+using YummyKodik.Alloha;
 using YummyKodik.Configuration;
 using YummyKodik.Kodik;
+using YummyKodik.Shikimori;
 using YummyKodik.Util;
 using YummyKodik.Yummy;
 
@@ -22,11 +27,21 @@ namespace YummyKodik.Tasks
     /// </summary>
     public sealed class RefreshYummyKodikLibraryTask : IScheduledTask
     {
-        private readonly ILogger<RefreshYummyKodikLibraryTask> _logger;
+        private static readonly YummyVideoProviderKind[] PreferredYummyProviderOrder =
+        {
+            YummyVideoProviderKind.Alloha,
+            YummyVideoProviderKind.Cvh
+        };
 
-        public RefreshYummyKodikLibraryTask(ILogger<RefreshYummyKodikLibraryTask> logger)
+        private readonly ILogger<RefreshYummyKodikLibraryTask> _logger;
+        private readonly IHttpClientFactory _httpClientFactory;
+
+        public RefreshYummyKodikLibraryTask(
+            ILogger<RefreshYummyKodikLibraryTask> logger,
+            IHttpClientFactory httpClientFactory)
         {
             _logger = logger;
+            _httpClientFactory = httpClientFactory;
         }
 
         public string Key => "YummyKodikRefresh";
@@ -74,6 +89,8 @@ namespace YummyKodik.Tasks
 
             var token = await KodikTokenProvider.GetTokenAsync(http, cancellationToken).ConfigureAwait(false);
             var kodikClient = new KodikClient(http, token);
+            var shikimoriHttp = _httpClientFactory.CreateClient(HttpClientNames.Shikimori);
+            var shikimoriClient = new ShikimoriGraphQlClient(shikimoriHttp);
 
             var allKeys = await BuildAnimeKeysAsync(cfg, yummyClient, cancellationToken).ConfigureAwait(false);
             if (allKeys.Count == 0)
@@ -99,6 +116,7 @@ namespace YummyKodik.Tasks
                             root,
                             yummyClient,
                             kodikClient,
+                            shikimoriClient,
                             cfg.PreferredQuality,
                             cancellationToken)
                         .ConfigureAwait(false);
@@ -255,6 +273,31 @@ namespace YummyKodik.Tasks
                 "[YummyKodik] User list subscription enabled but no auth is configured. Set YummyAccessToken or YummyLogin and YummyPassword.");
         }
 
+        private async Task<ShikimoriSeriesLayoutInfo?> TryResolveSeriesLayoutFromShikimoriAsync(
+            YummyAnimeResponse anime,
+            ShikimoriGraphQlClient shikimori,
+            CancellationToken cancellationToken)
+        {
+            if (anime?.RemoteIds?.ShikimoriId is not long shikimoriId || shikimoriId <= 0)
+            {
+                return null;
+            }
+
+            try
+            {
+                return await shikimori.TryResolveSeriesLayoutAsync(shikimoriId, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(
+                    ex,
+                    "[YummyKodik] Failed to resolve Shikimori series layout for animeId={AnimeId} shikimoriId={ShikimoriId}. Falling back to Yummy metadata only.",
+                    anime.AnimeId,
+                    shikimoriId);
+                return null;
+            }
+        }
+
         public IEnumerable<TaskTriggerInfo> GetDefaultTriggers()
         {
             var cfg = Plugin.Instance.Configuration;
@@ -271,161 +314,600 @@ namespace YummyKodik.Tasks
             string root,
             YummyClient yummy,
             KodikClient kodik,
+            ShikimoriGraphQlClient shikimori,
             int preferredQuality,
             CancellationToken cancellationToken)
         {
             var plugin = Plugin.Instance;
             var logger = plugin.Logger;
+            var cfg = plugin.Configuration;
+            var perf = new RefreshPerformanceMetrics(cfg.EnablePerformanceDebugLogging);
 
             var cleanKey = NormalizeKey(key);
             logger.LogInformation("[YummyKodik] Refreshing key '{Key}'.", cleanKey);
+            var summaryTitle = cleanKey;
 
-            var anime = await yummy.GetAnimeAsync(cleanKey, cancellationToken).ConfigureAwait(false);
-            var title = string.IsNullOrWhiteSpace(anime.Title) ? cleanKey : anime.Title;
-
-            var seasonNumber = ExtractSeasonNumberFromTitle(title);
-            if (seasonNumber != 1)
+            try
             {
-                logger.LogInformation("[YummyKodik] Season number detected from title. title='{Title}' season={Season}", title, seasonNumber);
-            }
+                YummyAnimeResponse anime;
+                using (perf.Measure("stage.yummy.fetch"))
+                {
+                    anime = await yummy.GetAnimeAsync(cleanKey, includeVideos: true, cancellationToken).ConfigureAwait(false);
+                }
 
-            KodikIdType idType;
-            string id;
+                var rawTitle = string.IsNullOrWhiteSpace(anime.Title) ? cleanKey : anime.Title.Trim();
+                ShikimoriSeriesLayoutInfo? shikimoriLayout = null;
+                if (!YummySeriesLayoutResolver.HasExplicitSeasonNumber(rawTitle))
+                {
+                    using (perf.Measure("stage.shikimori.layout"))
+                    {
+                        shikimoriLayout = await TryResolveSeriesLayoutFromShikimoriAsync(anime, shikimori, cancellationToken)
+                            .ConfigureAwait(false);
+                    }
+                }
 
-            if (TryPickKodikIdFromRemoteIds(anime.RemoteIds, out idType, out id))
-            {
-                logger.LogInformation(
-                    "[YummyKodik] Using remote id from Yummy. title='{Title}' idType={IdType} id={Id}",
-                    title, idType, id);
-            }
-            else
-            {
-                logger.LogWarning(
-                    "[YummyKodik] remote_ids are missing for '{Title}' (key='{Key}'). Falling back to Kodik title search.",
-                    title, cleanKey);
+                var seasonNumber = YummySeriesLayoutResolver.ResolveSeasonNumber(anime, rawTitle, shikimoriLayout);
+                var title = YummySeriesLayoutResolver.ResolveSeriesTitle(anime, rawTitle, seasonNumber, shikimoriLayout);
+                if (string.IsNullOrWhiteSpace(title))
+                {
+                    title = rawTitle;
+                }
 
-                var resolved = await KodikTitleResolver.ResolveIdAsync(
-                        cleanKey,
+                summaryTitle = title;
+
+                if (seasonNumber != 1 || !string.Equals(rawTitle, title, StringComparison.Ordinal))
+                {
+                    logger.LogInformation(
+                        "[YummyKodik] Series layout resolved. rawTitle='{RawTitle}' title='{Title}' season={Season} apiSeason={ApiSeason}",
+                        rawTitle,
                         title,
-                        kodik,
-                        cancellationToken)
-                    .ConfigureAwait(false);
+                        seasonNumber,
+                        anime.Season);
+                }
 
-                idType = resolved.IdType;
-                id = resolved.Id;
-            }
+                var allohaApiHttp = _httpClientFactory.CreateClient(HttpClientNames.AllohaApi);
+                IReadOnlyList<YummyVideoEntry> allohaApiEntries;
+                using (perf.Measure("stage.alloha.catalog"))
+                {
+                    allohaApiEntries = await AllohaApiCatalogLoader
+                        .LoadEntriesAsync(cfg, anime, allohaApiHttp, logger, cancellationToken)
+                        .ConfigureAwait(false);
+                }
 
-            var info = await kodik.GetAnimeInfoAsync(id, idType, cancellationToken).ConfigureAwait(false);
+                allohaApiEntries = AllohaApiCatalogLoader.FilterEntriesForSeason(allohaApiEntries, seasonNumber);
+                var videoCatalog = YummyVideoCatalog.Create(anime, allohaApiEntries);
 
-            if (info.SeriesCount <= 0)
-            {
-                logger.LogInformation(
-                    "[YummyKodik] Anime '{Title}' appears to be a movie (no series). Skipping STRM generation.",
-                    title);
-                return;
-            }
+                var folderName = BuildSeriesFolderName(title, anime);
+                var safeFolderName = SafeFilename(folderName);
 
-            var folderName = BuildSeriesFolderName(title, anime);
-            var safeFolderName = SafeFilename(folderName);
+                var seriesRoot = ResolveSeriesRoot(
+                    logger,
+                    Path.Combine(root, safeFolderName),
+                    GetLegacySeriesRoots(root, rawTitle, title, anime));
 
-            var seriesRoot = Path.Combine(root, safeFolderName);
+                Directory.CreateDirectory(seriesRoot);
 
-            // миграция: если раньше папка была только по title, переносим в новую
-            var legacySeriesRoot = Path.Combine(root, SafeFilename(title));
-            if (!Directory.Exists(seriesRoot) && Directory.Exists(legacySeriesRoot))
-            {
+                // Create/update the card from Yummy metadata first so Kodik outages do not hide the title.
+                using (perf.Measure("stage.series.nfo"))
+                {
+                    await EnsureTvShowNfoAsync(logger, title, anime, seriesRoot, perf, cancellationToken).ConfigureAwait(false);
+                }
+
                 try
                 {
-                    Directory.Move(legacySeriesRoot, seriesRoot);
-                    logger.LogInformation("[YummyKodik] Renamed legacy folder '{Old}' -> '{New}'.", legacySeriesRoot, seriesRoot);
+                    using (perf.Measure("stage.poster"))
+                    {
+                        await EnsurePosterAsync(anime, seriesRoot, cancellationToken).ConfigureAwait(false);
+                    }
                 }
-                catch (Exception ex)
+                catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or IOException)
                 {
-                    logger.LogWarning(ex, "[YummyKodik] Failed to rename legacy folder '{Old}' -> '{New}'. Will use new folder.", legacySeriesRoot, seriesRoot);
+                    logger.LogWarning(
+                        ex,
+                        "[YummyKodik] Failed to update poster for '{Title}'. Series card metadata will still be kept.",
+                        title);
                 }
+
+                var seasonDirName = $"Season {seasonNumber:00}";
+                var seasonDir = Path.Combine(seriesRoot, seasonDirName);
+                var seasonDirPrepared = false;
+                if (YummySeriesLayoutResolver.ShouldCreateSeasonDirectory(anime, seasonNumber))
+                {
+                    using (perf.Measure("stage.prepare.season.dir"))
+                    {
+                        seasonDir = PrepareSeasonDirectory(logger, seriesRoot, seasonDir, seasonNumber);
+                    }
+
+                    seasonDirPrepared = true;
+                }
+
+                var baseUrl = (cfg.ServerBaseUrl ?? string.Empty).Trim().TrimEnd('/');
+                var generatedEpisodeNumbers = new HashSet<int>();
+                var expectedEpisodeFileBaseNames = new Dictionary<int, HashSet<string>>();
+                var expectedEpisodeTranslationKeys = new Dictionary<int, HashSet<string>>();
+                Dictionary<int, Dictionary<string, string>> existingEpisodeTranslationFileBaseNames = new();
+                var knownSupportedEpisodes = anime.AnimeId > 0
+                    ? videoCatalog.GetSupportedEpisodeNumbersAcrossProviders(PreferredYummyProviderOrder)
+                    : Array.Empty<int>();
+                var expectedAvailableEpisodes = YummyEpisodeAvailability.GetExpectedAvailableEpisodeCount(anime, knownSupportedEpisodes);
+                var allohaSupportedEpisodes = anime.AnimeId > 0
+                    ? YummyEpisodeAvailability.LimitToExpectedAvailableEpisodes(
+                        anime,
+                        videoCatalog.GetSupportedEpisodeNumbers(YummyVideoProviderKind.Alloha))
+                    : Array.Empty<int>();
+                var cvhSupportedEpisodes = anime.AnimeId > 0
+                    ? YummyEpisodeAvailability.LimitToExpectedAvailableEpisodes(
+                        anime,
+                        videoCatalog.GetSupportedEpisodeNumbers(YummyVideoProviderKind.Cvh))
+                    : Array.Empty<int>();
+                var yummySupportedEpisodes = anime.AnimeId > 0
+                    ? YummyEpisodeAvailability.LimitToExpectedAvailableEpisodes(
+                        anime,
+                        videoCatalog.GetSupportedEpisodeNumbersAcrossProviders(PreferredYummyProviderOrder))
+                    : Array.Empty<int>();
+
+                if (yummySupportedEpisodes.Length > 0)
+                {
+                    if (string.IsNullOrEmpty(baseUrl))
+                    {
+                        logger.LogWarning("[YummyKodik] ServerBaseUrl is empty, skipping Yummy-backed STRM generation for '{Title}'.", title);
+                        return;
+                    }
+
+                    if (!seasonDirPrepared)
+                    {
+                        using (perf.Measure("stage.prepare.season.dir"))
+                        {
+                            seasonDir = PrepareSeasonDirectory(logger, seriesRoot, seasonDir, seasonNumber);
+                        }
+
+                        seasonDirPrepared = true;
+                        if (cfg.CreateStrmPerVoiceTranslation)
+                        {
+                            using (perf.Measure("stage.scan.translation.files"))
+                            {
+                                existingEpisodeTranslationFileBaseNames = BuildExistingEpisodeTranslationFileBaseNames(seasonDir, seasonNumber);
+                            }
+                        }
+                    }
+
+                    using (perf.Measure("stage.generate.yummy.files"))
+                    {
+                        await GeneratePreferredProviderEpisodeFilesAsync(
+                                logger,
+                                anime,
+                                videoCatalog,
+                                yummySupportedEpisodes,
+                                seasonDir,
+                                seasonNumber,
+                                title,
+                                baseUrl,
+                                cfg.PreferredTranslationFilter,
+                                cfg.CreateStrmPerVoiceTranslation,
+                                existingEpisodeTranslationFileBaseNames,
+                                expectedEpisodeFileBaseNames,
+                                expectedEpisodeTranslationKeys,
+                                perf,
+                                cancellationToken)
+                            .ConfigureAwait(false);
+                    }
+
+                    generatedEpisodeNumbers.UnionWith(yummySupportedEpisodes);
+
+                    logger.LogInformation(
+                        "[YummyKodik] Generated mixed Yummy-backed episode files for '{Title}'. episodes={EpisodeCount} allohaEpisodes={AllohaEpisodes} cvhEpisodes={CvhEpisodes} availableEpisodes={AvailableEpisodes}",
+                        title,
+                        yummySupportedEpisodes.Length,
+                        allohaSupportedEpisodes.Length,
+                        cvhSupportedEpisodes.Length,
+                        expectedAvailableEpisodes);
+                }
+
+                var needsKodikEpisodeSupplement = YummyEpisodeAvailability.NeedsKodikSupplement(anime, generatedEpisodeNumbers, knownSupportedEpisodes);
+                var needsKodikTranslationSupplement = cfg.CreateStrmPerVoiceTranslation && expectedAvailableEpisodes > 0;
+
+                if (!needsKodikEpisodeSupplement && !needsKodikTranslationSupplement)
+                {
+                    if (seasonDirPrepared && expectedAvailableEpisodes > 0)
+                    {
+                        using (perf.Measure("stage.cleanup.artifacts"))
+                        {
+                            CleanupUnexpectedEpisodeArtifacts(
+                                logger,
+                                seasonDir,
+                                seasonNumber,
+                                expectedEpisodeFileBaseNames,
+                                expectedAvailableEpisodes,
+                                perf);
+                        }
+                    }
+
+                    if (expectedAvailableEpisodes <= 0)
+                    {
+                        logger.LogInformation(
+                            "[YummyKodik] No episodes are available yet for '{Title}'. Series card, poster, and season folders were created/updated; Kodik lookup skipped.",
+                            title);
+                    }
+                    else
+                    {
+                        logger.LogInformation(
+                            "[YummyKodik] Done refreshing '{Title}' using Yummy-backed coverage only. episodes={EpisodeCount}",
+                            title,
+                            generatedEpisodeNumbers.Count);
+                    }
+                    return;
+                }
+
+                KodikIdType idType;
+                string id;
+                KodikAnimeInfo info;
+
+                try
+                {
+                    if (TryPickKodikIdFromRemoteIds(anime.RemoteIds, out idType, out id))
+                    {
+                        logger.LogInformation(
+                            "[YummyKodik] Using remote id from Yummy. title='{Title}' idType={IdType} id={Id}",
+                            title, idType, id);
+                    }
+                    else
+                    {
+                        logger.LogWarning(
+                            "[YummyKodik] remote_ids are missing for '{Title}' (key='{Key}'). Falling back to Kodik title search.",
+                            rawTitle, cleanKey);
+
+                        using (perf.Measure("stage.kodik.resolve.title"))
+                        {
+                            var resolved = await KodikTitleResolver.ResolveIdAsync(
+                                    cleanKey,
+                                    rawTitle,
+                                    kodik,
+                                    cancellationToken)
+                                .ConfigureAwait(false);
+
+                            idType = resolved.IdType;
+                            id = resolved.Id;
+                        }
+                    }
+
+                    using (perf.Measure("stage.kodik.info"))
+                    {
+                        info = await kodik.GetAnimeInfoAsync(id, idType, cancellationToken).ConfigureAwait(false);
+                    }
+                }
+                catch (Exception ex) when (ex is KodikException or HttpRequestException or TaskCanceledException or JsonException)
+                {
+                    logger.LogWarning(
+                        ex,
+                        "[YummyKodik] Kodik metadata is unavailable for '{Title}'. Series card was created/updated, STRM generation is skipped for now.",
+                        title);
+                    return;
+                }
+
+                var kodikAvailableEpisodes = YummyEpisodeAvailability.ResolveKodikAvailableEpisodeCount(
+                    info.SeriesCount,
+                    expectedAvailableEpisodes);
+                if (kodikAvailableEpisodes <= 0)
+                {
+                    if (generatedEpisodeNumbers.Count > 0)
+                    {
+                        logger.LogInformation(
+                            "[YummyKodik] Kodik has no additional episodes for '{Title}'. Kept {EpisodeCount} Yummy-backed episode files.",
+                            title,
+                            generatedEpisodeNumbers.Count);
+                    }
+                    else
+                    {
+                        logger.LogInformation(
+                            "[YummyKodik] No episodes are available yet for '{Title}'. Series card was created/updated, STRM generation skipped.",
+                            title);
+                    }
+                    return;
+                }
+
+                if (info.SeriesCount <= 0)
+                {
+                    logger.LogInformation(
+                        "[YummyKodik] Kodik search returned zero seriesCount for '{Title}', using Yummy hinted coverage of {EpisodeCount} episode(s).",
+                        title,
+                        kodikAvailableEpisodes);
+                }
+
+                if (string.IsNullOrEmpty(baseUrl))
+                {
+                    logger.LogWarning("[YummyKodik] ServerBaseUrl is empty, skipping refresh for '{Title}'.", title);
+                    return;
+                }
+
+                if (!seasonDirPrepared)
+                {
+                    using (perf.Measure("stage.prepare.season.dir"))
+                    {
+                        seasonDir = PrepareSeasonDirectory(logger, seriesRoot, seasonDir, seasonNumber);
+                    }
+
+                    seasonDirPrepared = true;
+                    if (cfg.CreateStrmPerVoiceTranslation)
+                    {
+                        using (perf.Measure("stage.scan.translation.files"))
+                        {
+                            existingEpisodeTranslationFileBaseNames = BuildExistingEpisodeTranslationFileBaseNames(seasonDir, seasonNumber);
+                        }
+                    }
+                }
+
+                var missingEpisodes = Enumerable.Range(1, kodikAvailableEpisodes)
+                    .Where(ep => !generatedEpisodeNumbers.Contains(ep))
+                    .ToArray();
+
+                var kodikEpisodesToProcess = cfg.CreateStrmPerVoiceTranslation
+                    ? Enumerable.Range(1, kodikAvailableEpisodes).ToArray()
+                    : missingEpisodes;
+
+                if (kodikEpisodesToProcess.Length == 0)
+                {
+                    using (perf.Measure("stage.cleanup.artifacts"))
+                    {
+                        CleanupUnexpectedEpisodeArtifacts(
+                            logger,
+                            seasonDir,
+                            seasonNumber,
+                            expectedEpisodeFileBaseNames,
+                            kodikAvailableEpisodes,
+                            perf);
+                    }
+
+                    logger.LogInformation(
+                        "[YummyKodik] Done refreshing '{Title}'. Yummy-backed providers already cover all {SeriesCount} currently available episodes.",
+                        title,
+                        info.SeriesCount);
+                    return;
+                }
+
+                EpisodeArtifactGenerationResult kodikGeneration;
+                using (perf.Measure("stage.generate.kodik.files"))
+                {
+                    kodikGeneration = await GenerateKodikEpisodeFilesAsync(
+                            logger,
+                            anime,
+                            kodik,
+                            info,
+                            idType,
+                            id,
+                            seasonDir,
+                            seasonNumber,
+                            title,
+                            baseUrl,
+                            cfg.CreateStrmPerVoiceTranslation,
+                            existingEpisodeTranslationFileBaseNames,
+                            kodikEpisodesToProcess,
+                            expectedEpisodeFileBaseNames,
+                            expectedEpisodeTranslationKeys,
+                            perf,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                }
+
+                using (perf.Measure("stage.cleanup.artifacts"))
+                {
+                    CleanupUnexpectedEpisodeArtifacts(
+                        logger,
+                        seasonDir,
+                        seasonNumber,
+                        expectedEpisodeFileBaseNames,
+                        kodikAvailableEpisodes,
+                        perf);
+                }
+
+                if (missingEpisodes.Length == 0 && kodikGeneration.FilesWritten == 0)
+                {
+                    logger.LogInformation(
+                        "[YummyKodik] Done refreshing '{Title}'. Yummy-backed providers already cover all currently available episodes and translations.",
+                        title);
+                    return;
+                }
+
+                logger.LogInformation(
+                    "[YummyKodik] Done refreshing '{Title}'. SeriesCount: {SeriesCount}, translations: {Translations}, supplementedEpisodes: {SupplementedEpisodes}, supplementedFiles: {SupplementedFiles}.",
+                    title,
+                    info.SeriesCount,
+                    info.Translations.Count,
+                    kodikGeneration.EpisodesWritten,
+                    kodikGeneration.FilesWritten);
             }
-
-            Directory.CreateDirectory(seriesRoot);
-
-            var seasonDirName = $"Season {seasonNumber:00}";
-            var seasonDir = Path.Combine(seriesRoot, seasonDirName);
-
-            // миграция: если раньше всегда писали Season 01, а теперь сезон распознан как другой, переносим папку сезона
-            MigrateLegacySeasonFolder(logger, seriesRoot, seasonDir, seasonNumber);
-
-            Directory.CreateDirectory(seasonDir);
-
-            // миграция: переименование файлов S01E.. -> S{season:00}E..
-            MigrateLegacyEpisodeFileNames(logger, seasonDir, seasonNumber);
-
-            await EnsurePosterAsync(anime, seriesRoot, cancellationToken).ConfigureAwait(false);
-            await EnsureTvShowNfoAsync(anime, seriesRoot, cancellationToken).ConfigureAwait(false);
-
-            var cfg = Plugin.Instance.Configuration;
-
-            var baseUrl = (cfg.ServerBaseUrl ?? string.Empty).Trim().TrimEnd('/');
-            if (string.IsNullOrEmpty(baseUrl))
+            finally
             {
-                logger.LogWarning("[YummyKodik] ServerBaseUrl is empty, skipping refresh for '{Title}'.", title);
-                return;
+                perf.LogSummary(logger, summaryTitle, cleanKey);
             }
+        }
 
-            for (var ep = 1; ep <= info.SeriesCount; ep++)
+        private static async Task GeneratePreferredProviderEpisodeFilesAsync(
+            ILogger logger,
+            YummyAnimeResponse anime,
+            YummyVideoCatalog videoCatalog,
+            IReadOnlyCollection<int> supportedEpisodes,
+            string seasonDir,
+            int seasonNumber,
+            string title,
+            string baseUrl,
+            string? preferredTranslationFilter,
+            bool createStrmPerVoiceTranslation,
+            IDictionary<int, Dictionary<string, string>> existingEpisodeTranslationFileBaseNames,
+            IDictionary<int, HashSet<string>> expectedEpisodeFileBaseNames,
+            IDictionary<int, HashSet<string>> expectedEpisodeTranslationKeys,
+            RefreshPerformanceMetrics? perf,
+            CancellationToken cancellationToken)
+        {
+            foreach (var ep in supportedEpisodes)
             {
                 cancellationToken.ThrowIfCancellationRequested();
 
-                var baseName = $"S{seasonNumber:00}E{ep:00}";
+                var baseName = BuildEpisodeBaseName(seasonDir, seasonNumber, ep);
+
+                if (!createStrmPerVoiceTranslation)
+                {
+                    var provider = videoCatalog.PickPreferredProvider(ep, preferredFilter: preferredTranslationFilter, providers: PreferredYummyProviderOrder);
+                    if (!provider.HasValue)
+                    {
+                        continue;
+                    }
+
+                    var url = BuildProviderStreamUrl(baseUrl, provider.Value, anime.AnimeId, ep) + "&format=hls";
+                    await WriteEpisodeArtifactsAsync(logger, seasonDir, baseName, url, ep, seasonNumber, title, anime.Description, perf, cancellationToken)
+                        .ConfigureAwait(false);
+                    TrackExpectedEpisodeArtifact(expectedEpisodeFileBaseNames, ep, baseName);
+                    continue;
+                }
+
+                var voiceNames = videoCatalog.GetSupportedVoiceNamesAcrossProviders(ep, PreferredYummyProviderOrder);
+                if (voiceNames.Count == 0)
+                {
+                    var provider = videoCatalog.PickPreferredProvider(ep, preferredFilter: preferredTranslationFilter, providers: PreferredYummyProviderOrder);
+                    if (!provider.HasValue)
+                    {
+                        continue;
+                    }
+
+                    var url = BuildProviderStreamUrl(baseUrl, provider.Value, anime.AnimeId, ep) + "&format=hls";
+                    var fileBaseName = baseName + " - Auto";
+                    await WriteEpisodeArtifactsAsync(logger, seasonDir, fileBaseName, url, ep, seasonNumber, title, anime.Description, perf, cancellationToken)
+                        .ConfigureAwait(false);
+                    TrackExpectedEpisodeArtifact(expectedEpisodeFileBaseNames, ep, fileBaseName);
+                    TrackExpectedEpisodeTranslation(expectedEpisodeTranslationKeys, ep, "Auto");
+                    continue;
+                }
+
+                foreach (var voiceName in voiceNames)
+                {
+                    var provider = videoCatalog.PickPreferredProvider(ep, explicitVoiceName: voiceName, providers: PreferredYummyProviderOrder);
+                    if (!provider.HasValue)
+                    {
+                        continue;
+                    }
+
+                    var chosenEntry = videoCatalog.FindPreferredPlayableEntry(provider.Value, ep, voiceName);
+                    if (chosenEntry == null)
+                    {
+                        continue;
+                    }
+
+                    var suffix = SafeFilename(voiceName);
+                    if (string.IsNullOrWhiteSpace(suffix))
+                    {
+                        suffix = "Voice";
+                    }
+
+                    var fileBaseName = EpisodeArtifactMaintenance.ResolveEpisodeTranslationFileBaseName(
+                        existingEpisodeTranslationFileBaseNames,
+                        ep,
+                        baseName,
+                        suffix);
+                    var url = BuildProviderStreamUrl(baseUrl, provider.Value, anime.AnimeId, ep, voiceName, chosenEntry) + "&format=hls";
+                    await WriteEpisodeArtifactsAsync(
+                            logger,
+                            seasonDir,
+                            fileBaseName,
+                            url,
+                            ep,
+                            seasonNumber,
+                            title,
+                            anime.Description,
+                            perf,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                    TrackExpectedEpisodeArtifact(expectedEpisodeFileBaseNames, ep, fileBaseName);
+                    TrackExpectedEpisodeTranslation(expectedEpisodeTranslationKeys, ep, suffix);
+                }
+            }
+
+            var expectedAvailableEpisodes = YummyEpisodeAvailability.GetExpectedAvailableEpisodeCount(anime);
+            if (expectedAvailableEpisodes > supportedEpisodes.Count)
+            {
+                logger.LogInformation(
+                    "[YummyKodik] Yummy-backed providers currently cover {CoveredEpisodes}/{TotalEpisodes} episodes for '{Title}'.",
+                    supportedEpisodes.Count,
+                    expectedAvailableEpisodes,
+                    title);
+            }
+        }
+
+        private static async Task<EpisodeArtifactGenerationResult> GenerateKodikEpisodeFilesAsync(
+            ILogger logger,
+            YummyAnimeResponse anime,
+            KodikClient kodik,
+            KodikAnimeInfo info,
+            KodikIdType idType,
+            string id,
+            string seasonDir,
+            int seasonNumber,
+            string title,
+            string baseUrl,
+            bool createStrmPerVoiceTranslation,
+            IDictionary<int, Dictionary<string, string>> existingEpisodeTranslationFileBaseNames,
+            IEnumerable<int> episodes,
+            IDictionary<int, HashSet<string>> expectedEpisodeFileBaseNames,
+            IDictionary<int, HashSet<string>> expectedEpisodeTranslationKeys,
+            RefreshPerformanceMetrics? perf,
+            CancellationToken cancellationToken)
+        {
+            var filesWritten = 0;
+            var writtenEpisodes = new HashSet<int>();
+            var orderedEpisodes = episodes
+                .Distinct()
+                .OrderBy(x => x)
+                .ToArray();
+            IReadOnlyList<KodikTranslation> fileTranslations = createStrmPerVoiceTranslation
+                ? PickTranslationsForFileMode(info.Translations)
+                : Array.Empty<KodikTranslation>();
+            var resolvedTranslationEpisodes = fileTranslations.Count > 0
+                ? await ResolveDistinctKodikTranslationEpisodesAsync(
+                        logger,
+                        kodik,
+                        idType,
+                        id,
+                        fileTranslations,
+                        orderedEpisodes,
+                        perf,
+                        cancellationToken)
+                    .ConfigureAwait(false)
+                : new Dictionary<string, HashSet<int>>(StringComparer.Ordinal);
+
+            foreach (var ep in orderedEpisodes)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                var baseName = BuildEpisodeBaseName(seasonDir, seasonNumber, ep);
 
                 var streamBase =
                     $"{baseUrl}/YummyKodik/stream?type={idType.ToString().ToLowerInvariant()}" +
                     $"&id={Uri.EscapeDataString(id)}&ep={ep}";
 
-                if (!cfg.CreateStrmPerVoiceTranslation)
+                if (!createStrmPerVoiceTranslation)
                 {
-                    var strmPath = Path.Combine(seasonDir, baseName + ".strm");
-                    var nfoPath = Path.Combine(seasonDir, baseName + ".nfo");
-
                     var url = streamBase + "&format=hls";
-
-                    await File.WriteAllTextAsync(strmPath, url + Environment.NewLine, cancellationToken).ConfigureAwait(false);
-
-                    if (!File.Exists(nfoPath))
-                    {
-                        var nfo = NfoBuilder.BuildEpisodeNfo(
-                            ep,
-                            season: seasonNumber,
-                            seriesTitle: title,
-                            description: anime.Description ?? string.Empty);
-
-                        await File.WriteAllTextAsync(nfoPath, nfo, cancellationToken).ConfigureAwait(false);
-                    }
-
+                    await WriteEpisodeArtifactsAsync(logger, seasonDir, baseName, url, ep, seasonNumber, title, anime.Description, perf, cancellationToken)
+                        .ConfigureAwait(false);
+                    TrackExpectedEpisodeArtifact(expectedEpisodeFileBaseNames, ep, baseName);
+                    writtenEpisodes.Add(ep);
+                    filesWritten++;
                     continue;
                 }
 
-                var fileTranslations = PickTranslationsForFileMode(info.Translations);
-
                 if (fileTranslations.Count == 0)
                 {
-                    var fileBaseName = baseName + " - Auto";
-                    var strmPath = Path.Combine(seasonDir, fileBaseName + ".strm");
-                    var nfoPath = Path.Combine(seasonDir, fileBaseName + ".nfo");
-
-                    var url = streamBase + "&format=hls";
-
-                    await File.WriteAllTextAsync(strmPath, url + Environment.NewLine, cancellationToken).ConfigureAwait(false);
-
-                    if (!File.Exists(nfoPath))
+                    if (HasExpectedEpisodeArtifacts(expectedEpisodeFileBaseNames, ep))
                     {
-                        var nfo = NfoBuilder.BuildEpisodeNfo(
-                            ep,
-                            season: seasonNumber,
-                            seriesTitle: title,
-                            description: anime.Description ?? string.Empty);
-
-                        await File.WriteAllTextAsync(nfoPath, nfo, cancellationToken).ConfigureAwait(false);
+                        continue;
                     }
 
+                    var url = streamBase + "&format=hls";
+                    var fileBaseName = baseName + " - Auto";
+                    await WriteEpisodeArtifactsAsync(logger, seasonDir, fileBaseName, url, ep, seasonNumber, title, anime.Description, perf, cancellationToken)
+                        .ConfigureAwait(false);
+                    TrackExpectedEpisodeArtifact(expectedEpisodeFileBaseNames, ep, fileBaseName);
+                    TrackExpectedEpisodeTranslation(expectedEpisodeTranslationKeys, ep, "Auto");
+                    writtenEpisodes.Add(ep);
+                    filesWritten++;
                     continue;
                 }
 
@@ -436,90 +918,437 @@ namespace YummyKodik.Tasks
                     {
                         continue;
                     }
-                
+
                     var suffixRaw = BuildTranslationFileSuffix(tr);
                     var suffix = SafeFilename(suffixRaw);
                     if (string.IsNullOrWhiteSpace(suffix))
                     {
                         suffix = "Translation_" + trId;
                     }
-                
-                    var fileBaseName = baseName + " - " + suffix;
-                
-                    var strmPath = Path.Combine(seasonDir, fileBaseName + ".strm");
-                    var nfoPath = Path.Combine(seasonDir, fileBaseName + ".nfo");
-                
-                    // ✅ ВАЖНО: не создаём файлы на перевод, если этот перевод ещё не дошёл до ep.
-                    // MaxEpisode<=0 считаем "неизвестно" -> не фильтруем.
-                    if (tr.MaxEpisode > 0 && ep > tr.MaxEpisode)
+
+                    if (HasExpectedEpisodeTranslation(expectedEpisodeTranslationKeys, ep, suffix))
                     {
-                        // (опционально, но полезно) убираем ранее созданные плейсхолдеры, чтобы они не висели в библиотеке
-                        TryDeleteFile(logger, strmPath);
-                        TryDeleteFile(logger, nfoPath);
                         continue;
                     }
-                
-                    var url = streamBase + $"&tr={Uri.EscapeDataString(trId)}&format=hls";
-                
-                    await File.WriteAllTextAsync(strmPath, url + Environment.NewLine, cancellationToken).ConfigureAwait(false);
-                
-                    if (!File.Exists(nfoPath))
+
+                    var fileBaseName = EpisodeArtifactMaintenance.ResolveEpisodeTranslationFileBaseName(
+                        existingEpisodeTranslationFileBaseNames,
+                        ep,
+                        baseName,
+                        suffix);
+
+                    var strmPath = Path.Combine(seasonDir, fileBaseName + ".strm");
+                    var nfoPath = Path.Combine(seasonDir, fileBaseName + ".nfo");
+
+                    if (!tr.CoversEpisode(ep))
                     {
-                        var nfo = NfoBuilder.BuildEpisodeNfo(
-                            ep,
-                            season: seasonNumber,
-                            seriesTitle: title,
-                            description: anime.Description ?? string.Empty);
-                
-                        await File.WriteAllTextAsync(nfoPath, nfo, cancellationToken).ConfigureAwait(false);
+                        TryDeleteFile(logger, strmPath, perf);
+                        TryDeleteFile(logger, nfoPath, perf);
+                        continue;
+                    }
+
+                    if (resolvedTranslationEpisodes.TryGetValue(trId, out var playableEpisodes) &&
+                        !playableEpisodes.Contains(ep))
+                    {
+                        TryDeleteFile(logger, strmPath, perf);
+                        TryDeleteFile(logger, nfoPath, perf);
+                        continue;
+                    }
+
+                    var url = streamBase + $"&tr={Uri.EscapeDataString(trId)}&format=hls";
+
+                    await WriteTextAtomicallyAsync(strmPath, url + Environment.NewLine, perf, "strm", cancellationToken).ConfigureAwait(false);
+                    await EnsureEpisodeNfoAsync(logger, nfoPath, ep, seasonNumber, title, anime.Description, perf, cancellationToken)
+                        .ConfigureAwait(false);
+                    TrackExpectedEpisodeArtifact(expectedEpisodeFileBaseNames, ep, fileBaseName);
+                    TrackExpectedEpisodeTranslation(expectedEpisodeTranslationKeys, ep, suffix);
+                    writtenEpisodes.Add(ep);
+                    filesWritten++;
+                }
+            }
+
+            return new EpisodeArtifactGenerationResult(writtenEpisodes.Count, filesWritten);
+        }
+
+        private static async Task<Dictionary<string, HashSet<int>>> ResolveDistinctKodikTranslationEpisodesAsync(
+            ILogger logger,
+            KodikClient kodik,
+            KodikIdType idType,
+            string id,
+            IReadOnlyList<KodikTranslation> translations,
+            IReadOnlyCollection<int> episodes,
+            RefreshPerformanceMetrics? perf,
+            CancellationToken cancellationToken)
+        {
+            var result = new Dictionary<string, HashSet<int>>(StringComparer.Ordinal);
+            if (translations.Count == 0 || episodes.Count == 0)
+            {
+                return result;
+            }
+
+            foreach (var tr in translations)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                var trId = (tr.Id ?? string.Empty).Trim();
+                if (string.IsNullOrWhiteSpace(trId))
+                {
+                    continue;
+                }
+
+                var candidateEpisodes = episodes
+                    .Where(ep => tr.CoversEpisode(ep))
+                    .Distinct()
+                    .OrderBy(ep => ep)
+                    .ToArray();
+
+                if (candidateEpisodes.Length == 0)
+                {
+                    continue;
+                }
+
+                if (candidateEpisodes.Length == 1)
+                {
+                    result[trId] = new HashSet<int>(candidateEpisodes);
+                    continue;
+                }
+
+                var resolvedBasePaths = new Dictionary<int, string>();
+                foreach (var episode in candidateEpisodes)
+                {
+                    try
+                    {
+                        perf?.AddCount("kodik.translation_link_checks");
+                        KodikLinkInfo link;
+                        using (perf?.Measure("stage.kodik.translation.links") ?? default)
+                        {
+                            link = await kodik.GetEpisodeLinkAsync(id, idType, episode, trId, cancellationToken)
+                                .ConfigureAwait(false);
+                        }
+
+                        var basePath = (link.BasePath ?? string.Empty).Trim();
+                        if (basePath.Length > 0)
+                        {
+                            resolvedBasePaths[episode] = basePath;
+                        }
+                    }
+                    catch (Exception ex) when (ex is KodikException or HttpRequestException or TaskCanceledException or JsonException)
+                    {
+                        perf?.AddCount("kodik.translation_link_failures");
+                        logger.LogDebug(
+                            ex,
+                            "[YummyKodik] Failed to validate Kodik translation episode link. translationId={TranslationId} episode={Episode}",
+                            trId,
+                            episode);
                     }
                 }
 
+                var distinctEpisodes = KodikEpisodeLinkDeduper.KeepLatestEpisodePerResolvedLink(candidateEpisodes, resolvedBasePaths);
+                if (distinctEpisodes.Count < candidateEpisodes.Length)
+                {
+                    var removedEpisodes = candidateEpisodes
+                        .Where(ep => !distinctEpisodes.Contains(ep))
+                        .OrderBy(ep => ep);
+                    logger.LogInformation(
+                        "[YummyKodik] Kodik translation dedupe. translation={Translation} translationId={TranslationId} removedEpisodes={RemovedEpisodes} keptEpisodes={KeptEpisodes}",
+                        tr.Name ?? trId,
+                        trId,
+                        string.Join(", ", removedEpisodes),
+                        string.Join(", ", distinctEpisodes.OrderBy(ep => ep)));
+                }
+
+                result[trId] = distinctEpisodes;
             }
 
-            logger.LogInformation(
-                "[YummyKodik] Done refreshing '{Title}'. SeriesCount: {SeriesCount}, translations: {Translations}.",
-                title,
-                info.SeriesCount,
-                info.Translations.Count);
+            return result;
         }
 
-        private static int ExtractSeasonNumberFromTitle(string? title)
+        private static string BuildProviderStreamUrl(
+            string baseUrl,
+            YummyVideoProviderKind provider,
+            long animeId,
+            int episode,
+            string? voiceName = null,
+            YummyVideoEntry? entry = null)
         {
-            var s = (title ?? string.Empty).Trim();
-            if (s.Length == 0)
+            return provider switch
             {
-                return 1;
-            }
-
-            // Rule: "<space><digits>" at the end is season number.
-            var m = Regex.Match(s, @"\s(?<season>\d+)$", RegexOptions.CultureInvariant);
-            if (!m.Success)
-            {
-                return 1;
-            }
-
-            if (!int.TryParse(m.Groups["season"].Value, out var season) || season <= 0)
-            {
-                return 1;
-            }
-
-            return season;
+                YummyVideoProviderKind.Alloha => YummyKodikStreamUri.BuildAllohaHttpUrl(baseUrl, animeId, episode, voiceName, entry?.Alloha),
+                _ => YummyKodikStreamUri.BuildCvhHttpUrl(baseUrl, animeId, episode, voiceName)
+            };
         }
-        
-        private static void TryDeleteFile(ILogger logger, string path)
+
+        private static Dictionary<int, Dictionary<string, string>> BuildExistingEpisodeTranslationFileBaseNames(
+            string seasonDir,
+            int seasonNumber)
+        {
+            var result = new Dictionary<int, Dictionary<string, string>>();
+            if (string.IsNullOrWhiteSpace(seasonDir) || !Directory.Exists(seasonDir))
+            {
+                return result;
+            }
+
+            var effectiveSeasonNumber = seasonNumber >= 0 ? seasonNumber : 1;
+            var filePattern = new Regex(
+                @"^S(?<season>\d{2})E(?<episode>\d{2})(?: - (?<suffix>.+))?$",
+                RegexOptions.CultureInvariant | RegexOptions.IgnoreCase,
+                TimeSpan.FromSeconds(1));
+
+            foreach (var path in Directory.EnumerateFiles(seasonDir, "*.strm", SearchOption.TopDirectoryOnly))
+            {
+                var fileBaseName = Path.GetFileNameWithoutExtension(path);
+                if (string.IsNullOrWhiteSpace(fileBaseName))
+                {
+                    continue;
+                }
+
+                var match = filePattern.Match(fileBaseName);
+                if (!match.Success ||
+                    !int.TryParse(match.Groups["season"].Value, out var parsedSeason) ||
+                    parsedSeason != effectiveSeasonNumber ||
+                    !int.TryParse(match.Groups["episode"].Value, out var episodeNumber))
+                {
+                    continue;
+                }
+
+                var suffix = match.Groups["suffix"].Success
+                    ? (match.Groups["suffix"].Value ?? string.Empty).Trim()
+                    : string.Empty;
+                var normalizedKey = NormalizeEpisodeTranslationKey(suffix);
+                if (normalizedKey.Length == 0)
+                {
+                    continue;
+                }
+
+                if (!result.TryGetValue(episodeNumber, out var aliases))
+                {
+                    aliases = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                    result[episodeNumber] = aliases;
+                }
+
+                aliases.TryAdd(normalizedKey, fileBaseName);
+            }
+
+            return result;
+        }
+
+        private static async Task WriteEpisodeArtifactsAsync(
+            ILogger logger,
+            string seasonDir,
+            string fileBaseName,
+            string url,
+            int episodeNumber,
+            int seasonNumber,
+            string title,
+            string? description,
+            RefreshPerformanceMetrics? perf,
+            CancellationToken cancellationToken)
+        {
+            var strmPath = Path.Combine(seasonDir, fileBaseName + ".strm");
+            var nfoPath = Path.Combine(seasonDir, fileBaseName + ".nfo");
+
+            await WriteTextAtomicallyAsync(strmPath, url + Environment.NewLine, perf, "strm", cancellationToken).ConfigureAwait(false);
+            await EnsureEpisodeNfoAsync(logger, nfoPath, episodeNumber, seasonNumber, title, description, perf, cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        private static void TrackExpectedEpisodeArtifact(
+            IDictionary<int, HashSet<string>> expectedEpisodeFileBaseNames,
+            int episodeNumber,
+            string fileBaseName)
+        {
+            EpisodeArtifactMaintenance.TrackExpectedEpisodeArtifact(expectedEpisodeFileBaseNames, episodeNumber, fileBaseName);
+        }
+
+        private static void TrackExpectedEpisodeTranslation(
+            IDictionary<int, HashSet<string>> expectedEpisodeTranslationKeys,
+            int episodeNumber,
+            string translationSuffix)
+        {
+            EpisodeArtifactMaintenance.TrackExpectedEpisodeTranslation(expectedEpisodeTranslationKeys, episodeNumber, translationSuffix);
+        }
+
+        private static bool HasExpectedEpisodeArtifacts(
+            IDictionary<int, HashSet<string>> expectedEpisodeFileBaseNames,
+            int episodeNumber)
+        {
+            return EpisodeArtifactMaintenance.HasExpectedEpisodeArtifacts(expectedEpisodeFileBaseNames, episodeNumber);
+        }
+
+        private static bool HasExpectedEpisodeTranslation(
+            IDictionary<int, HashSet<string>> expectedEpisodeTranslationKeys,
+            int episodeNumber,
+            string translationSuffix)
+        {
+            return EpisodeArtifactMaintenance.HasExpectedEpisodeTranslation(expectedEpisodeTranslationKeys, episodeNumber, translationSuffix);
+        }
+
+        private static string NormalizeEpisodeTranslationKey(string? translationSuffix)
+        {
+            return EpisodeArtifactMaintenance.NormalizeEpisodeTranslationKey(translationSuffix);
+        }
+
+        private static void CleanupUnexpectedEpisodeArtifacts(
+            ILogger logger,
+            string seasonDir,
+            int seasonNumber,
+            IReadOnlyDictionary<int, HashSet<string>> expectedEpisodeFileBaseNames,
+            int maxAvailableEpisodeNumber,
+            RefreshPerformanceMetrics? perf)
+        {
+            EpisodeArtifactMaintenance.CleanupUnexpectedEpisodeArtifacts(
+                logger,
+                seasonDir,
+                seasonNumber,
+                expectedEpisodeFileBaseNames,
+                maxAvailableEpisodeNumber,
+                path => TryDeleteFile(logger, path, perf));
+        }
+
+        private static void TryDeleteFile(ILogger logger, string path, RefreshPerformanceMetrics? perf = null)
         {
             try
             {
                 if (!string.IsNullOrWhiteSpace(path) && File.Exists(path))
                 {
                     File.Delete(path);
+                    perf?.AddCount("io.file_deleted");
                     logger.LogDebug("[YummyKodik] Deleted stale placeholder file '{Path}'.", path);
                 }
             }
             catch (Exception ex)
             {
+                perf?.AddCount("io.delete_failures");
                 logger.LogDebug(ex, "[YummyKodik] Failed to delete file '{Path}'.", path);
+            }
+        }
+
+        private readonly record struct EpisodeArtifactGenerationResult(int EpisodesWritten, int FilesWritten);
+
+        private static IEnumerable<string> GetLegacySeriesRoots(string root, string rawTitle, string resolvedTitle, YummyAnimeResponse anime)
+        {
+            if (string.IsNullOrWhiteSpace(root))
+            {
+                yield break;
+            }
+
+            if (!string.IsNullOrWhiteSpace(rawTitle))
+            {
+                yield return Path.Combine(root, SafeFilename(rawTitle));
+                yield return Path.Combine(root, SafeFilename(BuildLegacySeriesFolderName(rawTitle, anime)));
+            }
+
+            if (!string.IsNullOrWhiteSpace(resolvedTitle))
+            {
+                yield return Path.Combine(root, SafeFilename(resolvedTitle));
+                yield return Path.Combine(root, SafeFilename(BuildLegacySeriesFolderName(resolvedTitle, anime)));
+            }
+
+            if (!string.IsNullOrWhiteSpace(rawTitle))
+            {
+                yield return Path.Combine(root, SafeFilename(BuildSeriesFolderName(rawTitle, anime)));
+            }
+        }
+
+        private static string ResolveSeriesRoot(ILogger logger, string seriesRoot, IEnumerable<string> legacyRoots)
+        {
+            if (string.IsNullOrWhiteSpace(seriesRoot))
+            {
+                return seriesRoot;
+            }
+
+            if (Directory.Exists(seriesRoot))
+            {
+                return seriesRoot;
+            }
+
+            foreach (var legacyRoot in legacyRoots
+                         .Where(x => !string.IsNullOrWhiteSpace(x))
+                         .Where(x => !string.Equals(x, seriesRoot, StringComparison.OrdinalIgnoreCase))
+                         .Distinct(StringComparer.OrdinalIgnoreCase))
+            {
+                if (!Directory.Exists(legacyRoot))
+                {
+                    continue;
+                }
+
+                logger.LogInformation(
+                    "[YummyKodik] Using existing legacy series folder '{Legacy}' instead of renaming to '{Canonical}' to keep Jellyfin item ids stable.",
+                    legacyRoot,
+                    seriesRoot);
+
+                return legacyRoot;
+            }
+
+            return seriesRoot;
+        }
+
+        private static string PrepareSeasonDirectory(ILogger logger, string seriesRoot, string seasonDir, int seasonNumber)
+        {
+            return SeasonDirectoryMaintenance.PrepareSeasonDirectory(logger, seriesRoot, seasonDir, seasonNumber);
+        }
+
+        private static string BuildEpisodeBaseName(string seasonDir, int seasonNumber, int episodeNumber)
+        {
+            var effectiveSeasonNumber = seasonNumber >= 0 ? seasonNumber : 1;
+            return $"S{effectiveSeasonNumber:00}E{episodeNumber:00}";
+        }
+
+        private static void TryMigrateIncorrectCalendarSeasonFolder(ILogger logger, string seriesRoot, string seasonDir, int seasonNumber)
+        {
+            if (seasonNumber != 1 || string.IsNullOrWhiteSpace(seriesRoot) || string.IsNullOrWhiteSpace(seasonDir))
+            {
+                return;
+            }
+
+            if (!Directory.Exists(seriesRoot))
+            {
+                return;
+            }
+
+            try
+            {
+                var mistakenDirs = Directory.EnumerateDirectories(seriesRoot, "Season *", SearchOption.TopDirectoryOnly)
+                    .Where(path => !string.Equals(path, seasonDir, StringComparison.OrdinalIgnoreCase))
+                    .Select(path => new
+                    {
+                        Path = path,
+                        Match = Regex.Match(
+                            Path.GetFileName(path) ?? string.Empty,
+                            @"^Season (?<season>\d{2})$",
+                            RegexOptions.CultureInvariant | RegexOptions.IgnoreCase,
+                            matchTimeout: TimeSpan.FromSeconds(1))
+                    })
+                    .Where(x => x.Match.Success)
+                    .Select(x => new
+                    {
+                        x.Path,
+                        Season = int.Parse(x.Match.Groups["season"].Value)
+                    })
+                    .Where(x => x.Season > 1)
+                    .ToList();
+
+                foreach (var mistakenDir in mistakenDirs)
+                {
+                    var movedCount = MoveSeasonArtifactsForSeason(logger, mistakenDir.Path, seasonDir, seasonNumber);
+                    if (movedCount <= 0)
+                    {
+                        continue;
+                    }
+
+                    logger.LogInformation(
+                        "[YummyKodik] Reconciled {Count} season {Season} artifact(s) from '{Old}' into '{New}'.",
+                        movedCount,
+                        seasonNumber,
+                        mistakenDir.Path,
+                        seasonDir);
+
+                    TryDeleteEmptySeasonDirectory(logger, mistakenDir.Path);
+                }
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "[YummyKodik] Failed to reconcile mistaken season folder under '{SeriesRoot}'.", seriesRoot);
             }
         }
 
@@ -533,11 +1362,6 @@ namespace YummyKodik.Tasks
 
             var legacySeasonDir = Path.Combine(seriesRoot, "Season 01");
 
-            if (Directory.Exists(seasonDir))
-            {
-                return;
-            }
-
             if (!Directory.Exists(legacySeasonDir))
             {
                 return;
@@ -545,28 +1369,36 @@ namespace YummyKodik.Tasks
 
             try
             {
-                Directory.Move(legacySeasonDir, seasonDir);
-                logger.LogInformation("[YummyKodik] Renamed legacy season folder '{Old}' -> '{New}'.", legacySeasonDir, seasonDir);
+                var movedCount = MoveSeasonArtifactsForSeason(logger, legacySeasonDir, seasonDir, seasonNumber);
+                if (movedCount <= 0)
+                {
+                    return;
+                }
+
+                logger.LogInformation(
+                    "[YummyKodik] Reconciled {Count} season {Season} artifact(s) from legacy season folder '{Old}' into '{New}'.",
+                    movedCount,
+                    seasonNumber,
+                    legacySeasonDir,
+                    seasonDir);
+
+                TryDeleteEmptySeasonDirectory(logger, legacySeasonDir);
             }
             catch (Exception ex)
             {
-                logger.LogWarning(ex, "[YummyKodik] Failed to rename legacy season folder '{Old}' -> '{New}'.", legacySeasonDir, seasonDir);
+                logger.LogWarning(ex, "[YummyKodik] Failed to reconcile legacy season folder '{Old}' -> '{New}'.", legacySeasonDir, seasonDir);
             }
         }
 
         private static void MigrateLegacyEpisodeFileNames(ILogger logger, string seasonDir, int seasonNumber)
         {
-            if (seasonNumber == 1)
-            {
-                return;
-            }
-
             if (string.IsNullOrWhiteSpace(seasonDir) || !Directory.Exists(seasonDir))
             {
                 return;
             }
 
-            string newSeasonPrefix = "S" + seasonNumber.ToString("00");
+            var normalizedSeasonNumber = seasonNumber >= 0 ? seasonNumber : 1;
+            string newSeasonPrefix = "S" + normalizedSeasonNumber.ToString("00");
 
             try
             {
@@ -587,26 +1419,28 @@ namespace YummyKodik.Tasks
                         continue;
                     }
 
-                    // Rename only "S01E..." into "S{season:00}E..."
-                    if (!fileName.StartsWith("S01E", StringComparison.OrdinalIgnoreCase))
+                    var nameNoExt = Path.GetFileNameWithoutExtension(path) ?? string.Empty;
+                    if (!TryGetEpisodeFileSeasonPrefix(nameNoExt, out var currentSeasonPrefix))
                     {
                         continue;
                     }
 
                     var ext = Path.GetExtension(path);
-                    var nameNoExt = Path.GetFileNameWithoutExtension(path) ?? string.Empty;
+                    if (string.Equals(currentSeasonPrefix, newSeasonPrefix, StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (ext.Equals(".nfo", StringComparison.OrdinalIgnoreCase))
+                        {
+                            TryUpdateEpisodeNfoSeason(logger, path, normalizedSeasonNumber);
+                        }
 
-                    // Keep everything after "S01" intact, replace only season part.
-                    // Example:
-                    //   S01E01
-                    //   S01E01 - AniLibria
+                        continue;
+                    }
+
                     var renamedNoExt = newSeasonPrefix + nameNoExt.Substring(3);
-
                     var target = Path.Combine(seasonDir, renamedNoExt + ext);
 
                     if (File.Exists(target))
                     {
-                        // Prefer target, remove legacy duplicate.
                         try
                         {
                             File.Delete(path);
@@ -631,13 +1465,216 @@ namespace YummyKodik.Tasks
 
                     if (ext.Equals(".nfo", StringComparison.OrdinalIgnoreCase))
                     {
-                        TryUpdateEpisodeNfoSeason(logger, target, seasonNumber);
+                        TryUpdateEpisodeNfoSeason(logger, target, normalizedSeasonNumber);
                     }
                 }
             }
             catch (Exception ex)
             {
                 logger.LogDebug(ex, "[YummyKodik] Season file migration failed. seasonDir='{SeasonDir}' season={Season}", seasonDir, seasonNumber);
+            }
+        }
+
+        private static int MoveSeasonArtifactsForSeason(ILogger logger, string sourceDir, string targetDir, int seasonNumber)
+        {
+            if (string.IsNullOrWhiteSpace(sourceDir) ||
+                string.IsNullOrWhiteSpace(targetDir) ||
+                !Directory.Exists(sourceDir) ||
+                string.Equals(sourceDir, targetDir, StringComparison.OrdinalIgnoreCase))
+            {
+                return 0;
+            }
+
+            Directory.CreateDirectory(targetDir);
+
+            var movedCount = 0;
+            var files = Directory.EnumerateFiles(sourceDir, "*.*", SearchOption.TopDirectoryOnly)
+                .Where(p =>
+                {
+                    var ext = Path.GetExtension(p);
+                    return ext.Equals(".strm", StringComparison.OrdinalIgnoreCase) ||
+                           ext.Equals(".nfo", StringComparison.OrdinalIgnoreCase);
+                })
+                .ToList();
+
+            foreach (var group in files
+                         .GroupBy(path => Path.GetFileNameWithoutExtension(path) ?? string.Empty, StringComparer.OrdinalIgnoreCase)
+                         .Where(g => !string.IsNullOrWhiteSpace(g.Key)))
+            {
+                var detectedSeason = DetectSeasonNumberFromArtifacts(group);
+                if (detectedSeason != seasonNumber)
+                {
+                    continue;
+                }
+
+                foreach (var path in group)
+                {
+                    var ext = Path.GetExtension(path);
+                    var nameNoExt = Path.GetFileNameWithoutExtension(path) ?? string.Empty;
+                    var targetNameNoExt = RewriteEpisodeFileSeasonPrefix(nameNoExt, seasonNumber);
+                    var targetPath = Path.Combine(targetDir, targetNameNoExt + ext);
+
+                    try
+                    {
+                        if (!string.Equals(path, targetPath, StringComparison.OrdinalIgnoreCase))
+                        {
+                            if (File.Exists(targetPath))
+                            {
+                                File.Delete(path);
+                            }
+                            else
+                            {
+                                File.Move(path, targetPath);
+                            }
+                        }
+
+                        if (ext.Equals(".nfo", StringComparison.OrdinalIgnoreCase))
+                        {
+                            TryUpdateEpisodeNfoSeason(logger, targetPath, seasonNumber);
+                        }
+
+                        movedCount++;
+                    }
+                    catch (Exception ex)
+                    {
+                        logger.LogDebug(ex, "[YummyKodik] Failed to move season artifact '{Path}' -> '{TargetPath}'.", path, targetPath);
+                    }
+                }
+            }
+
+            return movedCount;
+        }
+
+        private static int? DetectSeasonNumberFromArtifacts(IEnumerable<string> paths)
+        {
+            var artifactPaths = paths?.Where(p => !string.IsNullOrWhiteSpace(p)).ToList();
+            if (artifactPaths == null || artifactPaths.Count == 0)
+            {
+                return null;
+            }
+
+            var nfoSeasonNumbers = artifactPaths
+                .Where(path => Path.GetExtension(path).Equals(".nfo", StringComparison.OrdinalIgnoreCase))
+                .Select(TryReadEpisodeSeasonFromNfo)
+                .Where(season => season.HasValue && season.Value > 0)
+                .Select(season => season!.Value)
+                .Distinct()
+                .ToList();
+
+            if (nfoSeasonNumbers.Count == 1)
+            {
+                return nfoSeasonNumbers[0];
+            }
+
+            if (nfoSeasonNumbers.Count > 1)
+            {
+                return null;
+            }
+
+            var fileNameSeasonNumbers = artifactPaths
+                .Select(path => TryReadEpisodeSeasonFromFileName(Path.GetFileNameWithoutExtension(path) ?? string.Empty))
+                .Where(season => season.HasValue && season.Value > 0)
+                .Select(season => season!.Value)
+                .Distinct()
+                .ToList();
+
+            return fileNameSeasonNumbers.Count == 1 ? fileNameSeasonNumbers[0] : null;
+        }
+
+        private static int? TryReadEpisodeSeasonFromNfo(string nfoPath)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(nfoPath) || !File.Exists(nfoPath))
+                {
+                    return null;
+                }
+
+                var xml = File.ReadAllText(nfoPath);
+                if (string.IsNullOrWhiteSpace(xml))
+                {
+                    return null;
+                }
+
+                var match = Regex.Match(
+                    xml,
+                    @"<season>\s*(?<season>\d+)\s*</season>",
+                    RegexOptions.CultureInvariant | RegexOptions.IgnoreCase,
+                    matchTimeout: TimeSpan.FromSeconds(1));
+
+                if (!match.Success ||
+                    !int.TryParse(match.Groups["season"].Value, out var seasonNumber) ||
+                    seasonNumber <= 0)
+                {
+                    return null;
+                }
+
+                return seasonNumber;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private static int? TryReadEpisodeSeasonFromFileName(string fileNameWithoutExtension)
+        {
+            return TryGetEpisodeFileSeasonPrefix(fileNameWithoutExtension, out var seasonPrefix) &&
+                   int.TryParse(seasonPrefix.AsSpan(1), out var seasonNumber) &&
+                   seasonNumber > 0
+                ? seasonNumber
+                : null;
+        }
+
+        private static bool TryGetEpisodeFileSeasonPrefix(string fileNameWithoutExtension, out string seasonPrefix)
+        {
+            seasonPrefix = string.Empty;
+
+            if (string.IsNullOrWhiteSpace(fileNameWithoutExtension) ||
+                fileNameWithoutExtension.Length < 4 ||
+                fileNameWithoutExtension[0] != 'S' ||
+                !char.IsDigit(fileNameWithoutExtension[1]) ||
+                !char.IsDigit(fileNameWithoutExtension[2]) ||
+                char.ToUpperInvariant(fileNameWithoutExtension[3]) != 'E')
+            {
+                return false;
+            }
+
+            seasonPrefix = fileNameWithoutExtension.Substring(0, 3);
+            return true;
+        }
+
+        private static string RewriteEpisodeFileSeasonPrefix(string fileNameWithoutExtension, int seasonNumber)
+        {
+            if (!TryGetEpisodeFileSeasonPrefix(fileNameWithoutExtension, out _))
+            {
+                return fileNameWithoutExtension;
+            }
+
+            var normalizedSeasonNumber = seasonNumber >= 0 ? seasonNumber : 1;
+            return "S" + normalizedSeasonNumber.ToString("00") + fileNameWithoutExtension.Substring(3);
+        }
+
+        private static void TryDeleteEmptySeasonDirectory(ILogger logger, string directoryPath)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(directoryPath) || !Directory.Exists(directoryPath))
+                {
+                    return;
+                }
+
+                if (Directory.EnumerateFileSystemEntries(directoryPath).Any())
+                {
+                    return;
+                }
+
+                Directory.Delete(directoryPath);
+                logger.LogInformation("[YummyKodik] Removed empty legacy season folder '{Path}'.", directoryPath);
+            }
+            catch (Exception ex)
+            {
+                logger.LogDebug(ex, "[YummyKodik] Failed to delete empty season folder '{Path}'.", directoryPath);
             }
         }
 
@@ -651,6 +1688,10 @@ namespace YummyKodik.Tasks
                 }
 
                 var xml = File.ReadAllText(nfoPath);
+                if (!IsValidXmlContent(xml))
+                {
+                    return;
+                }
 
                 // Replace first <season>...</season> with correct value.
                 var updated = Regex.Replace(
@@ -662,7 +1703,7 @@ namespace YummyKodik.Tasks
 
                 if (!string.Equals(xml, updated, StringComparison.Ordinal))
                 {
-                    File.WriteAllText(nfoPath, updated);
+                    WriteTextAtomically(nfoPath, updated);
                 }
             }
             catch (Exception ex)
@@ -715,7 +1756,7 @@ namespace YummyKodik.Tasks
             return name + " [" + type + "]";
         }
 
-        private static string BuildSeriesFolderName(string title, YummyAnimeResponse anime)
+        private static string BuildSeriesFolderName(string title, YummyAnimeResponse? anime)
         {
             var baseTitle = (title ?? string.Empty).Trim();
             if (string.IsNullOrEmpty(baseTitle))
@@ -723,35 +1764,20 @@ namespace YummyKodik.Tasks
                 baseTitle = NormalizeKey(anime?.AnimeUrl);
             }
 
-            var tag = BuildBestIdTag(anime);
+            var tag = YummyProviderTagFormatter.BuildBestIdTag(anime);
             return string.IsNullOrEmpty(tag) ? baseTitle : $"{baseTitle} {tag}";
         }
 
-        private static string BuildBestIdTag(YummyAnimeResponse anime)
+        private static string BuildLegacySeriesFolderName(string title, YummyAnimeResponse? anime)
         {
-            var r = anime?.RemoteIds;
-
-            if (r?.ShikimoriId is long shiki && shiki > 0)
+            var baseTitle = (title ?? string.Empty).Trim();
+            if (string.IsNullOrEmpty(baseTitle))
             {
-                return $"[shikimoriid-{shiki}]";
+                baseTitle = NormalizeKey(anime?.AnimeUrl);
             }
 
-            if (r?.KpId is long kp && kp > 0)
-            {
-                return $"[kp-{kp}]";
-            }
-
-            if (!string.IsNullOrWhiteSpace(r?.ImdbId))
-            {
-                return $"[imdbid-{r.ImdbId.Trim()}]";
-            }
-
-            if (anime != null && anime.AnimeId > 0)
-            {
-                return $"[yaniid-{anime.AnimeId}]";
-            }
-
-            return string.Empty;
+            var tag = YummyProviderTagFormatter.BuildLegacyBestIdTag(anime);
+            return string.IsNullOrEmpty(tag) ? baseTitle : $"{baseTitle} {tag}";
         }
 
         private static bool TryPickKodikIdFromRemoteIds(
@@ -827,18 +1853,351 @@ namespace YummyKodik.Tasks
         }
 
         private static async Task EnsureTvShowNfoAsync(
+            ILogger logger,
+            string seriesTitle,
             YummyAnimeResponse anime,
             string seriesRoot,
+            RefreshPerformanceMetrics? perf,
             CancellationToken cancellationToken)
         {
             var nfoPath = Path.Combine(seriesRoot, "tvshow.nfo");
+            var xml = NfoBuilder.BuildSeriesNfo(seriesTitle, anime.Description ?? string.Empty);
+
             if (File.Exists(nfoPath))
             {
-                return;
+                if (await IsValidXmlFileAsync(nfoPath, cancellationToken).ConfigureAwait(false))
+                {
+                    perf?.AddCount("io.nfo_unchanged");
+                    return;
+                }
+
+                perf?.AddCount("io.nfo_invalid_rebuilt");
+                logger.LogWarning(
+                    "[YummyKodik] Existing tvshow.nfo is empty or invalid XML, recreating it atomically. path='{Path}'",
+                    nfoPath);
             }
 
-            var xml = NfoBuilder.BuildSeriesNfo(anime.Title, anime.Description ?? string.Empty);
-            await File.WriteAllTextAsync(nfoPath, xml, cancellationToken).ConfigureAwait(false);
+            await WriteTextAtomicallyAsync(nfoPath, xml, perf, "nfo", cancellationToken).ConfigureAwait(false);
+        }
+
+        private static async Task EnsureEpisodeNfoAsync(
+            ILogger logger,
+            string nfoPath,
+            int episodeNumber,
+            int seasonNumber,
+            string seriesTitle,
+            string? description,
+            RefreshPerformanceMetrics? perf,
+            CancellationToken cancellationToken)
+        {
+            var xml = NfoBuilder.BuildEpisodeNfo(
+                episodeNumber,
+                season: seasonNumber,
+                seriesTitle: seriesTitle,
+                description: description ?? string.Empty);
+
+            if (File.Exists(nfoPath))
+            {
+                if (await IsValidXmlFileAsync(nfoPath, cancellationToken).ConfigureAwait(false))
+                {
+                    perf?.AddCount("io.nfo_unchanged");
+                    return;
+                }
+
+                perf?.AddCount("io.nfo_invalid_rebuilt");
+                logger.LogInformation(
+                    "[YummyKodik] Existing episode nfo is empty or invalid XML, recreating it atomically. path='{Path}'",
+                    nfoPath);
+            }
+
+            await WriteTextAtomicallyAsync(nfoPath, xml, perf, "nfo", cancellationToken).ConfigureAwait(false);
+        }
+
+        private static async Task<bool> IsValidXmlFileAsync(string path, CancellationToken cancellationToken)
+        {
+            if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+            {
+                return false;
+            }
+
+            var content = await File.ReadAllTextAsync(path, cancellationToken).ConfigureAwait(false);
+            return IsValidXmlContent(content);
+        }
+
+        private static async Task<TextWriteOutcome> WriteTextAtomicallyAsync(
+            string path,
+            string content,
+            RefreshPerformanceMetrics? perf,
+            string artifactKind,
+            CancellationToken cancellationToken)
+        {
+            var directory = Path.GetDirectoryName(path);
+            if (string.IsNullOrWhiteSpace(directory))
+            {
+                throw new InvalidOperationException($"Failed to determine directory for path '{path}'.");
+            }
+
+            Directory.CreateDirectory(directory);
+
+            var hasExistingFile = File.Exists(path);
+            if (hasExistingFile)
+            {
+                var existingContent = await File.ReadAllTextAsync(path, cancellationToken).ConfigureAwait(false);
+                if (string.Equals(existingContent, content, StringComparison.Ordinal))
+                {
+                    perf?.AddCount($"io.{artifactKind}_unchanged");
+                    return TextWriteOutcome.Unchanged;
+                }
+            }
+
+            var tempPath = Path.Combine(
+                directory,
+                Path.GetFileName(path) + ".tmp." + Guid.NewGuid().ToString("N"));
+
+            try
+            {
+                await File.WriteAllTextAsync(tempPath, content, cancellationToken).ConfigureAwait(false);
+
+                if (File.Exists(path))
+                {
+                    File.Move(tempPath, path, overwrite: true);
+                }
+                else
+                {
+                    File.Move(tempPath, path);
+                }
+            }
+            finally
+            {
+                if (File.Exists(tempPath))
+                {
+                    try
+                    {
+                        File.Delete(tempPath);
+                    }
+                    catch
+                    {
+                        // ignore temp cleanup failures
+                    }
+                }
+            }
+
+            var outcome = hasExistingFile ? TextWriteOutcome.Updated : TextWriteOutcome.Created;
+            perf?.AddCount($"io.{artifactKind}_{GetMetricSuffix(outcome)}");
+            return outcome;
+        }
+
+        private static TextWriteOutcome WriteTextAtomically(
+            string path,
+            string content,
+            RefreshPerformanceMetrics? perf = null,
+            string artifactKind = "text")
+        {
+            var directory = Path.GetDirectoryName(path);
+            if (string.IsNullOrWhiteSpace(directory))
+            {
+                throw new InvalidOperationException($"Failed to determine directory for path '{path}'.");
+            }
+
+            Directory.CreateDirectory(directory);
+
+            var hasExistingFile = File.Exists(path);
+            if (hasExistingFile)
+            {
+                var existingContent = File.ReadAllText(path);
+                if (string.Equals(existingContent, content, StringComparison.Ordinal))
+                {
+                    perf?.AddCount($"io.{artifactKind}_unchanged");
+                    return TextWriteOutcome.Unchanged;
+                }
+            }
+
+            var tempPath = Path.Combine(
+                directory,
+                Path.GetFileName(path) + ".tmp." + Guid.NewGuid().ToString("N"));
+
+            try
+            {
+                File.WriteAllText(tempPath, content);
+
+                if (File.Exists(path))
+                {
+                    File.Move(tempPath, path, overwrite: true);
+                }
+                else
+                {
+                    File.Move(tempPath, path);
+                }
+            }
+            finally
+            {
+                if (File.Exists(tempPath))
+                {
+                    try
+                    {
+                        File.Delete(tempPath);
+                    }
+                    catch
+                    {
+                        // ignore temp cleanup failures
+                    }
+                }
+            }
+
+            var outcome = hasExistingFile ? TextWriteOutcome.Updated : TextWriteOutcome.Created;
+            perf?.AddCount($"io.{artifactKind}_{GetMetricSuffix(outcome)}");
+            return outcome;
+        }
+
+        private static bool IsValidXmlContent(string? content)
+        {
+            if (string.IsNullOrWhiteSpace(content))
+            {
+                return false;
+            }
+
+            try
+            {
+                var settings = new XmlReaderSettings
+                {
+                    DtdProcessing = DtdProcessing.Ignore,
+                    IgnoreComments = true,
+                    IgnoreWhitespace = true
+                };
+
+                using var reader = XmlReader.Create(new StringReader(content), settings);
+                return reader.MoveToContent() == XmlNodeType.Element;
+            }
+            catch (XmlException)
+            {
+                return false;
+            }
+        }
+
+        private enum TextWriteOutcome
+        {
+            Created,
+            Updated,
+            Unchanged
+        }
+
+        private static string GetMetricSuffix(TextWriteOutcome outcome)
+        {
+            return outcome switch
+            {
+                TextWriteOutcome.Created => "created",
+                TextWriteOutcome.Updated => "updated",
+                _ => "unchanged"
+            };
+        }
+
+        private sealed class RefreshPerformanceMetrics
+        {
+            private readonly Stopwatch _total = Stopwatch.StartNew();
+            private readonly Dictionary<string, long> _durationsMs = new(StringComparer.Ordinal);
+            private readonly Dictionary<string, int> _counts = new(StringComparer.Ordinal);
+
+            public RefreshPerformanceMetrics(bool enabled)
+            {
+                Enabled = enabled;
+            }
+
+            public bool Enabled { get; }
+
+            public MeasureScope Measure(string key)
+            {
+                return Enabled ? new MeasureScope(this, key) : default;
+            }
+
+            public void AddDuration(string key, TimeSpan elapsed)
+            {
+                if (!Enabled || string.IsNullOrWhiteSpace(key))
+                {
+                    return;
+                }
+
+                var elapsedMs = Math.Max(0L, (long)Math.Round(elapsed.TotalMilliseconds));
+                if (_durationsMs.TryGetValue(key, out var current))
+                {
+                    _durationsMs[key] = current + elapsedMs;
+                    return;
+                }
+
+                _durationsMs[key] = elapsedMs;
+            }
+
+            public void AddCount(string key, int delta = 1)
+            {
+                if (!Enabled || string.IsNullOrWhiteSpace(key) || delta == 0)
+                {
+                    return;
+                }
+
+                if (_counts.TryGetValue(key, out var current))
+                {
+                    _counts[key] = current + delta;
+                    return;
+                }
+
+                _counts[key] = delta;
+            }
+
+            public void LogSummary(ILogger logger, string title, string key)
+            {
+                if (!Enabled)
+                {
+                    return;
+                }
+
+                var stageSummary = _durationsMs.Count == 0
+                    ? "-"
+                    : string.Join(
+                        ", ",
+                        _durationsMs
+                            .OrderByDescending(x => x.Value)
+                            .Select(x => $"{x.Key}={x.Value}ms"));
+
+                var countSummary = _counts.Count == 0
+                    ? "-"
+                    : string.Join(
+                        ", ",
+                        _counts
+                            .OrderBy(x => x.Key, StringComparer.Ordinal)
+                            .Select(x => $"{x.Key}={x.Value}"));
+
+                logger.LogInformation(
+                    "[YummyKodik][perf] Refresh '{Title}' (key='{Key}') took {ElapsedMs}ms. stages: {Stages}. counts: {Counts}",
+                    title,
+                    key,
+                    _total.ElapsedMilliseconds,
+                    stageSummary,
+                    countSummary);
+            }
+
+            public readonly struct MeasureScope : IDisposable
+            {
+                private readonly RefreshPerformanceMetrics? _owner;
+                private readonly string? _key;
+                private readonly long _startedAt;
+
+                public MeasureScope(RefreshPerformanceMetrics owner, string key)
+                {
+                    _owner = owner;
+                    _key = key;
+                    _startedAt = Stopwatch.GetTimestamp();
+                }
+
+                public void Dispose()
+                {
+                    if (_owner == null || string.IsNullOrWhiteSpace(_key))
+                    {
+                        return;
+                    }
+
+                    var elapsed = Stopwatch.GetElapsedTime(_startedAt);
+                    _owner.AddDuration(_key, elapsed);
+                }
+            }
         }
 
         private static string NormalizeKey(string? s)

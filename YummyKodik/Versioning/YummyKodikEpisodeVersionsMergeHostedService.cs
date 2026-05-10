@@ -34,6 +34,7 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
     private static readonly TimeSpan ItemAddedDebounce = TimeSpan.FromSeconds(6);
     private static readonly TimeSpan ScanCompletedDebounce = TimeSpan.FromSeconds(1);
     private static readonly TimeSpan ScanPollInterval = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan StartupDebounce = TimeSpan.FromSeconds(15);
 
     private readonly ILibraryManager _libraryManager;
     private readonly IFileSystem _fileSystem;
@@ -75,6 +76,10 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
         // Fallback: poll IsScanRunning to detect scan end, if ScanCompleted event is absent.
         _wasScanRunning = SafeIsScanRunning();
         _scanPollTimer = new Timer(_ => ScanPollTick(), null, ScanPollInterval, ScanPollInterval);
+
+        // Existing episode items may already be present when the plugin starts.
+        // Schedule an initial pass so partially merged libraries heal after restart.
+        RequestMerge(StartupDebounce, "Startup");
 
         return Task.CompletedTask;
     }

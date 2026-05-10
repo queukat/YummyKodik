@@ -12,137 +12,286 @@
 ![Playback HLS](https://img.shields.io/badge/Playback-HLS-2ea44f)
 ![Segments Intro/Outro](https://img.shields.io/badge/Segments-Intro%20%2F%20Outro-blue)
 
-Jellyfin plugin that builds a local anime library from YummyAnime and plays episodes from Kodik through generated `.strm` files.
+YummyKodik is a Jellyfin plugin that builds a local anime library from YummyAnime and streams episodes through Jellyfin from Alloha, CVH, and Kodik-backed sources.
 
 ## Quick Links
 
 - Releases: `https://github.com/queukat/YummyKodik/releases`
+- Raw Jellyfin manifest: `https://raw.githubusercontent.com/queukat/YummyKodik/gh-pages/manifest.json`
+- GitHub Pages manifest: `https://queukat.github.io/YummyKodik/manifest.json`
 - Actions: `https://github.com/queukat/YummyKodik/actions`
 - Issues: `https://github.com/queukat/YummyKodik/issues`
-- Raw manifest: `https://raw.githubusercontent.com/queukat/YummyKodik/gh-pages/manifest.json`
-- Logo asset used by Jellyfin plugin catalog: `https://raw.githubusercontent.com/queukat/YummyKodik/main/YummyKodik/Assets/logo.png`
 
 ## What It Does
 
-- Creates a local `Series/Season 01/*.strm` and `*.nfo` structure from YummyAnime slugs or a Yummy user list.
-- Streams episodes through Jellyfin using the plugin proxy endpoint instead of hardcoding upstream Kodik links into metadata.
-- Supports preferred translations, per-user translation choice, and optional `one voice translation = one file` library mode.
-- Exposes intro and outro media segments for Jellyfin skip actions.
-- Generates installable release ZIPs and a Jellyfin repository manifest for GitHub Pages / `gh-pages`.
+- Creates a local Jellyfin TV library layout with `tvshow.nfo`, `Season XX/*.nfo`, and `Season XX/*.strm`.
+- Reads anime from manually configured Yummy slugs or from a Yummy user list.
+- Uses Yummy video metadata first and generates provider-aware stream URLs for Alloha and CVH.
+- Falls back across compatible Yummy providers when a selected provider cannot serve an episode.
+- Uses Kodik search/player data when Yummy provider data is not enough.
+- Resolves and caches a Kodik token automatically, with an optional manual token override.
+- Adds intro/outro media segments from Yummy/Kodik skip timings for Jellyfin clients that support skip actions.
+- Injects a small Jellyfin Web series-page widget where each user can choose a preferred voice translation or return to auto mode.
+- Can create one episode file per episode, or one episode file per voice translation.
 
-## Install
+## Requirements
 
-### Option A: raw GitHub manifest
+- Jellyfin `10.11.x`. The plugin is built against `10.11.0` for Docker/base-image compatibility.
+- A writable folder visible to the Jellyfin server for generated `.strm` and `.nfo` files.
+- A Jellyfin library pointing at that generated folder, usually with content type `Shows`.
+- A Yummy public token from `https://site.yummyani.me/dev/applications`.
+- Optional: an Alloha API token if you want the plugin to supplement missing Alloha entries by `kp_id`/`imdb_id`.
 
-Use this repository URL in Jellyfin:
+## Install From Manifest
+
+Use one of these repository URLs in Jellyfin:
 
 ```text
 https://raw.githubusercontent.com/queukat/YummyKodik/gh-pages/manifest.json
 ```
 
-Then install:
-
-1. Open `Dashboard -> Plugins -> Repositories -> Add`
-2. Paste the manifest URL
-3. Open `Dashboard -> Plugins -> Catalog -> YummyKodik -> Install`
-4. Restart Jellyfin
-
-### Option B: GitHub Pages manifest (optional)
-
-This URL only works if GitHub Pages is enabled for the repository.
-
 ```text
 https://queukat.github.io/YummyKodik/manifest.json
 ```
 
-To enable it:
+Then install:
 
-1. Open `Settings -> Pages`
-2. Set `Source` to `Deploy from a branch`
-3. Choose branch `gh-pages` and folder `/(root)`
+1. Open `Dashboard -> Plugins -> Repositories -> Add`.
+2. Paste the manifest URL.
+3. Open `Dashboard -> Plugins -> Catalog -> YummyKodik -> Install`.
+4. Restart Jellyfin.
+5. Open `Dashboard -> Plugins -> My Plugins -> YummyKodik -> Settings`.
 
-### Option C: manual ZIP install
+## Manual ZIP Install
 
-1. Download `YummyKodik_<version>.zip` from GitHub Releases.
-2. Extract it into the Jellyfin plugins directory:
-   - Linux: `/var/lib/jellyfin/plugins/`
-   - Windows (service/tray): `%ProgramData%\Jellyfin\Server\plugins`
-   - Windows (portable): `%UserProfile%\AppData\Local\jellyfin\plugins`
-3. Restart Jellyfin.
+Download `YummyKodik_<version>.zip` from GitHub Releases and extract the files directly into a versioned plugin folder.
+
+Windows service or tray install:
+
+```powershell
+$version = "1.1.0.0"
+$plugins = "$env:ProgramData\Jellyfin\Server\plugins"
+New-Item -ItemType Directory -Force "$plugins\YummyKodik_$version"
+Expand-Archive ".\YummyKodik_$version.zip" "$plugins\YummyKodik_$version" -Force
+```
+
+Windows portable install:
+
+```powershell
+$version = "1.1.0.0"
+$plugins = "$env:LOCALAPPDATA\jellyfin\plugins"
+New-Item -ItemType Directory -Force "$plugins\YummyKodik_$version"
+Expand-Archive ".\YummyKodik_$version.zip" "$plugins\YummyKodik_$version" -Force
+```
+
+Docker install by copying an already extracted package:
+
+```powershell
+$version = "1.1.0.0"
+docker exec jellyfin mkdir -p /config/plugins/YummyKodik_$version
+docker cp .\artifacts\package\. jellyfin:/config/plugins/YummyKodik_$version/
+docker restart jellyfin
+```
+
+Docker install from a zip inside the container:
+
+```bash
+version=1.1.0.0
+mkdir -p "/config/plugins/YummyKodik_$version"
+unzip "YummyKodik_$version.zip" -d "/config/plugins/YummyKodik_$version"
+```
+
+If Jellyfin cached a failed manual install as `NotSupported`, remove or rename `/config/plugins/YummyKodik_<version>/meta.json` after fixing the files, then restart Jellyfin.
 
 ## Configure
 
-Open:
-- `Dashboard -> Plugins -> My Plugins -> YummyKodik -> Settings`
+Open `Dashboard -> Plugins -> My Plugins -> YummyKodik -> Settings`.
 
-Before configuring the plugin, get your Yummy public token:
+Buttons:
 
-1. Sign in to Yummy.
-2. Open `https://site.yummyani.me/dev/applications`
-3. Create an application or open an existing one.
-4. Copy the public token from the `X-Application` field.
-5. Paste it into the plugin setting `Yummy public token (X-Application)`.
+- `Save`: writes the current settings to the Jellyfin plugin configuration.
+- `Reload`: discards unsaved edits and reloads settings from Jellyfin.
+- `Cancel`: closes the settings page.
 
 Main settings:
-- `Yummy public token (X-Application)`: public API token from `https://site.yummyani.me/dev/applications`
-- `Output root path`: folder where the plugin writes the local library
-- `Jellyfin server base URL`: externally reachable Jellyfin base URL used to build playback URLs
-- `Preferred translation filter`: substring tokens separated by `|`, for example `anilibria|aniliberty`
-- `Preferred quality`: `360`, `480`, `720`, `1080`
-- `Slugs`: one Yummy slug per line
+
+- `Yummy public token (X-Application)`: public token from `https://site.yummyani.me/dev/applications`.
+- `Yummy API base URL`: defaults to `https://api.yani.tv`; change only if the API endpoint changes.
+- `Alloha API token`: optional token for extra Alloha catalog lookup.
+- `Alloha API base URL`: defaults to `https://api.alloha.tv`.
+- `Output root path`: path on the Jellyfin server where generated files are written.
+- `Jellyfin server base URL`: base URL inserted into generated `.strm` files.
+- `Preferred translation filter`: preferred voice tokens separated by `|`, for example `anilibria|aniliberty|shiza`.
+- `Create separate STRM for each voice translation`: changes library layout from one file per episode to one file per voice.
+- `Preferred quality`: target quality, usually `720` or `1080`.
+- `Yummy slugs`: one Yummy slug per line for manual mode.
 
 Optional settings:
-- `Use user list subscription`: pulls entries from `/users/{id}/lists/{list_id}`
-- `Create STRM per voice translation`: creates one episode file per voice translation
-- `Enable Kodik HTTP debug logs`: useful only for troubleshooting
 
-After changing slugs or list settings run:
-- `Dashboard -> Scheduled Tasks -> YummyKodik library refresh`
+- `Enable Kodik HTTP request debug logs`: noisy HTTP request/response diagnostics for Kodik troubleshooting.
+- `Enable refresh performance diagnostics`: logs refresh stage timings and file-operation counters.
+- `Use user list subscription`: pulls anime from `/users/{id}/lists/{list_id}`.
+- `Yummy user ID` and `Yummy list ID`: identify the Yummy list to sync.
+- `Yummy access token`: bearer token for private Yummy endpoints.
+- `Yummy login` and `Yummy password`: fallback login flow if no access token is provided.
+- `Refresh interval`: scheduled refresh interval in minutes.
 
-If you changed playback URL format or enabled per-translation `.strm` mode, also refresh the library so Jellyfin re-reads the generated files.
+## Modes
 
-## Build
+Manual slug mode:
+
+- Put one or more Yummy slugs in `Yummy slugs`.
+- Leave `Use user list subscription` off.
+- Run `Dashboard -> Scheduled Tasks -> YummyKodik library refresh`.
+
+User list mode:
+
+- Turn on `Use user list subscription`.
+- Set `Yummy user ID`, `Yummy list ID`, and either `Yummy access token` or login/password.
+- Manual slugs are still honored, so you can combine both sources.
+
+Single episode file mode:
+
+- Leave `Create separate STRM for each voice translation` off.
+- The plugin creates `SxxEyy.strm`.
+- Playback picks a voice using the per-user saved choice, then `Preferred translation filter`, then provider fallback.
+
+Per-voice file mode:
+
+- Turn on `Create separate STRM for each voice translation`.
+- The plugin creates files like `S01E01 - AniLibria.strm`.
+- Jellyfin can show voice translations as separate episode versions.
+
+Translation widget mode:
+
+- The plugin patches Jellyfin Web `index.html` at startup to load `seriesTranslation.js`.
+- On a supported series details page, the widget shows `Auto` and available voice choices.
+- Choosing a voice saves a per-user, per-series preference.
+- Choosing `Auto` clears the saved preference and returns to automatic selection.
+
+## Docker Notes
+
+Use container paths in plugin settings. A Windows path such as `D:\video\YummyKodik` only works for Windows Jellyfin. In Docker, use a path inside the container, for example:
+
+```text
+/media/yummykodik
+```
+
+Mount that path from the host, then point a Jellyfin `Shows` library at the same container path.
+
+`Jellyfin server base URL` must be reachable from the Jellyfin container and from playback clients. On Docker Desktop, this often works well:
+
+```text
+http://host.docker.internal:8096
+```
+
+or, if Jellyfin is published on host port `8099`:
+
+```text
+http://host.docker.internal:8099
+```
+
+A trailing slash is safe. The plugin trims it before generating paths, so this:
+
+```text
+http://host.docker.internal:8099/
+```
+
+generates:
+
+```text
+http://host.docker.internal:8099/YummyKodik/stream?...
+```
+
+not:
+
+```text
+http://host.docker.internal:8099//YummyKodik/stream?...
+```
+
+## Refresh And Playback
+
+After changing slugs, user-list settings, `Output root path`, `Jellyfin server base URL`, or per-voice mode:
+
+1. Save the plugin configuration.
+2. Run `Dashboard -> Scheduled Tasks -> YummyKodik library refresh`.
+3. Scan the Jellyfin library that points at `Output root path`.
+4. Open a generated series and start playback.
+
+Playback URL types:
+
+- `provider=alloha`: builds an Alloha HLS session and proxies playlists/segments through `/YummyKodik/alloha-proxy`.
+- `provider=cvh`: builds a CVH HLS session and proxies nested playlists/segments through `/YummyKodik/cvh-proxy`.
+- `type=...&id=...`: legacy Kodik-backed URL mode.
+
+## Build And Package
 
 Restore and build:
 
-```bash
-dotnet restore ./YummyKodik/YummyKodik.csproj
-dotnet build ./YummyKodik/YummyKodik.csproj -c Release
+```powershell
+dotnet restore .\YummyKodik\YummyKodik.csproj
+dotnet build .\YummyKodik.sln -c Release
 ```
 
-Create a local release ZIP:
+Run the lightweight regression suite:
+
+```powershell
+dotnet run --project .\YummyKodik.Tests\YummyKodik.Tests.csproj -c Release
+```
+
+Create a local release ZIP on Windows:
+
+```powershell
+.\scripts\package.ps1 -Version 1.1.0.0
+```
+
+Create a local release ZIP on Linux/macOS:
 
 ```bash
-bash ./scripts/package.sh 1.0.0.0
+bash ./scripts/package.sh 1.1.0.0
 ```
 
 This produces:
+
 - `artifacts/YummyKodik_<version>.zip`
 - `artifacts/YummyKodik_<version>.zip.md5`
 
 ## Release Flow
 
-The repository includes GitHub Actions workflows for CI and release publishing.
+The release workflow runs on version tags and publishes the ZIP, MD5 checksum, GitHub Release, and `gh-pages` manifest.
 
-- `CI` builds the plugin on pushes and pull requests.
-- `Release` runs on version tags such as `v1.0.0.0`.
-- The release workflow publishes the plugin ZIP and MD5 checksum to GitHub Releases.
-- GitHub release notes are generated automatically.
-- `manifest.json` is updated on `gh-pages`, so Jellyfin repository installs keep working.
-
-Recommended tag format:
+Recommended tag format follows the existing release convention:
 
 ```bash
-git tag v1.0.0.0
-git push origin v1.0.0.0
+git tag 1.1.0.0
+git push origin 1.1.0.0
 ```
+
+Tags with a leading `v` also work because the workflow normalizes versions.
+
+## Docker Smoke Test
+
+The `1.1.0.0` package was smoke-tested against `jellyfin/jellyfin:10.11.0` with a single configured slug:
+
+```text
+fermerskaya-zhizn-v-inom-mire-2
+```
+
+Verified:
+
+- The plugin loads as `Active`.
+- The refresh task generates one series and five aired episode `.strm` files.
+- A trailing slash in `ServerBaseUrl` does not produce a double slash in generated URLs.
+- The generated Alloha stream returns an HLS master playlist.
+- A nested playlist returns `200 application/vnd.apple.mpegurl`.
+- The first proxied `.ts` segment returns `200 video/MP2T`.
+
+## Notes
+
+- Generated playback sources use HLS.
+- Intro/outro skip support depends on the Jellyfin client honoring media segments.
+- If you update from an older manual install, restart Jellyfin after replacing plugin files.
 
 ## Acknowledgements
 
 Special thanks to [`YaNesyTortiK/AnimeParsers`](https://github.com/YaNesyTortiK/AnimeParsers), which helped show that building a plugin like this was possible in the first place.
-
-## Notes
-
-- The plugin targets Jellyfin `10.11.x`.
-- Generated playback sources use HLS by default.
-- Intro/outro skip support depends on the Jellyfin client honoring media segments and skip actions.

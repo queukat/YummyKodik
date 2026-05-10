@@ -25,7 +25,7 @@ namespace YummyKodik
         public override Guid Id => _id;
 
         public override string Description =>
-            "Creates Jellyfin anime series cards from YummyAnime and streams episodes from Kodik.";
+            "Creates Jellyfin anime series cards from YummyAnime and streams episodes from Alloha, CVH, and Kodik-backed sources.";
 
         public Plugin(IApplicationPaths applicationPaths, IXmlSerializer xmlSerializer, ILogger<Plugin> logger)
             : base(applicationPaths, xmlSerializer)

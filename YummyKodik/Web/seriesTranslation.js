@@ -4,8 +4,8 @@
 (function () {
     "use strict";
 
-    const ROOT = "/YummyKodik";
     const WIDGET_ID = "ykTranslationWidget";
+    const WIDGET_CLASS = "detailsGroupItem ykTranslationGroup";
 
     function parseItemIdFromHash() {
         const h = (window.location.hash || "");
@@ -35,186 +35,263 @@
 
     async function apiGetTranslations(seriesId) {
         const url = ApiClient.getUrl("YummyKodik/getTranslations", { seriesId });
-        return ApiClient.ajax({ type: "GET", url });
+        return requestJson(url);
     }
 
     async function apiSetTranslation(seriesId, trId) {
         const url = ApiClient.getUrl("YummyKodik/setTranslation", { seriesId, tr: trId });
-        return ApiClient.ajax({ type: "GET", url });
+        return requestJson(url);
     }
 
-    function buildWidget(model) {
-        const wrapper = document.createElement("div");
-        wrapper.id = WIDGET_ID;
-        wrapper.className = "paperList";
-        wrapper.style.marginTop = "0.75em";
-        wrapper.style.padding = "0.75em";
+    async function requestJson(url) {
+        const response = await ApiClient.ajax({ type: "GET", url });
 
-        const title = document.createElement("div");
-        title.style.fontSize = "1.1em";
-        title.style.fontWeight = "600";
-        title.textContent = "Озвучка";
-
-        const row = document.createElement("div");
-        row.style.display = "flex";
-        row.style.flexWrap = "wrap";
-        row.style.alignItems = "center";
-        row.style.gap = "0.6em";
-        row.style.marginTop = "0.6em";
-
-        const select = document.createElement("select");
-        select.className = "emby-select";
-        select.style.minWidth = "260px";
-
-        const hint = document.createElement("div");
-        hint.style.opacity = "0.8";
-        hint.style.fontSize = "0.85em";
-        hint.style.marginTop = "0.45em";
-
-        const btnClear = document.createElement("button");
-        btnClear.type = "button";
-        btnClear.className = "raised button-submit emby-button";
-        btnClear.textContent = "Auto";
-
-        const btnRefresh = document.createElement("button");
-        btnRefresh.type = "button";
-        btnRefresh.className = "raised emby-button";
-        btnRefresh.textContent = "Обновить список";
-
-        function normalizeTranslations(trs) {
-            const list = Array.isArray(trs) ? trs : [];
-            const voices = list.filter(t => String(t.type || "").toLowerCase() === "voice");
-            return voices.length > 0 ? voices : list;
-        }
-
-        function fillSelect(translations, currentSavedId) {
-            while (select.firstChild) select.removeChild(select.firstChild);
-
-            const optAuto = document.createElement("option");
-            optAuto.value = "";
-            optAuto.textContent = "Auto (по фильтру и сохранённому выбору)";
-            select.appendChild(optAuto);
-
-            const norm = normalizeTranslations(translations);
-
-            for (const t of norm) {
-                const tid = String(t.id || "").trim();
-                if (!tid || tid === "0") continue;
-
-                const opt = document.createElement("option");
-                opt.value = tid;
-
-                const name = String(t.name || "").trim() || ("Translation " + tid);
-                const type = String(t.type || "").trim();
-                opt.textContent = type && type.toLowerCase() !== "voice" ? (name + " [" + type + "]") : name;
-
-                select.appendChild(opt);
+        if (response && typeof response.json === "function") {
+            if (typeof response.ok === "boolean" && !response.ok) {
+                const errorText = typeof response.text === "function" ? await response.text() : "";
+                throw new Error(errorText || ("HTTP " + response.status));
             }
 
-            select.value = currentSavedId ? String(currentSavedId).trim() : "";
+            const text = typeof response.text === "function" ? await response.text() : "";
+            return text ? JSON.parse(text) : {};
         }
+
+        if (typeof response === "string") {
+            return response ? JSON.parse(response) : {};
+        }
+
+        return response || {};
+    }
+
+    function normalizeTranslations(trs) {
+        const list = Array.isArray(trs) ? trs : [];
+        const voices = list.filter(t => String(t.type || "").toLowerCase() === "voice");
+        return (voices.length > 0 ? voices : list)
+            .map(t => {
+                const id = String(t.id || "").trim();
+                if (!id || id === "0") {
+                    return null;
+                }
+
+                const name = String(t.name || "").trim() || ("Translation " + id);
+                const type = String(t.type || "").trim();
+                return {
+                    id,
+                    label: type && type.toLowerCase() !== "voice" ? (name + " [" + type + "]") : name
+                };
+            })
+            .filter(Boolean);
+    }
+
+    function hasVisibleTranslations(data) {
+        return normalizeTranslations(data && data.translations).length > 0
+            || !!String(data && data.savedTranslationId || "").trim()
+            || !!String(data && data.chosenTranslationId || "").trim();
+    }
+
+    function clearNode(node) {
+        while (node.firstChild) {
+            node.removeChild(node.firstChild);
+        }
+    }
+
+    function setBusy(content, isBusy) {
+        const buttons = content.querySelectorAll("button");
+        buttons.forEach(button => {
+            button.disabled = !!isBusy;
+            button.style.opacity = isBusy ? "0.7" : "";
+        });
+    }
+
+    function buildWidget(model, initialData) {
+        const wrapper = document.createElement("div");
+        wrapper.id = WIDGET_ID;
+        wrapper.className = WIDGET_CLASS;
+
+        const label = document.createElement("div");
+        label.className = "label";
+        label.textContent = "Озвучка";
+
+        const content = document.createElement("div");
+        content.className = "content focuscontainer-x";
 
         async function reload() {
             const data = await apiGetTranslations(model.seriesId);
-
-            fillSelect(data.translations, data.savedTranslationId);
-
-            const chosen = String(data.chosenTranslationId || "").trim();
-            const reason = String(data.reason || "").trim();
-            hint.textContent = "Сейчас будет выбрано: " + chosen + (reason ? (" (" + reason + ")") : "");
+            render(data);
         }
 
-        select.addEventListener("change", async () => {
+        async function saveTranslation(translationId) {
             try {
-                const chosen = (select.value || "").trim();
-                await apiSetTranslation(model.seriesId, chosen);
-                toast(chosen ? "Озвучка сохранена" : "Выбор сброшен на Auto");
+                setBusy(content, true);
+                await apiSetTranslation(model.seriesId, translationId);
                 await reload();
+                toast(translationId ? "Озвучка сохранена" : "Автовыбор включён");
             } catch (e) {
                 console.error("[YummyKodik] setTranslation failed:", e);
                 toast("Ошибка сохранения выбора");
+            } finally {
+                setBusy(content, false);
             }
-        });
+        }
 
-        btnClear.addEventListener("click", async () => {
-            try {
-                select.value = "";
-                await apiSetTranslation(model.seriesId, "");
-                toast("Выбор сброшен на Auto");
-                await reload();
-            } catch (e) {
-                console.error("[YummyKodik] clear translation failed:", e);
-                toast("Ошибка сброса выбора");
-            }
-        });
+        function render(data) {
+            clearNode(content);
 
-        btnRefresh.addEventListener("click", async () => {
-            try {
-                await reload();
-                toast("Список обновлён");
-            } catch (e) {
-                console.error("[YummyKodik] reload translations failed:", e);
-                toast("Ошибка обновления списка");
-            }
-        });
+            const savedTranslationId = String(data && data.savedTranslationId || "").trim();
+            const chosenTranslationId = String(data && data.chosenTranslationId || "").trim();
+            const translations = normalizeTranslations(data && data.translations);
+            const items = [{
+                id: "",
+                label: "Авто",
+                active: !savedTranslationId,
+                title: !savedTranslationId && chosenTranslationId
+                    ? ("Сейчас автоматически выберется: " + chosenTranslationId)
+                    : "Автоматический выбор по фильтру и сохранённым настройкам"
+            }].concat(translations.map(item => ({
+                id: item.id,
+                label: item.label,
+                active: savedTranslationId === item.id,
+                title: savedTranslationId === item.id ? "Сохранённый выбор" : item.label
+            })));
 
-        row.appendChild(select);
-        row.appendChild(btnClear);
-        row.appendChild(btnRefresh);
+            items.forEach((item, index) => {
+                const button = document.createElement("button");
+                button.type = "button";
+                button.className = "button-link emby-button";
+                button.style.color = "inherit";
+                button.style.fontWeight = item.active ? "600" : "400";
+                button.style.textDecoration = item.active ? "underline" : "none";
+                button.style.textUnderlineOffset = item.active ? "0.15em" : "";
+                button.textContent = item.label;
+                button.title = item.title;
+                button.setAttribute("aria-pressed", item.active ? "true" : "false");
+                button.addEventListener("click", () => saveTranslation(item.id));
 
-        wrapper.appendChild(title);
-        wrapper.appendChild(row);
-        wrapper.appendChild(hint);
+                content.appendChild(button);
+                if (index < items.length - 1) {
+                    content.appendChild(document.createTextNode(", "));
+                }
+            });
+        }
 
+        wrapper.appendChild(label);
+        wrapper.appendChild(content);
+
+        render(initialData || {});
         wrapper._reload = reload;
         return wrapper;
     }
 
     function findInjectHost() {
-        return document.querySelector(".detailPagePrimaryContainer")
-            || document.querySelector(".detailPageContent")
-            || document.querySelector(".detailPageWrapper")
-            || document.querySelector(".pageContainer")
-            || document.body;
+        const detailsGroup = document.querySelector(".itemDetailsGroup");
+        if (!detailsGroup) {
+            return null;
+        }
+
+        const studiosGroup = detailsGroup.querySelector(".studiosGroup");
+        return {
+            container: detailsGroup,
+            before: studiosGroup && studiosGroup.parentElement === detailsGroup ? studiosGroup : null
+        };
+    }
+
+    function removeWidget() {
+        const existing = Array.from(document.querySelectorAll(".ykTranslationGroup"));
+        existing.forEach(node => {
+            if (node && node.parentElement) {
+                node.parentElement.removeChild(node);
+            }
+        });
     }
 
     let lastSeriesId = "";
+    let injectRequestId = 0;
+    let pendingSeriesId = "";
 
     async function injectIfNeeded() {
-        if (!isDetailsPage()) return;
+        if (!isDetailsPage()) {
+            lastSeriesId = "";
+            pendingSeriesId = "";
+            injectRequestId++;
+            removeWidget();
+            return;
+        }
 
         const seriesId = parseItemIdFromHash();
-        if (!seriesId) return;
+        if (!seriesId) {
+            pendingSeriesId = "";
+            injectRequestId++;
+            removeWidget();
+            return;
+        }
 
-        if (seriesId === lastSeriesId && document.getElementById(WIDGET_ID)) return;
+        const host = findInjectHost();
+        if (!host) {
+            scheduleInject(250);
+            return;
+        }
 
-        const old = document.getElementById(WIDGET_ID);
-        if (old && old.parentElement) old.parentElement.removeChild(old);
+        const existingWidgets = document.querySelectorAll(".ykTranslationGroup");
+        if (seriesId === lastSeriesId && existingWidgets.length === 1) {
+            return;
+        }
+
+        removeWidget();
 
         lastSeriesId = seriesId;
+        pendingSeriesId = seriesId;
+        const requestId = ++injectRequestId;
 
         try {
             const data = await apiGetTranslations(seriesId);
+            if (requestId !== injectRequestId || pendingSeriesId !== seriesId || parseItemIdFromHash() !== seriesId) {
+                return;
+            }
 
-            const host = findInjectHost();
-            const widget = buildWidget({ seriesId, data });
+            if (!hasVisibleTranslations(data)) {
+                return;
+            }
 
-            host.insertBefore(widget, host.firstChild);
+            removeWidget();
+            const widget = buildWidget({ seriesId }, data);
 
-            await widget._reload();
+            if (host.before && host.before.parentElement === host.container) {
+                host.container.insertBefore(widget, host.before);
+            } else {
+                host.container.appendChild(widget);
+            }
+            pendingSeriesId = "";
         } catch (e) {
+            if (requestId === injectRequestId) {
+                pendingSeriesId = "";
+            }
             console.debug("[YummyKodik] no translations widget for this item:", e);
         }
     }
 
     let timer = 0;
-    function scheduleInject() {
+    function scheduleInject(delay) {
         if (timer) window.clearTimeout(timer);
-        timer = window.setTimeout(() => injectIfNeeded(), 250);
+        timer = window.setTimeout(() => injectIfNeeded(), typeof delay === "number" ? delay : 150);
     }
 
     window.addEventListener("hashchange", scheduleInject);
     document.addEventListener("viewshow", scheduleInject);
+    window.addEventListener("pageshow", scheduleInject);
+
+    const observer = new MutationObserver(() => {
+        if (isDetailsPage()) {
+            scheduleInject(150);
+        }
+    });
+
+    if (document.body) {
+        observer.observe(document.body, { childList: true, subtree: true });
+    } else {
+        window.addEventListener("DOMContentLoaded", () => {
+            observer.observe(document.body, { childList: true, subtree: true });
+        }, { once: true });
+    }
 
     scheduleInject();
 })();

@@ -20,16 +20,17 @@ namespace YummyKodik.Util
             };
 
             var sb = new StringBuilder();
-            using var writer = XmlWriter.Create(sb, settings);
+            using (var writer = XmlWriter.Create(sb, settings))
+            {
+                writer.WriteStartDocument();
+                writer.WriteStartElement("tvshow");
 
-            writer.WriteStartDocument();
-            writer.WriteStartElement("tvshow");
+                writer.WriteElementString("title", title ?? string.Empty);
+                writer.WriteElementString("plot", plot ?? string.Empty);
 
-            writer.WriteElementString("title", title ?? string.Empty);
-            writer.WriteElementString("plot", plot ?? string.Empty);
-
-            writer.WriteEndElement(); // tvshow
-            writer.WriteEndDocument();
+                writer.WriteEndElement(); // tvshow
+                writer.WriteEndDocument();
+            }
 
             return sb.ToString();
         }
@@ -44,20 +45,21 @@ namespace YummyKodik.Util
             };
 
             var sb = new StringBuilder();
-            using var writer = XmlWriter.Create(sb, settings);
+            using (var writer = XmlWriter.Create(sb, settings))
+            {
+                writer.WriteStartDocument();
+                writer.WriteStartElement("episodedetails");
 
-            writer.WriteStartDocument();
-            writer.WriteStartElement("episodedetails");
+                writer.WriteElementString("title", $"Episode {episodeNumber}");
+                writer.WriteElementString("season", season.ToString());
+                writer.WriteElementString("episode", episodeNumber.ToString());
+                writer.WriteElementString("showtitle", seriesTitle ?? string.Empty);
+                writer.WriteElementString("plot", description ?? string.Empty);
+                writer.WriteElementString("dateadded", DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss"));
 
-            writer.WriteElementString("title", $"Episode {episodeNumber}");
-            writer.WriteElementString("season", season.ToString());
-            writer.WriteElementString("episode", episodeNumber.ToString());
-            writer.WriteElementString("showtitle", seriesTitle ?? string.Empty);
-            writer.WriteElementString("plot", description ?? string.Empty);
-            writer.WriteElementString("dateadded", DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss"));
-
-            writer.WriteEndElement(); // episodedetails
-            writer.WriteEndDocument();
+                writer.WriteEndElement(); // episodedetails
+                writer.WriteEndDocument();
+            }
 
             return sb.ToString();
         }

@@ -174,15 +174,7 @@ internal static class KodikPlaybackSelector
 
     private static bool CoversEpisode(KodikTranslation t, int episode)
     {
-        var ep = episode <= 0 ? 1 : episode;
-
-        var max = t.MaxEpisode;
-        if (max <= 0)
-        {
-            return true;
-        }
-
-        return ep <= max;
+        return t.CoversEpisode(episode);
     }
 
     private static KodikTranslation? FindBestMatchByToken(
