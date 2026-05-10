@@ -43,6 +43,12 @@ namespace YummyKodik.Api
             YummyVideoProviderKind.Alloha
         };
 
+        private static readonly YummyVideoProviderKind[] YummyVoiceProviderOrder =
+        {
+            YummyVideoProviderKind.Alloha,
+            YummyVideoProviderKind.Cvh
+        };
+
         private static readonly object PrefsLock = new();
 
         public YummyKodikStreamController(
@@ -87,7 +93,7 @@ namespace YummyKodik.Api
                 {
                     var catalog = await LoadYummyVideoCatalogAsync(cfg, request.AnimeId.ToString(), cancellationToken).ConfigureAwait(false);
                     var firstEpisode = catalog.GetFirstSupportedEpisodeNumber(catalogProvider) ?? 1;
-                    var savedVoice = cfg.GetUserSeriesPreferredTranslationId(auth.UserId, seriesKey);
+                    var savedVoice = GetSavedYummyVoiceName(cfg, auth.UserId, request.AnimeId, request.Provider);
                     var chosenVoice = catalog.PickPreferredVoiceName(
                         catalogProvider,
                         firstEpisode,
@@ -104,7 +110,7 @@ namespace YummyKodik.Api
                         savedTranslationId = savedVoice ?? string.Empty,
                         chosenTranslationId = chosenVoice ?? string.Empty,
                         reason = providerReason,
-                        translations = catalog.GetAllVoiceNames(catalogProvider)
+                        translations = catalog.GetAllVoiceNamesAcrossProviders(YummyVoiceProviderOrder)
                             .Select(x => new
                             {
                                 id = x,
@@ -202,7 +208,9 @@ namespace YummyKodik.Api
                 bool changed;
                 lock (PrefsLock)
                 {
-                    changed = cfg.SetUserSeriesPreferredTranslationId(auth.UserId, seriesKey, string.IsNullOrWhiteSpace(tid) ? null : tid);
+                    changed = IsYummyProviderRequest(request)
+                        ? SetYummyVoicePreference(cfg, auth.UserId, request.AnimeId, request.Provider, tid)
+                        : cfg.SetUserSeriesPreferredTranslationId(auth.UserId, seriesKey, string.IsNullOrWhiteSpace(tid) ? null : tid);
                     if (changed)
                     {
                         Plugin.Instance.SaveConfiguration();
@@ -320,7 +328,7 @@ namespace YummyKodik.Api
 
                                         if (!string.IsNullOrWhiteSpace(requestedVoice))
                                         {
-                                            TrySaveTranslationId(cfg, userId, BuildAllohaSeriesKey(animeId.Value), requestedVoice);
+                                            TrySaveYummyVoicePreference(cfg, userId, animeId.Value, YummyStreamProviderKind.Alloha, requestedVoice);
                                         }
 
                                         _logger.LogInformation(
@@ -938,16 +946,177 @@ namespace YummyKodik.Api
             }
         }
 
+        private static void TrySaveYummyVoicePreference(
+            PluginConfiguration cfg,
+            Guid userId,
+            long animeId,
+            YummyStreamProviderKind provider,
+            string? voiceName)
+        {
+            if (animeId <= 0)
+            {
+                return;
+            }
+
+            lock (PrefsLock)
+            {
+                var changed = SetYummyVoicePreference(cfg, userId, animeId, provider, voiceName);
+                if (!changed)
+                {
+                    return;
+                }
+
+                Plugin.Instance.SaveConfiguration();
+            }
+        }
+
+        private static bool SetYummyVoicePreference(
+            PluginConfiguration cfg,
+            Guid userId,
+            long animeId,
+            YummyStreamProviderKind provider,
+            string? voiceName)
+        {
+            if (animeId <= 0)
+            {
+                return false;
+            }
+
+            var value = (voiceName ?? string.Empty).Trim();
+            var keys = string.IsNullOrWhiteSpace(value)
+                ? EnumerateYummyPreferenceKeys(animeId, provider, includeAllLegacyProviderKeys: true)
+                : EnumerateYummyPreferenceKeys(animeId, provider, includeAllLegacyProviderKeys: false);
+
+            var changed = false;
+            foreach (var key in keys)
+            {
+                changed |= cfg.SetUserSeriesPreferredTranslationId(
+                    userId,
+                    key,
+                    string.IsNullOrWhiteSpace(value) ? null : value);
+            }
+
+            return changed;
+        }
+
+        private static string? GetSavedYummyVoiceName(
+            PluginConfiguration cfg,
+            Guid userId,
+            long animeId,
+            YummyStreamProviderKind provider)
+        {
+            if (animeId <= 0)
+            {
+                return null;
+            }
+
+            foreach (var key in EnumerateYummyPreferenceKeys(animeId, provider, includeAllLegacyProviderKeys: true))
+            {
+                var saved = cfg.GetUserSeriesPreferredTranslationId(userId, key);
+                if (!string.IsNullOrWhiteSpace(saved))
+                {
+                    return saved;
+                }
+            }
+
+            return null;
+        }
+
+        private static IEnumerable<string> EnumerateYummyPreferenceKeys(
+            long animeId,
+            YummyStreamProviderKind provider,
+            bool includeAllLegacyProviderKeys)
+        {
+            if (animeId <= 0)
+            {
+                yield break;
+            }
+
+            var used = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var key in BuildYummyPreferenceKeyCandidates(animeId, provider, includeAllLegacyProviderKeys))
+            {
+                if (!string.IsNullOrWhiteSpace(key) && used.Add(key))
+                {
+                    yield return key;
+                }
+            }
+        }
+
+        private static IEnumerable<string> BuildYummyPreferenceKeyCandidates(
+            long animeId,
+            YummyStreamProviderKind provider,
+            bool includeAllLegacyProviderKeys)
+        {
+            yield return BuildYummySeriesKey(animeId);
+
+            if (provider == YummyStreamProviderKind.Alloha)
+            {
+                yield return BuildAllohaSeriesKey(animeId);
+            }
+            else if (provider == YummyStreamProviderKind.Cvh)
+            {
+                yield return BuildCvhSeriesKey(animeId);
+            }
+
+            if (!includeAllLegacyProviderKeys)
+            {
+                yield break;
+            }
+
+            yield return BuildAllohaSeriesKey(animeId);
+            yield return BuildCvhSeriesKey(animeId);
+        }
+
+        private static bool ShouldUseDifferentYummyProviderForSavedVoice(
+            YummyVideoCatalog catalog,
+            YummyVideoProviderKind currentProvider,
+            int episode,
+            string? savedVoiceName,
+            out YummyVideoProviderKind savedVoiceProvider)
+        {
+            savedVoiceProvider = YummyVideoProviderKind.Unknown;
+            if (catalog == null || string.IsNullOrWhiteSpace(savedVoiceName))
+            {
+                return false;
+            }
+
+            var provider = catalog.PickPreferredProvider(
+                episode,
+                explicitVoiceName: savedVoiceName,
+                providers: YummyVoiceProviderOrder);
+
+            if (!provider.HasValue || provider.Value == currentProvider)
+            {
+                return false;
+            }
+
+            savedVoiceProvider = provider.Value;
+            return true;
+        }
+
         private static string BuildSeriesKey(YummyStreamRequest request)
         {
             return request.Provider switch
             {
-                YummyStreamProviderKind.Cvh when request.AnimeId > 0 => BuildCvhSeriesKey(request.AnimeId),
-                YummyStreamProviderKind.Alloha when request.AnimeId > 0 => BuildAllohaSeriesKey(request.AnimeId),
+                YummyStreamProviderKind.Cvh when request.AnimeId > 0 => BuildYummySeriesKey(request.AnimeId),
+                YummyStreamProviderKind.Alloha when request.AnimeId > 0 => BuildYummySeriesKey(request.AnimeId),
                 YummyStreamProviderKind.Kodik when !string.IsNullOrWhiteSpace(request.KodikId)
                     => KodikPlaybackSelector.BuildSeriesKey(request.KodikIdType, request.KodikId),
                 _ => string.Empty
             };
+        }
+
+        private static bool IsYummyProviderRequest(YummyStreamRequest request)
+        {
+            return request.AnimeId > 0 &&
+                   (request.Provider == YummyStreamProviderKind.Alloha ||
+                    request.Provider == YummyStreamProviderKind.Cvh);
+        }
+
+        private static string BuildYummySeriesKey(long animeId)
+        {
+            return $"yummy:{animeId}";
         }
 
         private static string BuildCvhSeriesKey(long animeId)
@@ -1230,9 +1399,8 @@ namespace YummyKodik.Api
             CancellationToken cancellationToken)
         {
             var catalog = await LoadYummyVideoCatalogAsync(cfg, animeId.ToString(), cancellationToken).ConfigureAwait(false);
-            var seriesKey = BuildAllohaSeriesKey(animeId);
             var requestedVoice = (explicitVoiceName ?? string.Empty).Trim();
-            var savedVoice = cfg.GetUserSeriesPreferredTranslationId(userId, seriesKey);
+            var savedVoice = GetSavedYummyVoiceName(cfg, userId, animeId, YummyStreamProviderKind.Alloha);
             string? chosenVoice;
             string reason;
             YummyVideoEntry? chosenEntry;
@@ -1249,6 +1417,16 @@ namespace YummyKodik.Api
             }
             else
             {
+                if (ShouldUseDifferentYummyProviderForSavedVoice(
+                        catalog,
+                        YummyVideoProviderKind.Alloha,
+                        episode,
+                        savedVoice,
+                        out var savedVoiceProvider))
+                {
+                    throw new InvalidOperationException($"Saved voice is available from {savedVoiceProvider}.");
+                }
+
                 chosenVoice = catalog.PickPreferredVoiceName(
                     YummyVideoProviderKind.Alloha,
                     episode,
@@ -1267,7 +1445,7 @@ namespace YummyKodik.Api
 
             if (!string.IsNullOrWhiteSpace(requestedVoice))
             {
-                TrySaveTranslationId(cfg, userId, seriesKey, requestedVoice);
+                TrySaveYummyVoicePreference(cfg, userId, animeId, YummyStreamProviderKind.Alloha, requestedVoice);
             }
 
             var session = await _allohaPlaybackService.CreateSessionAsync(chosenEntry.Alloha, quality, chosenVoice, cancellationToken)
@@ -1311,9 +1489,8 @@ namespace YummyKodik.Api
             int quality,
             CancellationToken cancellationToken)
         {
-            var seriesKey = BuildAllohaSeriesKey(animeId);
             var requestedVoice = (explicitVoiceName ?? string.Empty).Trim();
-            var savedVoice = cfg.GetUserSeriesPreferredTranslationId(userId, seriesKey);
+            var savedVoice = GetSavedYummyVoiceName(cfg, userId, animeId, YummyStreamProviderKind.Alloha);
             string? chosenVoice;
             string reason;
             YummyVideoEntry? chosenEntry;
@@ -1330,6 +1507,16 @@ namespace YummyKodik.Api
             }
             else
             {
+                if (ShouldUseDifferentYummyProviderForSavedVoice(
+                        catalog,
+                        YummyVideoProviderKind.Alloha,
+                        episode,
+                        savedVoice,
+                        out var savedVoiceProvider))
+                {
+                    throw new InvalidOperationException($"Saved voice is available from {savedVoiceProvider}.");
+                }
+
                 chosenVoice = catalog.PickPreferredVoiceName(
                     YummyVideoProviderKind.Alloha,
                     episode,
@@ -1348,7 +1535,7 @@ namespace YummyKodik.Api
 
             if (!string.IsNullOrWhiteSpace(requestedVoice))
             {
-                TrySaveTranslationId(cfg, userId, seriesKey, requestedVoice);
+                TrySaveYummyVoicePreference(cfg, userId, animeId, YummyStreamProviderKind.Alloha, requestedVoice);
             }
 
             var session = await _allohaPlaybackService.CreateSessionAsync(chosenEntry.Alloha, quality, chosenVoice, cancellationToken)
@@ -1394,9 +1581,8 @@ namespace YummyKodik.Api
             string reasonPrefix,
             CancellationToken cancellationToken)
         {
-            var cvhSeriesKey = BuildCvhSeriesKey(animeId);
             var requestedVoice = (explicitVoiceName ?? string.Empty).Trim();
-            var savedVoice = cfg.GetUserSeriesPreferredTranslationId(userId, cvhSeriesKey);
+            var savedVoice = GetSavedYummyVoiceName(cfg, userId, animeId, YummyStreamProviderKind.Cvh);
             string? chosenVoice;
             string reason;
             YummyVideoEntry? chosenEntry;
@@ -1413,6 +1599,16 @@ namespace YummyKodik.Api
             }
             else
             {
+                if (ShouldUseDifferentYummyProviderForSavedVoice(
+                        catalog,
+                        YummyVideoProviderKind.Cvh,
+                        episode,
+                        savedVoice,
+                        out var savedVoiceProvider))
+                {
+                    throw new InvalidOperationException($"Saved voice is available from {savedVoiceProvider}.");
+                }
+
                 chosenVoice = catalog.PickPreferredVoiceName(
                     YummyVideoProviderKind.Cvh,
                     episode,
@@ -1461,7 +1657,7 @@ namespace YummyKodik.Api
 
             if (!string.IsNullOrWhiteSpace(requestedVoice))
             {
-                TrySaveTranslationId(cfg, userId, cvhSeriesKey, requestedVoice);
+                TrySaveYummyVoicePreference(cfg, userId, animeId, YummyStreamProviderKind.Cvh, requestedVoice);
             }
 
             _logger.LogInformation(
@@ -1505,6 +1701,9 @@ namespace YummyKodik.Api
             CancellationToken cancellationToken)
         {
             var requestedVoice = (explicitVoiceName ?? string.Empty).Trim();
+            var savedYummyVoice = string.IsNullOrWhiteSpace(requestedVoice)
+                ? GetSavedYummyVoiceName(cfg, userId, animeId, failedProvider)
+                : string.Empty;
             var (anime, catalog) = await LoadYummyVideoContextAsync(cfg, animeId.ToString(), cancellationToken)
                 .ConfigureAwait(false);
             Exception? lastError = originalError;
@@ -1588,6 +1787,7 @@ namespace YummyKodik.Api
                         anime,
                         episode,
                         requestedVoice,
+                        savedYummyVoice,
                         quality,
                         format,
                         cancellationToken)
@@ -1614,6 +1814,7 @@ namespace YummyKodik.Api
             YummyAnimeResponse anime,
             int episode,
             string? explicitVoiceName,
+            string? savedYummyVoiceName,
             int quality,
             string? format,
             CancellationToken cancellationToken)
@@ -1638,6 +1839,7 @@ namespace YummyKodik.Api
             kodik = infoRes.Client;
             var info = infoRes.Result;
             var requestedVoice = (explicitVoiceName ?? string.Empty).Trim();
+            var savedYummyVoice = (savedYummyVoiceName ?? string.Empty).Trim();
             var seriesKey = KodikPlaybackSelector.BuildSeriesKey(idType, id);
             var preferredTokens = StringTokenParser.ParseTokens(cfg.PreferredTranslationFilter);
             var savedTrId = cfg.GetUserSeriesPreferredTranslationId(userId, seriesKey);
@@ -1656,6 +1858,14 @@ namespace YummyKodik.Api
                 chosenTrId = translation.Id.Trim();
                 waitIfMissing = true;
                 reason = "fallback-explicit-voice";
+            }
+            else if (!string.IsNullOrWhiteSpace(savedYummyVoice) &&
+                     FindKodikTranslationByVoiceName(info.Translations, savedYummyVoice, episode) is { } savedVoiceTranslation &&
+                     !string.IsNullOrWhiteSpace(savedVoiceTranslation.Id))
+            {
+                chosenTrId = savedVoiceTranslation.Id.Trim();
+                waitIfMissing = true;
+                reason = "fallback-saved-yummy-voice";
             }
             else
             {

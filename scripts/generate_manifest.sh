@@ -53,7 +53,9 @@ else
   CHANGELOG="What changed:
 - Added blended provider coverage across Alloha, CVH, and Kodik. Users choose the anime source and desired quality; the plugin combines all available provider data to create as many episode files as possible.
 - Added provider failover: if an episode is missing from one provider, one provider has fewer episodes, or playback resolution fails, the plugin can use a neighboring provider instead.
-- Added per-user voice selection, optional per-voice STRM generation, and intro/outro media segments.
+- Added Jellyfin Web seriesTranslation.js voice widget on series pages. It shows Auto plus available voices and saves a per-user, per-series choice.
+- Fixed normal single-file mode voice preferences so a choice made in the widget is shared across Alloha/CVH-backed episode URLs and can route playback to the provider that actually has the selected voice.
+- Added optional per-voice STRM generation and intro/outro media segments.
 - Added automatic Kodik token resolution and refresh while keeping manual token override support.
 - Improved season/title layout resolution, generated file maintenance, stale artifact cleanup, translation normalization, and duplicate Kodik link deduplication.
 - Fixed Docker/base-image compatibility by targeting Jellyfin 10.11.0 shared assemblies.

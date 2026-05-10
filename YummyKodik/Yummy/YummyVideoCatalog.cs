@@ -122,6 +122,18 @@ public sealed class YummyVideoCatalog
             .ToArray();
     }
 
+    public IReadOnlyList<string> GetAllVoiceNamesAcrossProviders(IEnumerable<YummyVideoProviderKind>? providers = null)
+    {
+        var providerSet = NormalizeProviderSet(providers);
+        return _entries
+            .Where(x => providerSet.Contains(x.Provider) && MatchesProvider(x, x.Provider))
+            .Select(x => x.DisplayVoiceName)
+            .Where(x => !string.IsNullOrWhiteSpace(x))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(x => x, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+    }
+
     public IReadOnlyList<string> GetSupportedVoiceNames(int episodeNumber)
     {
         return GetSupportedVoiceNames(YummyVideoProviderKind.Cvh, episodeNumber);

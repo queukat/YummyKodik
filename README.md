@@ -49,6 +49,22 @@ The result is that normal setup has no provider picker to babysit. You configure
 
 Voice selection follows the same idea. The plugin first honors an explicit per-user choice from the Jellyfin Web widget, then `Preferred translation filter`, then automatic fallback. In per-voice mode it creates separate files for available voice translations; in normal mode it keeps one episode file and resolves the best voice when you press play.
 
+## Jellyfin Web Voice Widget
+
+At startup, the plugin tries to patch Jellyfin Web `index.html` with a small bootstrap script:
+
+```text
+/web/ConfigurationPage?name=seriesTranslation.js&v=<plugin-version>
+```
+
+That script adds an `Озвучка` row to supported series details pages. The widget asks the plugin for available voices, shows `Авто` plus the combined Alloha/CVH voice list, and saves the choice through `YummyKodik/setTranslation`.
+
+The saved value is per Jellyfin user and per Yummy series, so different users can choose different voices for the same anime. In normal single-file mode, this is how `SxxEyy.strm` can still play a chosen voice without creating separate episode files. Changing the voice in the widget does not require a library refresh; the next playback request reads the saved preference and resolves the best matching provider.
+
+If the selected voice exists only in a neighboring provider, playback can move from the generated provider URL to that provider instead of silently playing another voice. Choosing `Авто` clears the saved preference and returns to `Preferred translation filter` plus automatic fallback.
+
+If Jellyfin Web `index.html` is not writable or not found, the widget is skipped. Playback still works through generated files, `Preferred translation filter`, and per-voice files if that mode is enabled.
+
 ## Requirements
 
 - Jellyfin `10.11.x`. The plugin is built against `10.11.0` for Docker/base-image compatibility.
@@ -84,7 +100,7 @@ Download `YummyKodik_<version>.zip` from GitHub Releases and extract the files d
 Windows service or tray install:
 
 ```powershell
-$version = "1.1.0.0"
+$version = "1.1.1.0"
 $plugins = "$env:ProgramData\Jellyfin\Server\plugins"
 New-Item -ItemType Directory -Force "$plugins\YummyKodik_$version"
 Expand-Archive ".\YummyKodik_$version.zip" "$plugins\YummyKodik_$version" -Force
@@ -93,7 +109,7 @@ Expand-Archive ".\YummyKodik_$version.zip" "$plugins\YummyKodik_$version" -Force
 Windows portable install:
 
 ```powershell
-$version = "1.1.0.0"
+$version = "1.1.1.0"
 $plugins = "$env:LOCALAPPDATA\jellyfin\plugins"
 New-Item -ItemType Directory -Force "$plugins\YummyKodik_$version"
 Expand-Archive ".\YummyKodik_$version.zip" "$plugins\YummyKodik_$version" -Force
@@ -102,7 +118,7 @@ Expand-Archive ".\YummyKodik_$version.zip" "$plugins\YummyKodik_$version" -Force
 Docker install by copying an already extracted package:
 
 ```powershell
-$version = "1.1.0.0"
+$version = "1.1.1.0"
 docker exec jellyfin mkdir -p /config/plugins/YummyKodik_$version
 docker cp .\artifacts\package\. jellyfin:/config/plugins/YummyKodik_$version/
 docker restart jellyfin
@@ -111,7 +127,7 @@ docker restart jellyfin
 Docker install from a zip inside the container:
 
 ```bash
-version=1.1.0.0
+version=1.1.1.0
 mkdir -p "/config/plugins/YummyKodik_$version"
 unzip "YummyKodik_$version.zip" -d "/config/plugins/YummyKodik_$version"
 ```
@@ -180,9 +196,10 @@ Per-voice file mode:
 Translation widget mode:
 
 - The plugin patches Jellyfin Web `index.html` at startup to load `seriesTranslation.js`.
-- On a supported series details page, the widget shows `Auto` and available voice choices.
-- Choosing a voice saves a per-user, per-series preference.
+- On a supported series details page, the widget shows `Auto` and the combined available Alloha/CVH voice choices.
+- Choosing a voice saves a per-user, per-Yummy-series preference that normal single-file playback uses on the next play.
 - Choosing `Auto` clears the saved preference and returns to automatic selection.
+- No library refresh is required after changing the widget choice.
 
 ## Docker Notes
 
@@ -257,13 +274,13 @@ dotnet run --project .\YummyKodik.Tests\YummyKodik.Tests.csproj -c Release
 Create a local release ZIP on Windows:
 
 ```powershell
-.\scripts\package.ps1 -Version 1.1.0.0
+.\scripts\package.ps1 -Version 1.1.1.0
 ```
 
 Create a local release ZIP on Linux/macOS:
 
 ```bash
-bash ./scripts/package.sh 1.1.0.0
+bash ./scripts/package.sh 1.1.1.0
 ```
 
 This produces:
@@ -278,15 +295,15 @@ The release workflow runs on version tags and publishes the ZIP, MD5 checksum, G
 Recommended tag format follows the existing release convention:
 
 ```bash
-git tag 1.1.0.0
-git push origin 1.1.0.0
+git tag 1.1.1.0
+git push origin 1.1.1.0
 ```
 
 Tags with a leading `v` also work because the workflow normalizes versions.
 
 ## Docker Smoke Test
 
-The `1.1.0.0` package was smoke-tested against `jellyfin/jellyfin:10.11.0` with a single configured slug:
+The `1.1.1.0` package was smoke-tested against `jellyfin/jellyfin:10.11.0` with a single configured slug:
 
 ```text
 fermerskaya-zhizn-v-inom-mire-2

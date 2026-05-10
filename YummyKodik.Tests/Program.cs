@@ -113,6 +113,8 @@ var tests = new (string Name, Action Run)[]
     ("YummyKodikStreamController_RejectsSingleGenericRussianAllohaTrackMarker", YummyKodikStreamController_RejectsSingleGenericRussianAllohaTrackMarker),
     ("YummyKodikStreamController_RejectsMultipleOpaqueAllohaTrackMarkers", YummyKodikStreamController_RejectsMultipleOpaqueAllohaTrackMarkers),
     ("YummyKodikStreamController_OrdersYummyFallbackProviders", YummyKodikStreamController_OrdersYummyFallbackProviders),
+    ("YummyKodikStreamController_UsesSharedYummyVoicePreferenceAcrossProviders", YummyKodikStreamController_UsesSharedYummyVoicePreferenceAcrossProviders),
+    ("YummyKodikStreamController_DetectsSavedVoiceOnNeighborProvider", YummyKodikStreamController_DetectsSavedVoiceOnNeighborProvider),
     ("YummyKodikStreamController_FindsKodikFallbackVoiceByAlias", YummyKodikStreamController_FindsKodikFallbackVoiceByAlias),
     ("AllohaPlaybackService_RewritesManifestUrisToProxyUrls", AllohaPlaybackService_RewritesManifestUrisToProxyUrls),
     ("AllohaPlaybackService_DownloadProxyResourceRewritesNestedManifest", AllohaPlaybackService_DownloadProxyResourceRewritesNestedManifest),
@@ -2188,6 +2190,7 @@ static void YummyVideoCatalog_CombinesCoverageAcrossProviders()
     var providers = new[] { YummyVideoProviderKind.Alloha, YummyVideoProviderKind.Cvh };
 
     AssertEqual("1,2,3,4", string.Join(",", catalog.GetSupportedEpisodeNumbersAcrossProviders(providers)), "Combined episode coverage should use the union of provider episode lists.");
+    AssertEqual("AniStar,Dream Cast", string.Join(",", catalog.GetAllVoiceNamesAcrossProviders(providers)), "Combined voice picker list should include voices from all configured providers.");
     AssertEqual("AniStar,Dream Cast", string.Join(",", catalog.GetSupportedVoiceNamesAcrossProviders(1, providers)), "Combined voice list should include voices from all providers for the episode.");
     AssertEqual(YummyVideoProviderKind.Cvh, catalog.PickPreferredProvider(1, explicitVoiceName: "AniStar", providers: providers) ?? YummyVideoProviderKind.Unknown, "AniStar should resolve to CVH when Alloha does not have that voice.");
     AssertEqual(YummyVideoProviderKind.Alloha, catalog.PickPreferredProvider(2, providers: providers) ?? YummyVideoProviderKind.Unknown, "When both providers have the episode, Alloha should keep higher priority.");
@@ -3086,6 +3089,78 @@ static void YummyKodikStreamController_OrdersYummyFallbackProviders()
 
     AssertEqual("Cvh", string.Join(",", allohaFallback), "Alloha failures should first compensate through CVH.");
     AssertEqual("Alloha", string.Join(",", cvhFallback), "CVH failures should first compensate through Alloha.");
+}
+
+static void YummyKodikStreamController_UsesSharedYummyVoicePreferenceAcrossProviders()
+{
+    var setMethod = typeof(YummyKodik.Api.YummyKodikStreamController).GetMethod(
+        "SetYummyVoicePreference",
+        BindingFlags.NonPublic | BindingFlags.Static);
+    var getMethod = typeof(YummyKodik.Api.YummyKodikStreamController).GetMethod(
+        "GetSavedYummyVoiceName",
+        BindingFlags.NonPublic | BindingFlags.Static);
+    AssertTrue(setMethod is not null, "Shared Yummy voice setter should exist.");
+    AssertTrue(getMethod is not null, "Shared Yummy voice getter should exist.");
+
+    var cfg = new PluginConfiguration();
+    var userId = Guid.NewGuid();
+
+    var changed = (bool)setMethod!.Invoke(null, new object[] { cfg, userId, 21008L, YummyStreamProviderKind.Alloha, "AniStar" })!;
+    AssertTrue(changed, "Saving a Yummy voice should change the configuration.");
+
+    var savedForCvh = (string?)getMethod!.Invoke(null, new object[] { cfg, userId, 21008L, YummyStreamProviderKind.Cvh });
+    AssertEqual("AniStar", savedForCvh ?? string.Empty, "A voice selected from an Alloha-backed page should be visible to CVH-backed episode URLs.");
+    AssertEqual("AniStar", cfg.GetUserSeriesPreferredTranslationId(userId, "yummy:21008") ?? string.Empty, "Shared Yummy preference key should be populated.");
+    AssertEqual("AniStar", cfg.GetUserSeriesPreferredTranslationId(userId, "alloha:21008") ?? string.Empty, "Legacy provider key should be populated for compatibility.");
+
+    changed = (bool)setMethod.Invoke(null, new object[] { cfg, userId, 21008L, YummyStreamProviderKind.Cvh, string.Empty })!;
+    AssertTrue(changed, "Clearing a Yummy voice should remove stored provider preferences.");
+    AssertEqual(string.Empty, cfg.GetUserSeriesPreferredTranslationId(userId, "yummy:21008") ?? string.Empty, "Shared Yummy preference key should be cleared.");
+    AssertEqual(string.Empty, cfg.GetUserSeriesPreferredTranslationId(userId, "alloha:21008") ?? string.Empty, "Legacy Alloha key should be cleared.");
+    AssertEqual(string.Empty, cfg.GetUserSeriesPreferredTranslationId(userId, "cvh:21008") ?? string.Empty, "Legacy CVH key should be cleared.");
+}
+
+static void YummyKodikStreamController_DetectsSavedVoiceOnNeighborProvider()
+{
+    var method = typeof(YummyKodik.Api.YummyKodikStreamController).GetMethod(
+        "ShouldUseDifferentYummyProviderForSavedVoice",
+        BindingFlags.NonPublic | BindingFlags.Static);
+    AssertTrue(method is not null, "Saved-voice provider routing helper should exist.");
+
+    var anime = new YummyAnimeResponse
+    {
+        AnimeId = 21008,
+        Videos = new List<YummyVideoItem>
+        {
+            new()
+            {
+                Number = "1",
+                IframeUrl = "https://larkin-as.stloadi.live/?token_movie=movie&translation=215&season=1&episode=1&token=req",
+                Data = new YummyVideoData
+                {
+                    PlayerId = (int)YummyVideoProviderKind.Alloha,
+                    Dubbing = "Dream Cast"
+                }
+            },
+            new()
+            {
+                Number = "1",
+                IframeUrl = "https://play.example/player?anime_id=21008&episode=1&dubbing_code=158&dubbing=AniStar",
+                Data = new YummyVideoData
+                {
+                    PlayerId = (int)YummyVideoProviderKind.Cvh,
+                    Dubbing = "AniStar"
+                }
+            }
+        }
+    };
+
+    var catalog = YummyVideoCatalog.Create(anime);
+    var args = new object[] { catalog, YummyVideoProviderKind.Alloha, 1, "AniStar", YummyVideoProviderKind.Unknown };
+
+    var shouldReroute = (bool)method!.Invoke(null, args)!;
+    AssertTrue(shouldReroute, "Alloha playback should defer to a neighboring provider when only that provider has the saved voice.");
+    AssertEqual(YummyVideoProviderKind.Cvh, (YummyVideoProviderKind)args[4], "Saved voice should resolve to the CVH provider.");
 }
 
 static void YummyKodikStreamController_FindsKodikFallbackVoiceByAlias()
