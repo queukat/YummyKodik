@@ -1,0 +1,32 @@
+name: Playback support
+description: Report a stream, HLS, or provider playback issue.
+title: "[Playback]: "
+labels: ["playback", "support", "diagnostics"]
+body:
+  - type: input
+    id: plugin-version
+    attributes:
+      label: Plugin version
+    validations:
+      required: true
+  - type: input
+    id: item
+    attributes:
+      label: Title / episode / provider
+      placeholder: "Series title, episode, Alloha/CVH/Kodik if known"
+    validations:
+      required: true
+  - type: textarea
+    id: client
+    attributes:
+      label: Client and server environment
+      placeholder: "Jellyfin version, client app/browser, Docker/native, OS"
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics
+      description: Include playback logs, HTTP status, and any proxy/HLS errors.
+    validations:
+      required: true
