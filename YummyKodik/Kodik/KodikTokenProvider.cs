@@ -25,15 +25,12 @@ namespace YummyKodik.Kodik
         /// </summary>
         public static async Task<string> GetTokenAsync(
             HttpClient httpClient,
-            CancellationToken cancellationToken = default,
             bool forceRefresh = false,
             TimeSpan? cacheTtl = null,
-            bool allowStaleOnFailure = true)
+            bool allowStaleOnFailure = true,
+            CancellationToken cancellationToken = default)
         {
-            if (httpClient == null)
-            {
-                throw new ArgumentNullException(nameof(httpClient));
-            }
+            ArgumentNullException.ThrowIfNull(httpClient);
 
             var ttl = cacheTtl ?? DefaultCacheTtl;
             var now = DateTimeOffset.UtcNow;
@@ -94,7 +91,7 @@ namespace YummyKodik.Kodik
                     }
 
                     Logger?.LogWarning(ex, "KodikTokenProvider failed to resolve token and no cached token can be used.");
-                    throw;
+                    throw new KodikTokenException("Failed to resolve Kodik token and no cached token can be used.", ex);
                 }
             }
             finally
@@ -109,19 +106,19 @@ namespace YummyKodik.Kodik
         /// </summary>
         public static async Task<(bool Success, string? Token, string? Error)> TryGetTokenAsync(
             HttpClient httpClient,
-            CancellationToken cancellationToken = default,
             bool forceRefresh = false,
             TimeSpan? cacheTtl = null,
-            bool allowStaleOnFailure = true)
+            bool allowStaleOnFailure = true,
+            CancellationToken cancellationToken = default)
         {
             try
             {
                 var token = await GetTokenAsync(
                         httpClient,
-                        cancellationToken,
                         forceRefresh: forceRefresh,
                         cacheTtl: cacheTtl,
-                        allowStaleOnFailure: allowStaleOnFailure)
+                        allowStaleOnFailure: allowStaleOnFailure,
+                        cancellationToken: cancellationToken)
                     .ConfigureAwait(false);
 
                 return (true, token, null);

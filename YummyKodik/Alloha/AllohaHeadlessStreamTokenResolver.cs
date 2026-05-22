@@ -74,7 +74,7 @@ internal sealed class AllohaHeadlessStreamTokenResolver
                     "Page.addScriptToEvaluateOnNewDocument",
                     new
                     {
-                        source = BuildRequestCaptureScript()
+                        source = RequestCaptureScript
                     },
                     cancellationToken)
                 .ConfigureAwait(false);
@@ -167,9 +167,7 @@ internal sealed class AllohaHeadlessStreamTokenResolver
         return "data:text/html;charset=utf-8," + Uri.EscapeDataString(html);
     }
 
-    private static string BuildRequestCaptureScript()
-    {
-        return """
+    private const string RequestCaptureScript = """
             (() => {
               const capture = window.__yummyAllohaCapture = window.__yummyAllohaCapture || {
                 tokens: [],
@@ -574,7 +572,6 @@ internal sealed class AllohaHeadlessStreamTokenResolver
               }
             })();
             """;
-    }
 
     private static string? FindBrowserExecutable()
     {
@@ -605,7 +602,7 @@ internal sealed class AllohaHeadlessStreamTokenResolver
         return null;
     }
 
-    private static IEnumerable<string> BuildBrowserCandidates()
+    private static string[] BuildBrowserCandidates()
     {
         var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
         var programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
@@ -660,44 +657,14 @@ internal sealed class AllohaHeadlessStreamTokenResolver
         while (DateTime.UtcNow < deadline)
         {
             cancellationToken.ThrowIfCancellationRequested();
-
-            if (process.HasExited)
-            {
-                throw new InvalidOperationException(
-                    $"Headless browser exited before DevTools became ready. ExitCode={process.ExitCode}.");
-            }
+            ThrowIfBrowserExited(process);
 
             try
             {
-                var response = await httpClient
-                    .GetAsync($"http://127.0.0.1:{debugPort}/json/list", cancellationToken)
-                    .ConfigureAwait(false);
-                if (!response.IsSuccessStatusCode)
+                var target = await TryReadPageTargetAsync(httpClient, debugPort, cancellationToken).ConfigureAwait(false);
+                if (target != null)
                 {
-                    await Task.Delay(PollInterval, cancellationToken).ConfigureAwait(false);
-                    continue;
-                }
-
-                var body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
-                using var doc = JsonDocument.Parse(body);
-                foreach (var target in doc.RootElement.EnumerateArray())
-                {
-                    if (!TryReadString(target, "type", out var type) ||
-                        !string.Equals(type, "page", StringComparison.OrdinalIgnoreCase))
-                    {
-                        continue;
-                    }
-
-                    if (!TryReadString(target, "webSocketDebuggerUrl", out var webSocketDebuggerUrl) ||
-                        string.IsNullOrWhiteSpace(webSocketDebuggerUrl))
-                    {
-                        continue;
-                    }
-
-                    return new PageTargetInfo
-                    {
-                        WebSocketDebuggerUrl = webSocketDebuggerUrl.Trim()
-                    };
+                    return target;
                 }
             }
             catch (HttpRequestException)
@@ -713,6 +680,69 @@ internal sealed class AllohaHeadlessStreamTokenResolver
         }
 
         throw new InvalidOperationException("Timed out waiting for headless browser DevTools page target.");
+    }
+
+    private static void ThrowIfBrowserExited(Process process)
+    {
+        if (process.HasExited)
+        {
+            throw new InvalidOperationException(
+                $"Headless browser exited before DevTools became ready. ExitCode={process.ExitCode}.");
+        }
+    }
+
+    private static async Task<PageTargetInfo?> TryReadPageTargetAsync(
+        HttpClient httpClient,
+        int debugPort,
+        CancellationToken cancellationToken)
+    {
+        var response = await httpClient
+            .GetAsync($"http://127.0.0.1:{debugPort}/json/list", cancellationToken)
+            .ConfigureAwait(false);
+        if (!response.IsSuccessStatusCode)
+        {
+            return null;
+        }
+
+        var body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+        using var doc = JsonDocument.Parse(body);
+        return TryReadPageTargetList(doc.RootElement, out var target) ? target : null;
+    }
+
+    private static bool TryReadPageTargetList(JsonElement targetsElement, out PageTargetInfo target)
+    {
+        foreach (var candidate in targetsElement.EnumerateArray())
+        {
+            if (TryReadPageTargetCandidate(candidate, out target))
+            {
+                return true;
+            }
+        }
+
+        target = new PageTargetInfo();
+        return false;
+    }
+
+    private static bool TryReadPageTargetCandidate(JsonElement candidate, out PageTargetInfo target)
+    {
+        target = new PageTargetInfo();
+        if (!TryReadString(candidate, "type", out var type) ||
+            !string.Equals(type, "page", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        if (!TryReadString(candidate, "webSocketDebuggerUrl", out var webSocketDebuggerUrl) ||
+            string.IsNullOrWhiteSpace(webSocketDebuggerUrl))
+        {
+            return false;
+        }
+
+        target = new PageTargetInfo
+        {
+            WebSocketDebuggerUrl = webSocketDebuggerUrl.Trim()
+        };
+        return true;
     }
 
     private static async Task<AllohaBrowserState> WaitForStreamTokenAsync(
@@ -802,7 +832,65 @@ internal sealed class AllohaHeadlessStreamTokenResolver
             """;
 
         var value = await client.EvaluateAsync(script, cancellationToken).ConfigureAwait(false);
-        return JsonSerializer.Deserialize<AllohaBrowserState>(value.GetRawText()) ?? new AllohaBrowserState();
+        return ReadBrowserState(value);
+    }
+
+    private static AllohaBrowserState ReadBrowserState(JsonElement value)
+    {
+        if (value.ValueKind != JsonValueKind.Object)
+        {
+            return new AllohaBrowserState();
+        }
+
+        return new AllohaBrowserState
+        {
+            Reason = ReadString(value, "reason"),
+            CurrentQuality = ReadInt32(value, "currentQuality"),
+            DesiredQuality = ReadInt32(value, "desiredQuality"),
+            StreamToken = ReadString(value, "streamToken"),
+            CurrentManifestUrls = ReadStringArray(value, "currentManifestUrls"),
+            ExpectedManifestUrls = ReadStringArray(value, "expectedManifestUrls"),
+            CapturedRequestUrls = ReadStringArray(value, "capturedRequestUrls"),
+            CapturedTokenCount = ReadInt32(value, "capturedTokenCount")
+        };
+    }
+
+    private static string ReadString(JsonElement element, string propertyName)
+    {
+        return element.TryGetProperty(propertyName, out var child) && child.ValueKind == JsonValueKind.String
+            ? child.GetString() ?? string.Empty
+            : string.Empty;
+    }
+
+    private static int ReadInt32(JsonElement element, string propertyName)
+    {
+        if (!element.TryGetProperty(propertyName, out var child))
+        {
+            return 0;
+        }
+
+        if (child.ValueKind == JsonValueKind.Number)
+        {
+            return child.TryGetInt32(out var value) ? value : 0;
+        }
+
+        return child.ValueKind == JsonValueKind.String && int.TryParse(child.GetString(), out var parsed)
+            ? parsed
+            : 0;
+    }
+
+    private static string[] ReadStringArray(JsonElement element, string propertyName)
+    {
+        if (!element.TryGetProperty(propertyName, out var child) || child.ValueKind != JsonValueKind.Array)
+        {
+            return Array.Empty<string>();
+        }
+
+        return child.EnumerateArray()
+            .Where(item => item.ValueKind == JsonValueKind.String)
+            .Select(item => item.GetString()?.Trim() ?? string.Empty)
+            .Where(item => item.Length > 0)
+            .ToArray();
     }
 
     private static int ReserveFreeTcpPort()
@@ -871,7 +959,6 @@ internal sealed class AllohaHeadlessStreamTokenResolver
 
     private sealed class AllohaBrowserState
     {
-        public bool Ready { get; init; }
         public string Reason { get; init; } = string.Empty;
         public int CurrentQuality { get; init; }
         public int DesiredQuality { get; init; }
@@ -973,56 +1060,22 @@ internal sealed class DevToolsPageClient : IAsyncDisposable
         {
             while (!_disposeCts.IsCancellationRequested && _socket.State == WebSocketState.Open)
             {
-                using var stream = new MemoryStream();
-                WebSocketReceiveResult result;
-                do
+                var doc = await ReceiveMessageDocumentAsync(buffer, segment).ConfigureAwait(false);
+                if (doc == null)
                 {
-                    result = await _socket.ReceiveAsync(segment, _disposeCts.Token).ConfigureAwait(false);
-                    if (result.MessageType == WebSocketMessageType.Close)
+                    return;
+                }
+
+                using (doc)
+                {
+                    if (!TryReadResponseId(doc.RootElement, out var id))
                     {
-                        return;
+                        continue;
                     }
 
-                    stream.Write(buffer, 0, result.Count);
+                    var completion = TakePendingCompletion(id);
+                    CompletePendingRequest(completion, doc.RootElement);
                 }
-                while (!result.EndOfMessage);
-
-                stream.Position = 0;
-                using var doc = await JsonDocument.ParseAsync(stream, cancellationToken: _disposeCts.Token).ConfigureAwait(false);
-                if (!doc.RootElement.TryGetProperty("id", out var idElement) ||
-                    idElement.ValueKind != JsonValueKind.Number ||
-                    !idElement.TryGetInt64(out var id))
-                {
-                    continue;
-                }
-
-                TaskCompletionSource<JsonElement>? completion = null;
-                lock (_sync)
-                {
-                    if (_pending.TryGetValue(id, out completion))
-                    {
-                        _pending.Remove(id);
-                    }
-                }
-
-                if (completion == null)
-                {
-                    continue;
-                }
-
-                if (doc.RootElement.TryGetProperty("error", out var error))
-                {
-                    completion.TrySetException(new InvalidOperationException("DevTools error: " + error.GetRawText()));
-                    continue;
-                }
-
-                if (!doc.RootElement.TryGetProperty("result", out var responseResult))
-                {
-                    completion.TrySetResult(default);
-                    continue;
-                }
-
-                completion.TrySetResult(responseResult.Clone());
             }
         }
         catch (OperationCanceledException)
@@ -1031,21 +1084,87 @@ internal sealed class DevToolsPageClient : IAsyncDisposable
         }
         catch (Exception ex)
         {
-            lock (_sync)
-            {
-                foreach (var pending in _pending.Values)
-                {
-                    pending.TrySetException(ex);
-                }
+            FailPendingRequests(ex);
+        }
+    }
 
-                _pending.Clear();
+    private async Task<JsonDocument?> ReceiveMessageDocumentAsync(byte[] buffer, ArraySegment<byte> segment)
+    {
+        using var stream = new MemoryStream();
+        WebSocketReceiveResult result;
+        do
+        {
+            result = await _socket.ReceiveAsync(segment, _disposeCts.Token).ConfigureAwait(false);
+            if (result.MessageType == WebSocketMessageType.Close)
+            {
+                return null;
             }
+
+            await stream.WriteAsync(buffer.AsMemory(0, result.Count), _disposeCts.Token).ConfigureAwait(false);
+        }
+        while (!result.EndOfMessage);
+
+        stream.Position = 0;
+        return await JsonDocument.ParseAsync(stream, cancellationToken: _disposeCts.Token).ConfigureAwait(false);
+    }
+
+    private static bool TryReadResponseId(JsonElement root, out long id)
+    {
+        id = 0;
+        return root.TryGetProperty("id", out var idElement) &&
+               idElement.ValueKind == JsonValueKind.Number &&
+               idElement.TryGetInt64(out id);
+    }
+
+    private TaskCompletionSource<JsonElement>? TakePendingCompletion(long id)
+    {
+        lock (_sync)
+        {
+            if (!_pending.TryGetValue(id, out var completion))
+            {
+                return null;
+            }
+
+            _pending.Remove(id);
+            return completion;
+        }
+    }
+
+    private static void CompletePendingRequest(TaskCompletionSource<JsonElement>? completion, JsonElement root)
+    {
+        if (completion == null)
+        {
+            return;
+        }
+
+        if (root.TryGetProperty("error", out var error))
+        {
+            completion.TrySetException(new InvalidOperationException("DevTools error: " + error.GetRawText()));
+            return;
+        }
+
+        completion.TrySetResult(
+            root.TryGetProperty("result", out var responseResult)
+                ? responseResult.Clone()
+                : default);
+    }
+
+    private void FailPendingRequests(Exception exception)
+    {
+        lock (_sync)
+        {
+            foreach (var pending in _pending.Values)
+            {
+                pending.TrySetException(exception);
+            }
+
+            _pending.Clear();
         }
     }
 
     public async ValueTask DisposeAsync()
     {
-        _disposeCts.Cancel();
+        await _disposeCts.CancelAsync().ConfigureAwait(false);
 
         if (_socket.State == WebSocketState.Open)
         {

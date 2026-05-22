@@ -7,12 +7,15 @@ namespace YummyKodik.Util;
 
 public static class TranslationNameKeyNormalizer
 {
+    private static readonly TimeSpan RegexMatchTimeout = TimeSpan.FromSeconds(1);
     private static readonly Regex TokenRegex = new(
         @"[\p{L}\p{Nd}]+",
-        RegexOptions.CultureInvariant | RegexOptions.Compiled);
+        RegexOptions.CultureInvariant | RegexOptions.Compiled,
+        RegexMatchTimeout);
     private static readonly Regex TrailingAliasRegex = new(
         @"^(?<primary>.+?)\s*\((?<alias>[^()]+)\)\s*$",
-        RegexOptions.CultureInvariant | RegexOptions.Compiled);
+        RegexOptions.CultureInvariant | RegexOptions.Compiled,
+        RegexMatchTimeout);
 
     // Human-reviewed cross-provider voice variants. Keep this list explicit and curated.
     private static readonly (string CanonicalName, string[] Aliases)[] CuratedAliasGroups =
@@ -23,7 +26,7 @@ public static class TranslationNameKeyNormalizer
         ("AniLeague", ["AniLeague.TV"])
     ];
 
-    private static readonly IReadOnlyDictionary<string, string> CanonicalAliases = BuildCanonicalAliases();
+    private static readonly Dictionary<string, string> CanonicalAliases = BuildCanonicalAliases();
 
     public static string Normalize(string? value)
     {
@@ -47,7 +50,7 @@ public static class TranslationNameKeyNormalizer
         return CanonicalizeKey(NormalizeTokens(normalized));
     }
 
-    private static IReadOnlyDictionary<string, string> BuildCanonicalAliases()
+    private static Dictionary<string, string> BuildCanonicalAliases()
     {
         var aliases = new Dictionary<string, string>(StringComparer.Ordinal);
 

@@ -56,13 +56,14 @@ namespace YummyKodik.Tasks
                         Season = int.Parse(x.Match.Groups["season"].Value)
                     })
                     .Where(x => seasonNumber == 0 ? x.Season > 0 : x.Season > 1)
+                    .Select(x => x.Path)
                     .ToList();
 
                 foreach (var mistakenDir in mistakenDirs)
                 {
                     var movedCount = seasonNumber == 0
-                        ? MoveAllSeasonArtifacts(logger, mistakenDir.Path, seasonDir, seasonNumber)
-                        : MoveSeasonArtifactsForSeason(logger, mistakenDir.Path, seasonDir, seasonNumber);
+                        ? MoveAllSeasonArtifacts(logger, mistakenDir, seasonDir, seasonNumber)
+                        : MoveSeasonArtifactsForSeason(logger, mistakenDir, seasonDir, seasonNumber);
                     if (movedCount <= 0)
                     {
                         continue;
@@ -72,10 +73,10 @@ namespace YummyKodik.Tasks
                         "[YummyKodik] Reconciled {Count} season {Season} artifact(s) from '{Old}' into '{New}'.",
                         movedCount,
                         seasonNumber,
-                        mistakenDir.Path,
+                        mistakenDir,
                         seasonDir);
 
-                    TryDeleteEmptySeasonDirectory(logger, mistakenDir.Path);
+                    TryDeleteEmptySeasonDirectory(logger, mistakenDir);
                 }
             }
             catch (Exception ex)
@@ -134,71 +135,9 @@ namespace YummyKodik.Tasks
 
             try
             {
-                var files = Directory.EnumerateFiles(seasonDir, "*.*", SearchOption.TopDirectoryOnly)
-                    .Where(p =>
-                    {
-                        var ext = Path.GetExtension(p);
-                        return ext.Equals(".strm", StringComparison.OrdinalIgnoreCase) ||
-                               ext.Equals(".nfo", StringComparison.OrdinalIgnoreCase);
-                    })
-                    .ToList();
-
-                foreach (var path in files)
+                foreach (var path in EnumerateSeasonArtifactFiles(seasonDir))
                 {
-                    var fileName = Path.GetFileName(path);
-                    if (string.IsNullOrWhiteSpace(fileName))
-                    {
-                        continue;
-                    }
-
-                    var nameNoExt = Path.GetFileNameWithoutExtension(path) ?? string.Empty;
-                    if (!TryGetEpisodeFileSeasonPrefix(nameNoExt, out var currentSeasonPrefix))
-                    {
-                        continue;
-                    }
-
-                    var ext = Path.GetExtension(path);
-                    if (string.Equals(currentSeasonPrefix, newSeasonPrefix, StringComparison.OrdinalIgnoreCase))
-                    {
-                        if (ext.Equals(".nfo", StringComparison.OrdinalIgnoreCase))
-                        {
-                            TryUpdateEpisodeNfoSeason(logger, path, normalizedSeasonNumber);
-                        }
-
-                        continue;
-                    }
-
-                    var renamedNoExt = newSeasonPrefix + nameNoExt.Substring(3);
-                    var target = Path.Combine(seasonDir, renamedNoExt + ext);
-
-                    if (File.Exists(target))
-                    {
-                        try
-                        {
-                            File.Delete(path);
-                        }
-                        catch (Exception ex)
-                        {
-                            logger.LogDebug(ex, "[YummyKodik] Failed to delete legacy file '{Path}'.", path);
-                        }
-
-                        continue;
-                    }
-
-                    try
-                    {
-                        File.Move(path, target);
-                    }
-                    catch (Exception ex)
-                    {
-                        logger.LogDebug(ex, "[YummyKodik] Failed to rename file '{Old}' -> '{New}'.", path, target);
-                        continue;
-                    }
-
-                    if (ext.Equals(".nfo", StringComparison.OrdinalIgnoreCase))
-                    {
-                        TryUpdateEpisodeNfoSeason(logger, target, normalizedSeasonNumber);
-                    }
+                    MigrateLegacyEpisodeFileName(logger, seasonDir, path, normalizedSeasonNumber, newSeasonPrefix);
                 }
             }
             catch (Exception ex)
@@ -209,10 +148,101 @@ namespace YummyKodik.Tasks
 
         private static int MoveSeasonArtifactsForSeason(ILogger logger, string sourceDir, string targetDir, int seasonNumber)
         {
-            if (string.IsNullOrWhiteSpace(sourceDir) ||
-                string.IsNullOrWhiteSpace(targetDir) ||
-                !Directory.Exists(sourceDir) ||
-                string.Equals(sourceDir, targetDir, StringComparison.OrdinalIgnoreCase))
+            return MoveSeasonArtifacts(
+                logger,
+                sourceDir,
+                targetDir,
+                seasonNumber,
+                group => GroupSeasonMatches(group, seasonNumber),
+                LogMoveSeasonArtifactFailure);
+        }
+
+        private static int MoveAllSeasonArtifacts(ILogger logger, string sourceDir, string targetDir, int seasonNumber)
+        {
+            return MoveSeasonArtifacts(
+                logger,
+                sourceDir,
+                targetDir,
+                seasonNumber,
+                _ => true,
+                LogMoveSpecialArtifactFailure);
+        }
+
+        private static void MigrateLegacyEpisodeFileName(
+            ILogger logger,
+            string seasonDir,
+            string path,
+            int normalizedSeasonNumber,
+            string newSeasonPrefix)
+        {
+            var fileName = Path.GetFileName(path);
+            if (string.IsNullOrWhiteSpace(fileName))
+            {
+                return;
+            }
+
+            var nameNoExt = Path.GetFileNameWithoutExtension(path) ?? string.Empty;
+            if (!TryGetEpisodeFileSeasonPrefix(nameNoExt, out var currentSeasonPrefix))
+            {
+                return;
+            }
+
+            var ext = Path.GetExtension(path);
+            if (string.Equals(currentSeasonPrefix, newSeasonPrefix, StringComparison.OrdinalIgnoreCase))
+            {
+                UpdateEpisodeNfoSeasonIfNeeded(logger, path, ext, normalizedSeasonNumber);
+                return;
+            }
+
+            var renamedNoExt = string.Concat(newSeasonPrefix, nameNoExt.AsSpan(3));
+            var target = Path.Combine(seasonDir, renamedNoExt + ext);
+            if (TryRenameLegacyEpisodeFile(logger, path, target))
+            {
+                UpdateEpisodeNfoSeasonIfNeeded(logger, target, ext, normalizedSeasonNumber);
+            }
+        }
+
+        private static bool TryRenameLegacyEpisodeFile(ILogger logger, string path, string target)
+        {
+            if (File.Exists(target))
+            {
+                TryDeleteLegacyEpisodeFile(logger, path);
+                return false;
+            }
+
+            try
+            {
+                File.Move(path, target);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                logger.LogDebug(ex, "[YummyKodik] Failed to rename file '{Old}' -> '{New}'.", path, target);
+                return false;
+            }
+        }
+
+        private static void TryDeleteLegacyEpisodeFile(ILogger logger, string path)
+        {
+            try
+            {
+                File.Delete(path);
+            }
+            catch (Exception ex)
+            {
+                logger.LogDebug(ex, "[YummyKodik] Failed to delete legacy file '{Path}'.", path);
+            }
+        }
+
+        private static int MoveSeasonArtifacts(
+            ILogger logger,
+            string sourceDir,
+            string targetDir,
+            int seasonNumber,
+            Func<IGrouping<string, string>, bool> shouldMoveGroup,
+            Action<ILogger, Exception, string, string> logMoveFailure)
+        {
+            if (!CanMoveSeasonArtifacts(sourceDir, targetDir))
             {
                 return 0;
             }
@@ -220,125 +250,126 @@ namespace YummyKodik.Tasks
             Directory.CreateDirectory(targetDir);
 
             var movedCount = 0;
-            var files = Directory.EnumerateFiles(sourceDir, "*.*", SearchOption.TopDirectoryOnly)
-                .Where(p =>
-                {
-                    var ext = Path.GetExtension(p);
-                    return ext.Equals(".strm", StringComparison.OrdinalIgnoreCase) ||
-                           ext.Equals(".nfo", StringComparison.OrdinalIgnoreCase);
-                })
-                .ToList();
 
-            foreach (var group in files
-                         .GroupBy(path => Path.GetFileNameWithoutExtension(path) ?? string.Empty, StringComparer.OrdinalIgnoreCase)
-                         .Where(g => !string.IsNullOrWhiteSpace(g.Key)))
+            foreach (var group in EnumerateSeasonArtifactGroups(sourceDir).Where(shouldMoveGroup))
             {
-                var detectedSeason = DetectSeasonNumberFromArtifacts(group);
-                if (detectedSeason != seasonNumber)
-                {
-                    continue;
-                }
-
-                foreach (var path in group)
-                {
-                    var ext = Path.GetExtension(path);
-                    var nameNoExt = Path.GetFileNameWithoutExtension(path) ?? string.Empty;
-                    var targetNameNoExt = RewriteEpisodeFileSeasonPrefix(nameNoExt, seasonNumber);
-                    var targetPath = Path.Combine(targetDir, targetNameNoExt + ext);
-
-                    try
-                    {
-                        if (!string.Equals(path, targetPath, StringComparison.OrdinalIgnoreCase))
-                        {
-                            if (File.Exists(targetPath))
-                            {
-                                File.Delete(path);
-                            }
-                            else
-                            {
-                                File.Move(path, targetPath);
-                            }
-                        }
-
-                        if (ext.Equals(".nfo", StringComparison.OrdinalIgnoreCase))
-                        {
-                            TryUpdateEpisodeNfoSeason(logger, targetPath, seasonNumber);
-                        }
-
-                        movedCount++;
-                    }
-                    catch (Exception ex)
-                    {
-                        logger.LogDebug(ex, "[YummyKodik] Failed to move season artifact '{Path}' -> '{TargetPath}'.", path, targetPath);
-                    }
-                }
+                movedCount += MoveSeasonArtifactGroup(logger, group, targetDir, seasonNumber, logMoveFailure);
             }
 
             return movedCount;
         }
 
-        private static int MoveAllSeasonArtifacts(ILogger logger, string sourceDir, string targetDir, int seasonNumber)
+        private static bool CanMoveSeasonArtifacts(string sourceDir, string targetDir)
         {
-            if (string.IsNullOrWhiteSpace(sourceDir) ||
-                string.IsNullOrWhiteSpace(targetDir) ||
-                !Directory.Exists(sourceDir) ||
-                string.Equals(sourceDir, targetDir, StringComparison.OrdinalIgnoreCase))
-            {
-                return 0;
-            }
+            return !string.IsNullOrWhiteSpace(sourceDir) &&
+                   !string.IsNullOrWhiteSpace(targetDir) &&
+                   Directory.Exists(sourceDir) &&
+                   !string.Equals(sourceDir, targetDir, StringComparison.OrdinalIgnoreCase);
+        }
 
-            Directory.CreateDirectory(targetDir);
+        private static IEnumerable<IGrouping<string, string>> EnumerateSeasonArtifactGroups(string sourceDir)
+        {
+            return EnumerateSeasonArtifactFiles(sourceDir)
+                .GroupBy(path => Path.GetFileNameWithoutExtension(path) ?? string.Empty, StringComparer.OrdinalIgnoreCase)
+                .Where(g => !string.IsNullOrWhiteSpace(g.Key));
+        }
 
-            var movedCount = 0;
-            var files = Directory.EnumerateFiles(sourceDir, "*.*", SearchOption.TopDirectoryOnly)
-                .Where(p =>
-                {
-                    var ext = Path.GetExtension(p);
-                    return ext.Equals(".strm", StringComparison.OrdinalIgnoreCase) ||
-                           ext.Equals(".nfo", StringComparison.OrdinalIgnoreCase);
-                })
+        private static List<string> EnumerateSeasonArtifactFiles(string directory)
+        {
+            return Directory.EnumerateFiles(directory, "*.*", SearchOption.TopDirectoryOnly)
+                .Where(IsSeasonArtifactFile)
                 .ToList();
+        }
 
-            foreach (var group in files
-                         .GroupBy(path => Path.GetFileNameWithoutExtension(path) ?? string.Empty, StringComparer.OrdinalIgnoreCase)
-                         .Where(g => !string.IsNullOrWhiteSpace(g.Key)))
+        private static bool IsSeasonArtifactFile(string path)
+        {
+            return IsSeasonArtifactExtension(Path.GetExtension(path));
+        }
+
+        private static bool IsSeasonArtifactExtension(string extension)
+        {
+            return extension.Equals(".strm", StringComparison.OrdinalIgnoreCase) ||
+                   extension.Equals(".nfo", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool GroupSeasonMatches(IGrouping<string, string> group, int seasonNumber)
+        {
+            return DetectSeasonNumberFromArtifacts(group) == seasonNumber;
+        }
+
+        private static int MoveSeasonArtifactGroup(
+            ILogger logger,
+            IEnumerable<string> paths,
+            string targetDir,
+            int seasonNumber,
+            Action<ILogger, Exception, string, string> logMoveFailure)
+        {
+            var movedCount = 0;
+            foreach (var path in paths.Where(path => TryMoveSeasonArtifact(logger, path, targetDir, seasonNumber, logMoveFailure)))
             {
-                foreach (var path in group)
-                {
-                    var ext = Path.GetExtension(path);
-                    var nameNoExt = Path.GetFileNameWithoutExtension(path) ?? string.Empty;
-                    var targetNameNoExt = RewriteEpisodeFileSeasonPrefix(nameNoExt, seasonNumber);
-                    var targetPath = Path.Combine(targetDir, targetNameNoExt + ext);
-
-                    try
-                    {
-                        if (!string.Equals(path, targetPath, StringComparison.OrdinalIgnoreCase))
-                        {
-                            if (File.Exists(targetPath))
-                            {
-                                File.Delete(path);
-                            }
-                            else
-                            {
-                                File.Move(path, targetPath);
-                            }
-                        }
-
-                        if (ext.Equals(".nfo", StringComparison.OrdinalIgnoreCase))
-                        {
-                            TryUpdateEpisodeNfoSeason(logger, targetPath, seasonNumber);
-                        }
-
-                        movedCount++;
-                    }
-                    catch (Exception ex)
-                    {
-                        logger.LogDebug(ex, "[YummyKodik] Failed to move special artifact '{Path}' -> '{TargetPath}'.", path, targetPath);
-                    }
-                }
+                movedCount++;
             }
 
             return movedCount;
+        }
+
+        private static bool TryMoveSeasonArtifact(
+            ILogger logger,
+            string path,
+            string targetDir,
+            int seasonNumber,
+            Action<ILogger, Exception, string, string> logMoveFailure)
+        {
+            var ext = Path.GetExtension(path);
+            var nameNoExt = Path.GetFileNameWithoutExtension(path) ?? string.Empty;
+            var targetNameNoExt = RewriteEpisodeFileSeasonPrefix(nameNoExt, seasonNumber);
+            var targetPath = Path.Combine(targetDir, targetNameNoExt + ext);
+
+            try
+            {
+                MoveSeasonArtifactFile(path, targetPath);
+                UpdateEpisodeNfoSeasonIfNeeded(logger, targetPath, ext, seasonNumber);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                logMoveFailure(logger, ex, path, targetPath);
+                return false;
+            }
+        }
+
+        private static void LogMoveSeasonArtifactFailure(ILogger logger, Exception exception, string path, string targetPath)
+        {
+            logger.LogDebug(exception, "[YummyKodik] Failed to move season artifact '{Path}' -> '{TargetPath}'.", path, targetPath);
+        }
+
+        private static void LogMoveSpecialArtifactFailure(ILogger logger, Exception exception, string path, string targetPath)
+        {
+            logger.LogDebug(exception, "[YummyKodik] Failed to move special artifact '{Path}' -> '{TargetPath}'.", path, targetPath);
+        }
+
+        private static void MoveSeasonArtifactFile(string path, string targetPath)
+        {
+            if (string.Equals(path, targetPath, StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
+            if (File.Exists(targetPath))
+            {
+                File.Delete(path);
+                return;
+            }
+
+            File.Move(path, targetPath);
+        }
+
+        private static void UpdateEpisodeNfoSeasonIfNeeded(ILogger logger, string path, string extension, int seasonNumber)
+        {
+            if (extension.Equals(".nfo", StringComparison.OrdinalIgnoreCase))
+            {
+                TryUpdateEpisodeNfoSeason(logger, path, seasonNumber);
+            }
         }
 
         private static int? DetectSeasonNumberFromArtifacts(IEnumerable<string> paths)
@@ -436,7 +467,7 @@ namespace YummyKodik.Tasks
                 return false;
             }
 
-            seasonPrefix = "S" + fileNameWithoutExtension.Substring(1, 2);
+            seasonPrefix = string.Concat("S", fileNameWithoutExtension.AsSpan(1, 2));
             return true;
         }
 
@@ -448,7 +479,7 @@ namespace YummyKodik.Tasks
             }
 
             var normalizedSeasonNumber = seasonNumber >= 0 ? seasonNumber : 1;
-            return "S" + normalizedSeasonNumber.ToString("00") + fileNameWithoutExtension.Substring(3);
+            return string.Concat("S", normalizedSeasonNumber.ToString("00"), fileNameWithoutExtension.AsSpan(3));
         }
 
         private static void TryDeleteEmptySeasonDirectory(ILogger logger, string directoryPath)

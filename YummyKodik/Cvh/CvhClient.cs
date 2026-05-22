@@ -16,11 +16,13 @@ public sealed class CvhClient
 {
     private const string BaseUrl = "https://plapi.cdnvideohub.com/api/v1";
     private const string PlayerOrigin = "https://ru.yummyani.me";
+    private static readonly TimeSpan RegexMatchTimeout = TimeSpan.FromSeconds(1);
     private static readonly TimeSpan SessionTtl = TimeSpan.FromHours(2);
     private static readonly ConcurrentDictionary<string, CvhPlaybackSession> SessionCache = new(StringComparer.Ordinal);
     private static readonly Regex ManifestUriAttributeRegex = new(
         "URI=(?<quote>[\"'])(?<uri>[^\"']+)\\k<quote>",
-        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled,
+        RegexMatchTimeout);
 
     private readonly HttpClient _httpClient;
 
@@ -48,12 +50,12 @@ public sealed class CvhClient
 
         if (source.AnimeId <= 0)
         {
-            throw new ArgumentOutOfRangeException(nameof(source.AnimeId));
+            throw new ArgumentOutOfRangeException(nameof(source), source.AnimeId, "AnimeId must be greater than zero.");
         }
 
         if (source.EpisodeNumber <= 0)
         {
-            throw new ArgumentOutOfRangeException(nameof(source.EpisodeNumber));
+            throw new ArgumentOutOfRangeException(nameof(source), source.EpisodeNumber, "EpisodeNumber must be greater than zero.");
         }
 
         var playlist = await GetPlaylistAsync(source, cookies, cancellationToken).ConfigureAwait(false);
@@ -157,7 +159,7 @@ public sealed class CvhClient
         return session;
     }
 
-    public bool TryGetSession(string sessionId, out CvhPlaybackSession session)
+    public static bool TryGetSession(string sessionId, out CvhPlaybackSession session)
     {
         CleanupExpiredSessions();
 
@@ -173,7 +175,7 @@ public sealed class CvhClient
         return false;
     }
 
-    public bool TryResolveProxyResourceUrl(CvhPlaybackSession session, string resourceId, out string resourceUrl)
+    public static bool TryResolveProxyResourceUrl(CvhPlaybackSession session, string resourceId, out string resourceUrl)
     {
         ArgumentNullException.ThrowIfNull(session);
 
@@ -339,7 +341,7 @@ public sealed class CvhClient
 
         return episodeItems
             .OrderBy(x => NormalizeVoiceName(x.VoiceStudio), StringComparer.OrdinalIgnoreCase)
-            .FirstOrDefault();
+            .First();
     }
 
     private static string PickStreamUrl(CvhVideoSources? sources, int preferredQuality)
@@ -426,7 +428,7 @@ public sealed class CvhClient
                     continue;
                 }
 
-                if (uriLine.StartsWith("#", StringComparison.Ordinal))
+                if (uriLine.StartsWith('#'))
                 {
                     break;
                 }
@@ -522,7 +524,8 @@ public sealed class CvhClient
         var resolutionMatch = Regex.Match(
             manifestLine ?? string.Empty,
             @"RESOLUTION=\d+x(?<height>\d+)",
-            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant,
+            RegexMatchTimeout);
 
         if (!resolutionMatch.Success)
         {
@@ -543,7 +546,8 @@ public sealed class CvhClient
         var bandwidthMatch = Regex.Match(
             manifestLine ?? string.Empty,
             @"(?:AVERAGE-)?BANDWIDTH=(?<value>\d+)",
-            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant,
+            RegexMatchTimeout);
 
         if (!bandwidthMatch.Success)
         {
@@ -657,7 +661,7 @@ public sealed class CvhClient
         for (var i = 0; i < lines.Length; i++)
         {
             var line = lines[i].Trim();
-            if (line.Length == 0 || line.StartsWith("#", StringComparison.Ordinal))
+            if (line.Length == 0 || line.StartsWith('#'))
             {
                 continue;
             }
@@ -696,7 +700,7 @@ public sealed class CvhClient
                 continue;
             }
 
-            if (trimmed.StartsWith("#", StringComparison.Ordinal))
+            if (trimmed.StartsWith('#'))
             {
                 var attributeKind = DetermineAttributeUriKind(trimmed);
                 if (attributeKind != CvhProxyResourceKind.Unknown)

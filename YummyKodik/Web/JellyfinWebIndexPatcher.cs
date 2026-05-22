@@ -24,17 +24,17 @@ public static class JellyfinWebIndexPatcher
         if (startIndex >= 0 && endIndex > startIndex)
         {
             endIndex += EndMarker.Length;
-            var existing = html.Substring(startIndex, endIndex - startIndex);
-            if (string.Equals(existing, snippet, StringComparison.Ordinal))
+            var existing = html.AsSpan(startIndex, endIndex - startIndex);
+            if (existing.Equals(snippet.AsSpan(), StringComparison.Ordinal))
             {
                 return false;
             }
 
-            patchedHtml = html.Substring(0, startIndex) + snippet + html.Substring(endIndex);
+            patchedHtml = string.Concat(html.AsSpan(0, startIndex), snippet, html.AsSpan(endIndex));
             return true;
         }
 
-        if (html.IndexOf("ConfigurationPage?name=seriesTranslation.js", StringComparison.OrdinalIgnoreCase) >= 0)
+        if (html.Contains("ConfigurationPage?name=seriesTranslation.js", StringComparison.OrdinalIgnoreCase))
         {
             return false;
         }

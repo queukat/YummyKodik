@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using System.IO;
 using System.Linq;
 using System.Net.Http;
@@ -22,6 +23,10 @@ namespace YummyKodik.Media;
 
 public sealed class YummyKodikMediaSourceProvider : IMediaSourceProvider
 {
+    private const string HlsFormatQuery = "&format=hls";
+    private const string TranslationTypeVoice = "voice";
+    private const string TranslationTypeSubtitles = "subtitles";
+
     private static readonly ConcurrentDictionary<string, TranslationCacheEntry> TranslationCache = new(StringComparer.OrdinalIgnoreCase);
     private static readonly TimeSpan TranslationCacheTtl = TimeSpan.FromHours(1);
     private static readonly ConcurrentDictionary<string, RuntimeCacheEntry> RuntimeCache = new(StringComparer.OrdinalIgnoreCase);
@@ -29,18 +34,17 @@ public sealed class YummyKodikMediaSourceProvider : IMediaSourceProvider
 
     private readonly ILogger<YummyKodikMediaSourceProvider> _logger;
     private readonly IHttpClientFactory _httpClientFactory;
-    private readonly AllohaPlaybackService _allohaPlaybackService;
 
     public YummyKodikMediaSourceProvider(
         ILogger<YummyKodikMediaSourceProvider> logger,
-        IHttpClientFactory httpClientFactory,
-        AllohaPlaybackService allohaPlaybackService)
+        IHttpClientFactory httpClientFactory)
     {
         _logger = logger;
         _httpClientFactory = httpClientFactory;
-        _allohaPlaybackService = allohaPlaybackService;
     }
 
+    [SuppressMessage("Major Code Smell", "S2325:Methods and properties that don't access instance data should be static", Justification = "Jellyfin IMediaSourceProvider requires an instance Name property.")]
+    [SuppressMessage("Performance", "CA1822:Mark members as static", Justification = "Jellyfin IMediaSourceProvider requires an instance Name property.")]
     public string Name => "YummyKodik media source";
 
     public Task<ILiveStream> OpenMediaSource(
@@ -58,16 +62,15 @@ public sealed class YummyKodikMediaSourceProvider : IMediaSourceProvider
             return Array.Empty<MediaSourceInfo>();
         }
 
-        if (YummyKodikStreamUri.TryParseRequest(uri, out var request) &&
-            request.Provider == YummyStreamProviderKind.Cvh)
+        if (YummyKodikStreamUri.TryParseRequest(uri, out var request))
         {
-            return await GetCvhMediaSourcesAsync(item, request, cancellationToken).ConfigureAwait(false);
-        }
-
-        if (YummyKodikStreamUri.TryParseRequest(uri, out request) &&
-            request.Provider == YummyStreamProviderKind.Alloha)
-        {
-            return await GetAllohaMediaSourcesAsync(item, request, cancellationToken).ConfigureAwait(false);
+            switch (request.Provider)
+            {
+                case YummyStreamProviderKind.Cvh:
+                    return await GetCvhMediaSourcesAsync(item, request, cancellationToken).ConfigureAwait(false);
+                case YummyStreamProviderKind.Alloha:
+                    return await GetAllohaMediaSourcesAsync(item, request, cancellationToken).ConfigureAwait(false);
+            }
         }
 
         if (!TryParseLogicalUri(uri, out var idType, out var id, out var episode, out var explicitTranslationId))
@@ -75,6 +78,15 @@ public sealed class YummyKodikMediaSourceProvider : IMediaSourceProvider
             return Array.Empty<MediaSourceInfo>();
         }
 
+        var kodikRequest = new KodikMediaSourceRequest(idType, id, episode, explicitTranslationId);
+        return await GetKodikMediaSourcesAsync(item, kodikRequest, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<IEnumerable<MediaSourceInfo>> GetKodikMediaSourcesAsync(
+        BaseItem item,
+        KodikMediaSourceRequest request,
+        CancellationToken cancellationToken)
+    {
         var cfg = Plugin.Instance.Configuration;
         var quality = cfg.PreferredQuality > 0 ? cfg.PreferredQuality : 720;
 
@@ -86,108 +98,175 @@ public sealed class YummyKodikMediaSourceProvider : IMediaSourceProvider
         }
 
         var streamBase =
-            $"{baseUrl}/YummyKodik/stream?type={idType.ToString().ToLowerInvariant()}" +
-            $"&id={Uri.EscapeDataString(id)}&ep={episode}";
+            $"{baseUrl}/YummyKodik/stream?type={request.IdType.ToString().ToLowerInvariant()}" +
+            $"&id={Uri.EscapeDataString(request.Id)}&ep={request.Episode}";
 
-        IReadOnlyList<KodikTranslation> allTranslations = Array.Empty<KodikTranslation>();
-        IReadOnlyList<KodikTranslation> filteredTranslations = Array.Empty<KodikTranslation>();
+        var (allTranslations, filteredTranslations) = await LoadOrderedTranslationsAsync(
+                request.IdType,
+                request.Id,
+                cfg.PreferredTranslationFilter,
+                cancellationToken)
+            .ConfigureAwait(false);
 
-        try
+        if (!string.IsNullOrWhiteSpace(request.ExplicitTranslationId))
         {
-            allTranslations = await GetTranslationsCachedAsync(idType, id, cancellationToken).ConfigureAwait(false);
-            filteredTranslations = FilterAndOrderTranslations(allTranslations, cfg.PreferredTranslationFilter);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Failed to load translations for idType={IdType} id={Id}. Returning Auto only.", idType, id);
-        }
-
-        if (!string.IsNullOrWhiteSpace(explicitTranslationId))
-        {
-            var explicitName = BuildExplicitTranslationName(filteredTranslations, allTranslations, explicitTranslationId);
-            var explicitRuntimeTicks = await ResolveRunTimeTicksAsync(
-                    idType,
-                    id,
-                    episode,
-                    explicitTranslationId,
+            return await BuildExplicitKodikMediaSourceAsync(
+                    item,
+                    request,
+                    streamBase,
+                    filteredTranslations,
+                    allTranslations,
                     quality,
                     cancellationToken)
                 .ConfigureAwait(false);
-
-            return new[]
-            {
-                BuildSource(
-                    itemId: item.Id.ToString(),
-                    episode: episode,
-                    suffix: $"tr{explicitTranslationId}",
-                    name: explicitName,
-                    url: BuildStreamUrl(streamBase, explicitTranslationId),
-                    container: "m3u8",
-                    supportsDirectPlay: false,
-                    runTimeTicks: explicitRuntimeTicks)
-            };
         }
 
-        var runtimeTranslationId = PickRuntimeTranslationId(filteredTranslations, allTranslations, episode, cfg.PreferredTranslationFilter);
+        var runtimeTranslationId = PickRuntimeTranslationId(
+            filteredTranslations,
+            allTranslations,
+            request.Episode,
+            cfg.PreferredTranslationFilter);
+
         var defaultRunTimeTicks = await ResolveRunTimeTicksAsync(
-                idType,
-                id,
-                episode,
+                request.IdType,
+                request.Id,
+                request.Episode,
                 runtimeTranslationId,
                 quality,
                 cancellationToken)
             .ConfigureAwait(false);
 
-        var sources = new List<MediaSourceInfo>(8);
-
-        sources.Add(BuildSource(
-            itemId: item.Id.ToString(),
-            episode: episode,
-            suffix: "auto",
-            name: "Auto",
-            url: BuildStreamUrl(streamBase, translationId: null),
-            container: "m3u8",
-            supportsDirectPlay: false,
-            runTimeTicks: defaultRunTimeTicks));
-
-        foreach (var tr in filteredTranslations)
-        {
-            if (string.IsNullOrWhiteSpace(tr.Id))
-            {
-                continue;
-            }
-
-            if (tr.MaxEpisode > 0 && episode > tr.MaxEpisode)
-            {
-                continue;
-            }
-
-            var trId = tr.Id.Trim();
-            if (string.Equals(trId, "0", StringComparison.Ordinal))
-            {
-                continue;
-            }
-
-            var label = BuildTranslationLabel(tr);
-
-            sources.Add(BuildSource(
-                itemId: item.Id.ToString(),
-                episode: episode,
-                suffix: $"tr{trId}",
-                name: label,
-                url: BuildStreamUrl(streamBase, trId),
-                container: "m3u8",
-                supportsDirectPlay: false,
-                runTimeTicks: defaultRunTimeTicks));
-        }
+        var sources = BuildDefaultKodikMediaSources(
+            item.Id.ToString(),
+            request.Episode,
+            streamBase,
+            filteredTranslations,
+            defaultRunTimeTicks);
 
         _logger.LogInformation(
             "Provided {Count} media sources for '{ItemName}' (episode {Episode}).",
             sources.Count,
             item.Name,
-            episode);
+            request.Episode);
 
         return sources;
+    }
+
+    private async Task<(
+        IReadOnlyList<KodikTranslation> AllTranslations,
+        IReadOnlyList<KodikTranslation> FilteredTranslations)> LoadOrderedTranslationsAsync(
+        KodikIdType idType,
+        string id,
+        string? preferredFilter,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var allTranslations = await GetTranslationsCachedAsync(idType, id, cancellationToken).ConfigureAwait(false);
+            var filteredTranslations = FilterAndOrderTranslations(allTranslations, preferredFilter);
+            return (allTranslations, filteredTranslations);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to load translations for idType={IdType} id={Id}. Returning Auto only.", idType, id);
+            return (Array.Empty<KodikTranslation>(), Array.Empty<KodikTranslation>());
+        }
+    }
+
+    private async Task<IEnumerable<MediaSourceInfo>> BuildExplicitKodikMediaSourceAsync(
+        BaseItem item,
+        KodikMediaSourceRequest request,
+        string streamBase,
+        IReadOnlyList<KodikTranslation> filteredTranslations,
+        IReadOnlyList<KodikTranslation> allTranslations,
+        int quality,
+        CancellationToken cancellationToken)
+    {
+        var explicitName = BuildExplicitTranslationName(
+            filteredTranslations,
+            allTranslations,
+            request.ExplicitTranslationId);
+
+        var explicitRuntimeTicks = await ResolveRunTimeTicksAsync(
+                request.IdType,
+                request.Id,
+                request.Episode,
+                request.ExplicitTranslationId,
+                quality,
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        return new[]
+        {
+            BuildSource(new MediaSourceBuildOptions
+            {
+                ItemId = item.Id.ToString(),
+                Episode = request.Episode,
+                Suffix = $"tr{request.ExplicitTranslationId}",
+                Name = explicitName,
+                Url = BuildStreamUrl(streamBase, request.ExplicitTranslationId),
+                Container = "m3u8",
+                SupportsDirectPlay = false,
+                RunTimeTicks = explicitRuntimeTicks
+            })
+        };
+    }
+
+    private static List<MediaSourceInfo> BuildDefaultKodikMediaSources(
+        string itemId,
+        int episode,
+        string streamBase,
+        IReadOnlyList<KodikTranslation> translations,
+        long? runTimeTicks)
+    {
+        var sources = new List<MediaSourceInfo>(8)
+        {
+            BuildSource(new MediaSourceBuildOptions
+            {
+                ItemId = itemId,
+                Episode = episode,
+                Suffix = "auto",
+                Name = "Auto",
+                Url = BuildStreamUrl(streamBase, translationId: null),
+                Container = "m3u8",
+                SupportsDirectPlay = false,
+                RunTimeTicks = runTimeTicks
+            })
+        };
+
+        foreach (var tr in translations)
+        {
+            var trId = GetPlayableTranslationId(tr, episode);
+            if (trId == null)
+            {
+                continue;
+            }
+
+            sources.Add(BuildSource(new MediaSourceBuildOptions
+            {
+                ItemId = itemId,
+                Episode = episode,
+                Suffix = $"tr{trId}",
+                Name = BuildTranslationLabel(tr),
+                Url = BuildStreamUrl(streamBase, trId),
+                Container = "m3u8",
+                SupportsDirectPlay = false,
+                RunTimeTicks = runTimeTicks
+            }));
+        }
+
+        return sources;
+    }
+
+    private static string? GetPlayableTranslationId(KodikTranslation translation, int episode)
+    {
+        var trId = (translation.Id ?? string.Empty).Trim();
+        if (trId.Length == 0 || string.Equals(trId, "0", StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        return translation.MaxEpisode > 0 && episode > translation.MaxEpisode ? null : trId;
     }
 
     private async Task<IEnumerable<MediaSourceInfo>> GetCvhMediaSourcesAsync(
@@ -222,40 +301,46 @@ public sealed class YummyKodikMediaSourceProvider : IMediaSourceProvider
         {
             return new[]
             {
-                BuildSource(
-                    itemId: item.Id.ToString(),
-                    episode: episode,
-                    suffix: "cvh-explicit",
-                    name: explicitVoiceName,
-                    url: YummyKodikStreamUri.BuildCvhHttpUrl(baseUrl, request.AnimeId, episode, explicitVoiceName) + "&format=hls",
-                    container: "m3u8",
-                    supportsDirectPlay: false,
-                    runTimeTicks: ToRunTimeTicks(catalog.GetDurationSeconds(episode, explicitVoiceName)))
+                BuildSource(new MediaSourceBuildOptions
+                {
+                    ItemId = item.Id.ToString(),
+                    Episode = episode,
+                    Suffix = "cvh-explicit",
+                    Name = explicitVoiceName,
+                    Url = YummyKodikStreamUri.BuildCvhHttpUrl(baseUrl, request.AnimeId, episode, explicitVoiceName) + HlsFormatQuery,
+                    Container = "m3u8",
+                    SupportsDirectPlay = false,
+                    RunTimeTicks = ToRunTimeTicks(catalog.GetDurationSeconds(episode, explicitVoiceName))
+                })
             };
         }
 
         var sources = new List<MediaSourceInfo>(8);
-        sources.Add(BuildSource(
-            itemId: item.Id.ToString(),
-            episode: episode,
-            suffix: "cvh-auto",
-            name: "Auto",
-            url: YummyKodikStreamUri.BuildCvhHttpUrl(baseUrl, request.AnimeId, episode) + "&format=hls",
-            container: "m3u8",
-            supportsDirectPlay: false,
-            runTimeTicks: ToRunTimeTicks(catalog.GetDurationSeconds(episode, defaultVoiceName))));
+        sources.Add(BuildSource(new MediaSourceBuildOptions
+        {
+            ItemId = item.Id.ToString(),
+            Episode = episode,
+            Suffix = "cvh-auto",
+            Name = "Auto",
+            Url = YummyKodikStreamUri.BuildCvhHttpUrl(baseUrl, request.AnimeId, episode) + HlsFormatQuery,
+            Container = "m3u8",
+            SupportsDirectPlay = false,
+            RunTimeTicks = ToRunTimeTicks(catalog.GetDurationSeconds(episode, defaultVoiceName))
+        }));
 
         foreach (var voiceName in catalog.GetSupportedVoiceNames(episode))
         {
-            sources.Add(BuildSource(
-                itemId: item.Id.ToString(),
-                episode: episode,
-                suffix: "cvh-" + SafeIdPart(voiceName),
-                name: voiceName,
-                url: YummyKodikStreamUri.BuildCvhHttpUrl(baseUrl, request.AnimeId, episode, voiceName) + "&format=hls",
-                container: "m3u8",
-                supportsDirectPlay: false,
-                runTimeTicks: ToRunTimeTicks(catalog.GetDurationSeconds(episode, voiceName))));
+            sources.Add(BuildSource(new MediaSourceBuildOptions
+            {
+                ItemId = item.Id.ToString(),
+                Episode = episode,
+                Suffix = "cvh-" + SafeIdPart(voiceName),
+                Name = voiceName,
+                Url = YummyKodikStreamUri.BuildCvhHttpUrl(baseUrl, request.AnimeId, episode, voiceName) + HlsFormatQuery,
+                Container = "m3u8",
+                SupportsDirectPlay = false,
+                RunTimeTicks = ToRunTimeTicks(catalog.GetDurationSeconds(episode, voiceName))
+            }));
         }
 
         _logger.LogInformation(
@@ -304,11 +389,7 @@ public sealed class YummyKodikMediaSourceProvider : IMediaSourceProvider
             return Array.Empty<MediaSourceInfo>();
         }
 
-        var voiceLabel = !string.IsNullOrWhiteSpace(explicitVoiceName)
-            ? explicitVoiceName
-            : !string.IsNullOrWhiteSpace(chosenEntry.DisplayVoiceName)
-                ? chosenEntry.DisplayVoiceName
-                : "Auto";
+        var voiceLabel = ResolveAllohaVoiceLabel(explicitVoiceName, chosenEntry.DisplayVoiceName);
 
         var url =
             $"{baseUrl}/YummyKodik/stream?provider={YummyKodikStreamUri.AllohaProvider}" +
@@ -321,52 +402,52 @@ public sealed class YummyKodikMediaSourceProvider : IMediaSourceProvider
 
         return new[]
         {
-            BuildSource(
-                itemId: item.Id.ToString(),
-                episode: episode,
-                suffix: "alloha-" + SafeIdPart(voiceLabel),
-                name: voiceLabel,
-                url: url + "&format=hls",
-                container: "m3u8",
-                supportsDirectPlay: false,
-                runTimeTicks: ToRunTimeTicks(catalog.GetDurationSeconds(YummyVideoProviderKind.Alloha, episode, voiceLabel)),
-                supportsProbing: false)
+            BuildSource(new MediaSourceBuildOptions
+            {
+                ItemId = item.Id.ToString(),
+                Episode = episode,
+                Suffix = "alloha-" + SafeIdPart(voiceLabel),
+                Name = voiceLabel,
+                Url = url + HlsFormatQuery,
+                Container = "m3u8",
+                SupportsDirectPlay = false,
+                RunTimeTicks = ToRunTimeTicks(catalog.GetDurationSeconds(YummyVideoProviderKind.Alloha, episode, voiceLabel)),
+                SupportsProbing = false
+            })
         };
     }
 
-    private static MediaSourceInfo BuildSource(
-        string itemId,
-        int episode,
-        string suffix,
-        string name,
-        string url,
-        string container = "mp4",
-        bool supportsDirectPlay = true,
-        long? runTimeTicks = null,
-        IReadOnlyDictionary<string, string>? requiredHttpHeaders = null,
-        bool supportsProbing = true)
+    private static string ResolveAllohaVoiceLabel(string explicitVoiceName, string? displayVoiceName)
+    {
+        if (!string.IsNullOrWhiteSpace(explicitVoiceName))
+        {
+            return explicitVoiceName;
+        }
+
+        return !string.IsNullOrWhiteSpace(displayVoiceName) ? displayVoiceName : "Auto";
+    }
+
+    private static MediaSourceInfo BuildSource(MediaSourceBuildOptions options)
     {
         var source = new MediaSourceInfo
         {
-            Id = $"{itemId}_ep{episode}_{suffix}",
-            Path = url,
+            Id = $"{options.ItemId}_ep{options.Episode}_{options.Suffix}",
+            Path = options.Url,
             Protocol = MediaProtocol.Http,
-            Container = container,
+            Container = options.Container,
             IsRemote = true,
             HasSegments = true,
             RequiresOpening = false,
             IsInfiniteStream = false,
-            SupportsDirectPlay = supportsDirectPlay,
+            SupportsDirectPlay = options.SupportsDirectPlay,
             SupportsDirectStream = true,
             SupportsTranscoding = true,
-            SupportsProbing = supportsProbing,
-            Name = name,
-            RequiredHttpHeaders = requiredHttpHeaders != null
-                ? new Dictionary<string, string>(requiredHttpHeaders, StringComparer.OrdinalIgnoreCase)
-                : new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            SupportsProbing = options.SupportsProbing,
+            Name = options.Name,
+            RequiredHttpHeaders = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         };
 
-        SetOptionalRunTimeTicks(source, runTimeTicks);
+        SetOptionalRunTimeTicks(source, options.RunTimeTicks);
         return source;
     }
 
@@ -384,12 +465,12 @@ public sealed class YummyKodikMediaSourceProvider : IMediaSourceProvider
             return name;
         }
 
-        if (type.Equals("voice", StringComparison.OrdinalIgnoreCase))
+        if (type.Equals(TranslationTypeVoice, StringComparison.OrdinalIgnoreCase))
         {
             return name;
         }
 
-        if (type.Equals("subtitles", StringComparison.OrdinalIgnoreCase))
+        if (type.Equals(TranslationTypeSubtitles, StringComparison.OrdinalIgnoreCase))
         {
             return $"{name} [subs]";
         }
@@ -397,7 +478,7 @@ public sealed class YummyKodikMediaSourceProvider : IMediaSourceProvider
         return $"{name} [{type}]";
     }
 
-    private static IReadOnlyList<KodikTranslation> FilterAndOrderTranslations(
+    private static List<KodikTranslation> FilterAndOrderTranslations(
         IReadOnlyList<KodikTranslation> translations,
         string? preferredFilter)
     {
@@ -407,7 +488,7 @@ public sealed class YummyKodikMediaSourceProvider : IMediaSourceProvider
 
         // Prefer voice translations in the list. If none, use everything.
         var voice = translations
-            .Where(t => string.Equals(t.Type, "voice", StringComparison.OrdinalIgnoreCase))
+            .Where(t => string.Equals(t.Type, TranslationTypeVoice, StringComparison.OrdinalIgnoreCase))
             .ToList();
 
         var baseList = voice.Count > 0 ? voice : translations.ToList();
@@ -462,7 +543,7 @@ public sealed class YummyKodikMediaSourceProvider : IMediaSourceProvider
 
         // Prefer voice match first (even if list already voice only).
         var voiceHit = translations.FirstOrDefault(t =>
-            string.Equals(t.Type, "voice", StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(t.Type, TranslationTypeVoice, StringComparison.OrdinalIgnoreCase) &&
             !string.IsNullOrWhiteSpace(t.Name) &&
             t.Name.Contains(needle, StringComparison.OrdinalIgnoreCase) &&
             !string.IsNullOrWhiteSpace(t.Id));
@@ -523,8 +604,8 @@ public sealed class YummyKodikMediaSourceProvider : IMediaSourceProvider
                 kodik,
                 http,
                 cfg,
-                cancellationToken,
-                client => client.GetAnimeInfoAsync(id, idType, cancellationToken))
+                client => client.GetAnimeInfoAsync(id, idType, cancellationToken),
+                cancellationToken)
             .ConfigureAwait(false);
 
         return infoRes.Result.Translations ?? Array.Empty<KodikTranslation>();
@@ -600,8 +681,8 @@ public sealed class YummyKodikMediaSourceProvider : IMediaSourceProvider
                     kodik,
                     http,
                     cfg,
-                    cancellationToken,
-                    client => client.GetEpisodeRuntimeAsync(id, idType, episode, normalizedTranslationId, quality, cancellationToken))
+                    client => client.GetEpisodeRuntimeAsync(id, idType, episode, normalizedTranslationId, quality, cancellationToken),
+                    cancellationToken)
                 .ConfigureAwait(false);
 
             var runTimeTicks = runtimeRes.Result?.Ticks;
@@ -680,10 +761,10 @@ public sealed class YummyKodikMediaSourceProvider : IMediaSourceProvider
         var trId = (translationId ?? string.Empty).Trim();
         if (trId.Length == 0 || string.Equals(trId, "0", StringComparison.Ordinal))
         {
-            return streamBase + "&format=hls";
+            return streamBase + HlsFormatQuery;
         }
 
-        return streamBase + $"&tr={Uri.EscapeDataString(trId)}&format=hls";
+        return streamBase + $"&tr={Uri.EscapeDataString(trId)}{HlsFormatQuery}";
     }
 
     private static string PickRuntimeTranslationId(
@@ -711,7 +792,7 @@ public sealed class YummyKodikMediaSourceProvider : IMediaSourceProvider
             .Where(ch => char.IsLetterOrDigit(ch) || ch == '-' || ch == '_')
             .ToArray();
 
-        return chars.Length == 0 ? "voice" : new string(chars);
+        return chars.Length == 0 ? TranslationTypeVoice : new string(chars);
     }
 
     private static long? ToRunTimeTicks(int? durationSeconds)
@@ -824,15 +905,15 @@ public sealed class YummyKodikMediaSourceProvider : IMediaSourceProvider
             return configured;
         }
 
-        return await KodikTokenProvider.GetTokenAsync(http, ct).ConfigureAwait(false);
+        return await KodikTokenProvider.GetTokenAsync(http, cancellationToken: ct).ConfigureAwait(false);
     }
 
     private static async Task<(KodikClient Client, T Result)> ExecuteWithAutoTokenRefreshAsync<T>(
         KodikClient client,
         HttpClient http,
         PluginConfiguration cfg,
-        CancellationToken ct,
-        Func<KodikClient, Task<T>> action)
+        Func<KodikClient, Task<T>> action,
+        CancellationToken ct)
     {
         try
         {
@@ -845,9 +926,9 @@ public sealed class YummyKodikMediaSourceProvider : IMediaSourceProvider
 
             var freshToken = await KodikTokenProvider.GetTokenAsync(
                     http,
-                    ct,
                     forceRefresh: true,
-                    allowStaleOnFailure: false)
+                    allowStaleOnFailure: false,
+                    cancellationToken: ct)
                 .ConfigureAwait(false);
 
             var refreshedClient = new KodikClient(http, freshToken);
@@ -867,4 +948,31 @@ public sealed class YummyKodikMediaSourceProvider : IMediaSourceProvider
         public DateTime ExpiresAtUtc { get; set; }
         public long? RunTimeTicks { get; set; }
     }
+
+    private sealed class MediaSourceBuildOptions
+    {
+        public string ItemId { get; init; } = string.Empty;
+
+        public int Episode { get; init; }
+
+        public string Suffix { get; init; } = string.Empty;
+
+        public string Name { get; init; } = string.Empty;
+
+        public string Url { get; init; } = string.Empty;
+
+        public string Container { get; init; } = "mp4";
+
+        public bool SupportsDirectPlay { get; init; } = true;
+
+        public long? RunTimeTicks { get; init; }
+
+        public bool SupportsProbing { get; init; } = true;
+    }
+
+    private sealed record KodikMediaSourceRequest(
+        KodikIdType IdType,
+        string Id,
+        int Episode,
+        string ExplicitTranslationId);
 }

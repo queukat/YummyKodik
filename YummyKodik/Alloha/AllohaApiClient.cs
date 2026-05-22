@@ -14,11 +14,6 @@ public sealed class AllohaApiClient
 {
     private const string DefaultBaseUrl = "https://api.alloha.tv";
 
-    private static readonly JsonSerializerOptions JsonOptions = new()
-    {
-        PropertyNameCaseInsensitive = true
-    };
-
     private readonly HttpClient _httpClient;
     private readonly string _apiToken;
     private readonly string _baseUrl;
@@ -126,93 +121,112 @@ public sealed class AllohaApiClient
             return entries;
         }
 
-        foreach (var seasonPair in EnumerateContainerEntries(seasonsElement)
-                     .OrderBy(x => GetPositiveIntProperty(x.Value, "season"))
-                     .ThenBy(x => ParsePositiveInt(x.Key)))
+        foreach (var seasonPair in EnumerateOrderedContainerEntries(seasonsElement, "season"))
         {
-            var seasonData = seasonPair.Value;
-            if (seasonData.ValueKind != JsonValueKind.Object ||
-                !seasonData.TryGetProperty("episodes", out var episodesElement))
-            {
-                continue;
-            }
-
-            var seasonNumber = GetPositiveIntProperty(seasonData, "season");
-            if (seasonNumber <= 0)
-            {
-                seasonNumber = ParsePositiveInt(seasonPair.Key);
-            }
-
-            if (seasonNumber <= 0)
-            {
-                continue;
-            }
-
-            foreach (var episodePair in EnumerateContainerEntries(episodesElement)
-                         .OrderBy(x => GetPositiveIntProperty(x.Value, "episode"))
-                         .ThenBy(x => ParsePositiveInt(x.Key)))
-            {
-                var episodeData = episodePair.Value;
-                if (episodeData.ValueKind != JsonValueKind.Object ||
-                    !episodeData.TryGetProperty("translation", out var translationsElement))
-                {
-                    continue;
-                }
-
-                var episodeNumber = GetPositiveIntProperty(episodeData, "episode");
-                if (episodeNumber <= 0)
-                {
-                    episodeNumber = ParsePositiveInt(episodePair.Key);
-                }
-
-                if (episodeNumber <= 0)
-                {
-                    continue;
-                }
-
-                foreach (var translationPair in EnumerateContainerEntries(translationsElement)
-                             .OrderBy(x => GetPositiveIntProperty(x.Value, "id"))
-                             .ThenBy(x => ParsePositiveInt(x.Key)))
-                {
-                    var translationData = translationPair.Value;
-                    if (translationData.ValueKind != JsonValueKind.Object)
-                    {
-                        continue;
-                    }
-
-                    var translationId = ParsePositiveInt(translationPair.Key);
-                    if (translationId <= 0)
-                    {
-                        translationId = GetPositiveIntProperty(translationData, "id");
-                    }
-                    if (translationId <= 0)
-                    {
-                        translationId = GetPositiveIntProperty(translationData, "translation_id");
-                    }
-
-                    var translationName = GetStringProperty(translationData, "translation") ?? string.Empty;
-                    var iframeUrl = NormalizeUrl(GetStringProperty(translationData, "iframe"));
-                    if (!TryBuildAllohaSource(iframeUrl, translationId, seasonNumber, episodeNumber, out var source))
-                    {
-                        continue;
-                    }
-
-                    entries.Add(new YummyVideoEntry
-                    {
-                        EpisodeNumber = episodeNumber,
-                        Provider = YummyVideoProviderKind.Alloha,
-                        RawDubbing = translationName.Trim(),
-                        DisplayVoiceName = YummyVideoCatalog.NormalizeVoiceName(translationName),
-                        DurationSeconds = 0,
-                        Skips = null,
-                        IframeUrl = iframeUrl,
-                        Alloha = source
-                    });
-                }
-            }
+            entries.AddRange(BuildSeasonCatalogEntries(seasonPair.Key, seasonPair.Value));
         }
 
         return entries;
+    }
+
+    private static IEnumerable<YummyVideoEntry> BuildSeasonCatalogEntries(string seasonKey, JsonElement seasonData)
+    {
+        if (seasonData.ValueKind != JsonValueKind.Object ||
+            !seasonData.TryGetProperty("episodes", out var episodesElement))
+        {
+            yield break;
+        }
+
+        var seasonNumber = GetPositiveIntOrFallback(seasonData, "season", seasonKey);
+        if (seasonNumber <= 0)
+        {
+            yield break;
+        }
+
+        foreach (var episodePair in EnumerateOrderedContainerEntries(episodesElement, "episode"))
+        {
+            foreach (var entry in BuildEpisodeCatalogEntries(seasonNumber, episodePair.Key, episodePair.Value))
+            {
+                yield return entry;
+            }
+        }
+    }
+
+    private static IEnumerable<YummyVideoEntry> BuildEpisodeCatalogEntries(
+        int seasonNumber,
+        string episodeKey,
+        JsonElement episodeData)
+    {
+        if (episodeData.ValueKind != JsonValueKind.Object ||
+            !episodeData.TryGetProperty("translation", out var translationsElement))
+        {
+            yield break;
+        }
+
+        var episodeNumber = GetPositiveIntOrFallback(episodeData, "episode", episodeKey);
+        if (episodeNumber <= 0)
+        {
+            yield break;
+        }
+
+        foreach (var translationPair in EnumerateOrderedContainerEntries(translationsElement, "id"))
+        {
+            if (TryBuildCatalogEntry(seasonNumber, episodeNumber, translationPair.Key, translationPair.Value, out var entry))
+            {
+                yield return entry;
+            }
+        }
+    }
+
+    private static bool TryBuildCatalogEntry(
+        int seasonNumber,
+        int episodeNumber,
+        string translationKey,
+        JsonElement translationData,
+        out YummyVideoEntry entry)
+    {
+        entry = new YummyVideoEntry();
+
+        if (translationData.ValueKind != JsonValueKind.Object)
+        {
+            return false;
+        }
+
+        var translationId = ResolveTranslationId(translationKey, translationData);
+        var translationName = GetStringProperty(translationData, "translation") ?? string.Empty;
+        var iframeUrl = NormalizeUrl(GetStringProperty(translationData, "iframe"));
+        if (!TryBuildAllohaSource(iframeUrl, translationId, seasonNumber, episodeNumber, out var source))
+        {
+            return false;
+        }
+
+        entry = new YummyVideoEntry
+        {
+            EpisodeNumber = episodeNumber,
+            Provider = YummyVideoProviderKind.Alloha,
+            RawDubbing = translationName.Trim(),
+            DisplayVoiceName = YummyVideoCatalog.NormalizeVoiceName(translationName),
+            DurationSeconds = 0,
+            Skips = null,
+            IframeUrl = iframeUrl,
+            Alloha = source
+        };
+
+        return true;
+    }
+
+    private static int ResolveTranslationId(string translationKey, JsonElement translationData)
+    {
+        var translationId = ParsePositiveInt(translationKey);
+        if (translationId > 0)
+        {
+            return translationId;
+        }
+
+        translationId = GetPositiveIntProperty(translationData, "id");
+        return translationId > 0
+            ? translationId
+            : GetPositiveIntProperty(translationData, "translation_id");
     }
 
     private static bool TryBuildAllohaSource(
@@ -307,7 +321,7 @@ public sealed class AllohaApiClient
                 continue;
             }
 
-            var key = Uri.UnescapeDataString(part.Substring(0, separatorIndex));
+            var key = Uri.UnescapeDataString(part.AsSpan(0, separatorIndex));
             var parsedValue = Uri.UnescapeDataString(part[(separatorIndex + 1)..]);
             result[key] = parsedValue;
         }
@@ -320,6 +334,21 @@ public sealed class AllohaApiClient
         return int.TryParse((value ?? string.Empty).Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed) && parsed > 0
             ? parsed
             : 0;
+    }
+
+    private static int GetPositiveIntOrFallback(JsonElement element, string propertyName, string fallbackKey)
+    {
+        var value = GetPositiveIntProperty(element, propertyName);
+        return value > 0 ? value : ParsePositiveInt(fallbackKey);
+    }
+
+    private static IOrderedEnumerable<KeyValuePair<string, JsonElement>> EnumerateOrderedContainerEntries(
+        JsonElement element,
+        string orderPropertyName)
+    {
+        return EnumerateContainerEntries(element)
+            .OrderBy(x => GetPositiveIntProperty(x.Value, orderPropertyName))
+            .ThenBy(x => ParsePositiveInt(x.Key));
     }
 
     private static IEnumerable<KeyValuePair<string, JsonElement>> EnumerateContainerEntries(JsonElement element)
@@ -422,7 +451,7 @@ public static class AllohaApiCatalogLoader
 
         var lazyLoad = InflightCatalogLoads.GetOrAdd(
             cacheKey,
-            _ => CreateCatalogLoadTask(cacheKey, cfg, anime, httpClient, logger, apiToken, queryName, queryValue));
+            key => CreateCatalogLoadTask(key, cfg, anime, httpClient, logger, apiToken, queryName, queryValue));
 
         return await lazyLoad.Value.WaitAsync(cancellationToken).ConfigureAwait(false);
     }

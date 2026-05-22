@@ -85,13 +85,17 @@ public static class YummyKodikStreamUri
         YummyAllohaSource? source = null)
     {
         var url = BuildYummyProviderHttpUrl(baseUrl, AllohaProvider, animeId, episode, voiceName);
-        if (string.IsNullOrWhiteSpace(url) ||
-            source == null ||
-            string.IsNullOrWhiteSpace(source.MovieToken) ||
-            string.IsNullOrWhiteSpace(source.RequestToken) ||
-            source.TranslationId <= 0 ||
-            source.SeasonNumber <= 0 ||
-            string.IsNullOrWhiteSpace(source.RefererUrl))
+        if (string.IsNullOrWhiteSpace(url))
+        {
+            return url;
+        }
+
+        if (source == null)
+        {
+            return url;
+        }
+
+        if (!HasEmbeddableAllohaSource(source))
         {
             return url;
         }
@@ -137,6 +141,31 @@ public static class YummyKodikStreamUri
         return url + "&" + Uri.EscapeDataString(name) + "=" + Uri.EscapeDataString(value);
     }
 
+    private static bool HasEmbeddableAllohaSource(YummyAllohaSource source)
+    {
+        if (string.IsNullOrWhiteSpace(source.MovieToken))
+        {
+            return false;
+        }
+
+        if (string.IsNullOrWhiteSpace(source.RequestToken))
+        {
+            return false;
+        }
+
+        if (source.TranslationId <= 0)
+        {
+            return false;
+        }
+
+        if (source.SeasonNumber <= 0)
+        {
+            return false;
+        }
+
+        return !string.IsNullOrWhiteSpace(source.RefererUrl);
+    }
+
     private static bool TryParseOldScheme(string uri, out KodikIdType idType, out string id, out int? episode)
     {
         idType = default;
@@ -176,133 +205,140 @@ public static class YummyKodikStreamUri
 
     private static bool TryParseHttpUrl(Uri u, out YummyStreamRequest request)
     {
-        request = new YummyStreamRequest();
-
         var dict = ParseQueryToDictionary(u.Query);
 
         if (dict.TryGetValue("provider", out var providerRaw) &&
             TryParseYummyProviderKind(providerRaw, out var providerKind))
         {
-            if ((!dict.TryGetValue("animeId", out var animeIdRaw) &&
-                 !dict.TryGetValue("anime_id", out animeIdRaw)) ||
-                !long.TryParse(animeIdRaw?.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var animeId) ||
-                animeId <= 0)
-            {
-                return false;
-            }
-
-            int? cvhEpisode = null;
-            string? cvhEpisodeRaw = null;
-            if (dict.TryGetValue("ep", out var cvhEp1))
-            {
-                cvhEpisodeRaw = cvhEp1;
-            }
-            else if (dict.TryGetValue("episode", out var cvhEp2))
-            {
-                cvhEpisodeRaw = cvhEp2;
-            }
-
-            if (!string.IsNullOrWhiteSpace(cvhEpisodeRaw) &&
-                int.TryParse(cvhEpisodeRaw.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var cvhEp) &&
-                cvhEp > 0)
-            {
-                cvhEpisode = cvhEp;
-            }
-
-            dict.TryGetValue("voice", out var voice);
-            dict.TryGetValue("allohaMovieToken", out var allohaMovieToken);
-            dict.TryGetValue("allohaRequestToken", out var allohaRequestToken);
-            dict.TryGetValue("allohaHidden", out var allohaHidden);
-            dict.TryGetValue("allohaRefererUrl", out var allohaRefererUrl);
-
-            var allohaTranslationId = 0;
-            if (dict.TryGetValue("allohaTranslationId", out var allohaTranslationIdRaw))
-            {
-                int.TryParse(
-                    allohaTranslationIdRaw?.Trim(),
-                    NumberStyles.Integer,
-                    CultureInfo.InvariantCulture,
-                    out allohaTranslationId);
-            }
-
-            var allohaSeasonNumber = 0;
-            if (dict.TryGetValue("allohaSeason", out var allohaSeasonRaw))
-            {
-                int.TryParse(
-                    allohaSeasonRaw?.Trim(),
-                    NumberStyles.Integer,
-                    CultureInfo.InvariantCulture,
-                    out allohaSeasonNumber);
-            }
-
-            request = new YummyStreamRequest
-            {
-                Provider = providerKind,
-                AnimeId = animeId,
-                Episode = cvhEpisode,
-                VoiceName = (voice ?? string.Empty).Trim(),
-                AllohaMovieToken = (allohaMovieToken ?? string.Empty).Trim(),
-                AllohaRequestToken = (allohaRequestToken ?? string.Empty).Trim(),
-                AllohaTranslationId = allohaTranslationId > 0 ? allohaTranslationId : 0,
-                AllohaSeasonNumber = allohaSeasonNumber > 0 ? allohaSeasonNumber : 0,
-                AllohaHidden = (allohaHidden ?? string.Empty).Trim(),
-                AllohaRefererUrl = (allohaRefererUrl ?? string.Empty).Trim()
-            };
-
-            return true;
+            return TryParseYummyProviderRequest(dict, providerKind, out request);
         }
 
-        if (!dict.TryGetValue("type", out var typeRaw) || string.IsNullOrWhiteSpace(typeRaw))
+        return TryParseKodikHttpRequest(dict, out request);
+    }
+
+    private static bool TryParseYummyProviderRequest(
+        IReadOnlyDictionary<string, string> query,
+        YummyStreamProviderKind providerKind,
+        out YummyStreamRequest request)
+    {
+        request = new YummyStreamRequest();
+
+        if (!TryReadPositiveLongQueryValue(query, out var animeId, "animeId", "anime_id"))
         {
             return false;
         }
 
-        if (!Enum.TryParse(typeRaw.Trim(), ignoreCase: true, out KodikIdType idType))
+        request = new YummyStreamRequest
+        {
+            Provider = providerKind,
+            AnimeId = animeId,
+            Episode = ReadPositiveIntQueryValue(query, "ep", "episode"),
+            VoiceName = ReadTrimmedQueryValue(query, "voice"),
+            AllohaMovieToken = ReadTrimmedQueryValue(query, "allohaMovieToken"),
+            AllohaRequestToken = ReadTrimmedQueryValue(query, "allohaRequestToken"),
+            AllohaTranslationId = ReadPositiveIntQueryValue(query, "allohaTranslationId") ?? 0,
+            AllohaSeasonNumber = ReadPositiveIntQueryValue(query, "allohaSeason") ?? 0,
+            AllohaHidden = ReadTrimmedQueryValue(query, "allohaHidden"),
+            AllohaRefererUrl = ReadTrimmedQueryValue(query, "allohaRefererUrl")
+        };
+
+        return true;
+    }
+
+    private static bool TryParseKodikHttpRequest(
+        IReadOnlyDictionary<string, string> query,
+        out YummyStreamRequest request)
+    {
+        request = new YummyStreamRequest();
+
+        if (!TryReadKodikIdType(query, out var idType))
         {
             return false;
         }
 
-        if (!dict.TryGetValue("id", out var idRaw) || string.IsNullOrWhiteSpace(idRaw))
+        if (!TryReadRequiredStringQueryValue(query, "id", out var id))
         {
             return false;
-        }
-
-        var id = idRaw.Trim();
-
-        // Episode is optional for some call sites.
-        string? epRaw = null;
-        if (dict.TryGetValue("ep", out var ep1))
-        {
-            epRaw = ep1;
-        }
-        else if (dict.TryGetValue("episode", out var ep2))
-        {
-            epRaw = ep2;
-        }
-
-        if (!string.IsNullOrWhiteSpace(epRaw) &&
-            int.TryParse(epRaw.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var ep) &&
-            ep > 0)
-        {
-            request = new YummyStreamRequest
-            {
-                Provider = YummyStreamProviderKind.Kodik,
-                KodikIdType = idType,
-                KodikId = id,
-                Episode = ep
-            };
-
-            return true;
         }
 
         request = new YummyStreamRequest
         {
             Provider = YummyStreamProviderKind.Kodik,
             KodikIdType = idType,
-            KodikId = id
+            KodikId = id,
+            Episode = ReadPositiveIntQueryValue(query, "ep", "episode")
         };
 
         return true;
+    }
+
+    private static bool TryReadKodikIdType(
+        IReadOnlyDictionary<string, string> query,
+        out KodikIdType idType)
+    {
+        idType = default;
+
+        return TryReadRequiredStringQueryValue(query, "type", out var typeRaw) &&
+               Enum.TryParse(typeRaw, ignoreCase: true, out idType);
+    }
+
+    private static bool TryReadRequiredStringQueryValue(
+        IReadOnlyDictionary<string, string> query,
+        string key,
+        out string value)
+    {
+        value = ReadTrimmedQueryValue(query, key);
+        return value.Length > 0;
+    }
+
+    private static string ReadTrimmedQueryValue(IReadOnlyDictionary<string, string> query, string key)
+    {
+        return query.TryGetValue(key, out var value) ? (value ?? string.Empty).Trim() : string.Empty;
+    }
+
+    private static int? ReadPositiveIntQueryValue(IReadOnlyDictionary<string, string> query, params string[] keys)
+    {
+        if (!TryReadFirstQueryValue(query, out var rawValue, keys))
+        {
+            return null;
+        }
+
+        return int.TryParse(rawValue?.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var value) &&
+               value > 0
+            ? value
+            : null;
+    }
+
+    private static bool TryReadPositiveLongQueryValue(
+        IReadOnlyDictionary<string, string> query,
+        out long value,
+        params string[] keys)
+    {
+        value = 0;
+        if (!TryReadFirstQueryValue(query, out var rawValue, keys))
+        {
+            return false;
+        }
+
+        return long.TryParse(rawValue?.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out value) &&
+               value > 0;
+    }
+
+    private static bool TryReadFirstQueryValue(
+        IReadOnlyDictionary<string, string> query,
+        out string? value,
+        params string[] keys)
+    {
+        foreach (var key in keys)
+        {
+            if (query.TryGetValue(key, out value))
+            {
+                return true;
+            }
+        }
+
+        value = null;
+        return false;
     }
 
     public static Dictionary<string, string> ParseQueryToDictionary(string query)
@@ -314,7 +350,7 @@ public static class YummyKodikStreamUri
             return dict;
         }
 
-        var q = query.StartsWith("?", StringComparison.Ordinal) ? query[1..] : query;
+        var q = query.StartsWith('?') ? query[1..] : query;
         if (q.Length == 0)
         {
             return dict;
@@ -356,7 +392,7 @@ public static class YummyKodikStreamUri
         {
             return Uri.UnescapeDataString(s);
         }
-        catch
+        catch (UriFormatException)
         {
             return s;
         }

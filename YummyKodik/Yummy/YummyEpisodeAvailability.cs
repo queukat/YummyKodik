@@ -11,10 +11,7 @@ namespace YummyKodik.Yummy
             IReadOnlyCollection<int> generatedEpisodeNumbers,
             IEnumerable<int>? explicitEpisodeNumbers = null)
         {
-            if (anime == null)
-            {
-                throw new ArgumentNullException(nameof(anime));
-            }
+            ArgumentNullException.ThrowIfNull(anime);
 
             var expectedAvailableEpisodes = GetExpectedAvailableEpisodeCount(anime, explicitEpisodeNumbers);
             if (expectedAvailableEpisodes <= 0)
@@ -40,10 +37,7 @@ namespace YummyKodik.Yummy
 
         public static int GetExpectedAvailableEpisodeCount(YummyAnimeResponse anime, IEnumerable<int>? explicitEpisodeNumbers = null)
         {
-            if (anime == null)
-            {
-                throw new ArgumentNullException(nameof(anime));
-            }
+            ArgumentNullException.ThrowIfNull(anime);
 
             var explicitEpisodeMax = NormalizeEpisodeNumbers(explicitEpisodeNumbers)
                 .DefaultIfEmpty(0)
@@ -78,10 +72,7 @@ namespace YummyKodik.Yummy
 
         public static int[] LimitToExpectedAvailableEpisodes(YummyAnimeResponse anime, IEnumerable<int>? episodeNumbers)
         {
-            if (anime == null)
-            {
-                throw new ArgumentNullException(nameof(anime));
-            }
+            ArgumentNullException.ThrowIfNull(anime);
 
             var normalizedEpisodes = NormalizeEpisodeNumbers(episodeNumbers)
                 .ToArray();

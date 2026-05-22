@@ -16,6 +16,8 @@ namespace YummyKodik.Alloha;
 public sealed class AllohaPlaybackService
 {
     private static readonly char[] VoiceLabelSeparators = ['/', '&', '+', ','];
+    private static readonly string[] AllohaManifestFallbackNames = ["manifest", "url", "src"];
+    private static readonly string[] ProxyResourceFileSuffixes = [".m3u8", ".m4s", ".mp4", ".ts", ".aac", ".vtt"];
     private const string WrapperUrl = "https://site.yummyani.me/";
     private const string AllohaOrigin = "https://alloha.yani.tv";
     private const string BrowserUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36";
@@ -23,19 +25,23 @@ public sealed class AllohaPlaybackService
     private const string AcceptsControlsPrefix = "9badb2c5dd28e9cd0bed84e7391523d9d308a48b690428dae6049233218645d9";
     private const string ManifestGuardToken = "pXzvbyDGLYyB6VkwsWZDv3iMKZtsXNzpzRyxZUcsKHXxsSeaYakbo3hw9mBFRc5VQTpqAX6BW8aDEqyLaHYcXSQiV6KHYTVTK6MYRphNAy5sBjtrevqkDzKmLqNdfMZGEU9NELjmtKfZy3RNGzCd767sNh1mXEj4tCcvqndHtzmwAbZNkhm4ghDEasodotMBewypNQ56uotJAQGX11csfeRfBAPk8DcUWWkkqzxca8vbnEw12vUFbBzT6hz8ZB3F3dzUhUXoL2cr1WM1bXQArRCS1MUNMz3X5WDMMQoZKxj2AMTRqp7QQX4dDB9B7VzEZTmyFULhm1AcHHMkoMvSVvKYoBoAKLycYAgMHeD4ECJcGEAGpnkJhrV57zQ7";
 
+    private static readonly TimeSpan RegexMatchTimeout = TimeSpan.FromSeconds(1);
     private static readonly TimeSpan ResolutionCacheTtl = TimeSpan.FromMinutes(2);
     private static readonly TimeSpan SessionTtl = TimeSpan.FromHours(2);
     private static readonly ConcurrentDictionary<string, CachedResolution> ResolutionCache = new(StringComparer.Ordinal);
     private static readonly ConcurrentDictionary<string, AllohaPlaybackSession> SessionCache = new(StringComparer.Ordinal);
     private static readonly Regex ViewportiRegex = new(
         "<meta\\s+name=[\"']viewporti[\"']\\s+content=[\"'](?<value>[^\"']+)[\"']",
-        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled,
+        RegexMatchTimeout);
     private static readonly Regex FileListRegex = new(
         "const\\s+fileList\\s*=\\s*JSON\\.parse\\('(?<json>.*?)'\\);",
-        RegexOptions.Singleline | RegexOptions.CultureInvariant | RegexOptions.Compiled);
+        RegexOptions.Singleline | RegexOptions.CultureInvariant | RegexOptions.Compiled,
+        RegexMatchTimeout);
     private static readonly Regex ManifestUriAttributeRegex = new(
         "URI=(?<quote>[\"'])(?<uri>[^\"']+)\\k<quote>",
-        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled,
+        RegexMatchTimeout);
 
     private readonly ILogger<AllohaPlaybackService> _logger;
     private readonly HttpClient _httpClient;
@@ -115,7 +121,7 @@ public sealed class AllohaPlaybackService
         return session;
     }
 
-    public bool TryGetSession(string sessionId, out AllohaPlaybackSession session)
+    public static bool TryGetSession(string sessionId, out AllohaPlaybackSession session)
     {
         CleanupExpiredEntries();
 
@@ -131,7 +137,7 @@ public sealed class AllohaPlaybackService
         return false;
     }
 
-    public bool TryResolveProxyResourceUrl(AllohaPlaybackSession session, string resourceId, out string resourceUrl)
+    public static bool TryResolveProxyResourceUrl(AllohaPlaybackSession session, string resourceId, out string resourceUrl)
     {
         ArgumentNullException.ThrowIfNull(session);
 
@@ -297,7 +303,8 @@ public sealed class AllohaPlaybackService
 
     private async Task<string> DownloadIframeHtmlAsync(string requestUrl, CancellationToken cancellationToken)
     {
-        using var message = new HttpRequestMessage(HttpMethod.Get, requestUrl);
+        var requestUri = CreateAllowedIframeRequestUri(requestUrl);
+        using var message = new HttpRequestMessage(HttpMethod.Get, requestUri);
         ConfigureCommonBrowserHeaders(message);
         message.Headers.TryAddWithoutValidation("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8");
         message.Headers.TryAddWithoutValidation("Sec-Fetch-Dest", "iframe");
@@ -311,7 +318,7 @@ public sealed class AllohaPlaybackService
         if (!response.IsSuccessStatusCode)
         {
             throw new InvalidOperationException(
-                $"Alloha iframe request failed. status={(int)response.StatusCode} url={requestUrl} body={TrimForLog(body)}");
+                $"Alloha iframe request failed. status={(int)response.StatusCode} url={requestUri.AbsoluteUri} body={TrimForLog(body)}");
         }
 
         if (string.IsNullOrWhiteSpace(body))
@@ -524,59 +531,85 @@ public sealed class AllohaPlaybackService
         {
             foreach (var sourceElement in hlsSourceElement.EnumerateArray())
             {
-                if (sourceElement.ValueKind != JsonValueKind.Object)
-                {
-                    continue;
-                }
-
-                var audioTrackId = ResolveAudioTrackId(sourceElement);
-                var voiceName = ResolveVoiceName(sourceElement);
-                if (!string.IsNullOrWhiteSpace(voiceName))
-                {
-                    payload.AvailableVoiceNames.Add(voiceName);
-                }
-
-                if (TryGetProperty(sourceElement, "quality", out var qualityElement) &&
-                    qualityElement.ValueKind == JsonValueKind.Object)
-                {
-                    foreach (var property in qualityElement.EnumerateObject())
-                    {
-                        int? quality = int.TryParse(property.Name, out var qualityValue) ? qualityValue : null;
-                        foreach (var url in SplitAlternativeUrls(property.Value.GetString()))
-                        {
-                            payload.ManifestCandidates.Add(new AllohaManifestCandidate
-                            {
-                                Quality = quality,
-                                Url = url,
-                                AudioTrackId = audioTrackId,
-                                VoiceName = voiceName
-                            });
-                        }
-                    }
-                }
-
-                foreach (var fallbackName in new[] { "manifest", "url", "src" })
-                {
-                    if (!TryGetProperty(sourceElement, fallbackName, out var fallbackElement))
-                    {
-                        continue;
-                    }
-
-                    foreach (var url in SplitAlternativeUrls(fallbackElement.GetString()))
-                    {
-                        payload.ManifestCandidates.Add(new AllohaManifestCandidate
-                        {
-                            Quality = null,
-                            Url = url,
-                            AudioTrackId = audioTrackId,
-                            VoiceName = voiceName
-                        });
-                    }
-                }
+                AddManifestCandidates(payload, sourceElement);
             }
         }
 
         return payload;
+    }
+
+    private static void AddManifestCandidates(AllohaBnsiPayload payload, JsonElement sourceElement)
+    {
+        if (sourceElement.ValueKind != JsonValueKind.Object)
+        {
+            return;
+        }
+
+        var context = CreateManifestCandidateContext(sourceElement);
+        if (!string.IsNullOrWhiteSpace(context.VoiceName))
+        {
+            payload.AvailableVoiceNames.Add(context.VoiceName);
+        }
+
+        AddQualityManifestCandidates(payload, sourceElement, context);
+        AddFallbackManifestCandidates(payload, sourceElement, context);
+    }
+
+    private static ManifestCandidateContext CreateManifestCandidateContext(JsonElement sourceElement)
+    {
+        return new ManifestCandidateContext(
+            ResolveAudioTrackId(sourceElement),
+            ResolveVoiceName(sourceElement));
+    }
+
+    private static void AddQualityManifestCandidates(
+        AllohaBnsiPayload payload,
+        JsonElement sourceElement,
+        ManifestCandidateContext context)
+    {
+        if (!TryGetProperty(sourceElement, "quality", out var qualityElement) ||
+            qualityElement.ValueKind != JsonValueKind.Object)
+        {
+            return;
+        }
+
+        foreach (var property in qualityElement.EnumerateObject())
+        {
+            var quality = int.TryParse(property.Name, out var qualityValue) ? qualityValue : (int?)null;
+            AddManifestCandidatesFromUrlValue(payload, property.Value.GetString(), quality, context);
+        }
+    }
+
+    private static void AddFallbackManifestCandidates(
+        AllohaBnsiPayload payload,
+        JsonElement sourceElement,
+        ManifestCandidateContext context)
+    {
+        foreach (var fallbackName in AllohaManifestFallbackNames)
+        {
+            if (TryGetProperty(sourceElement, fallbackName, out var fallbackElement))
+            {
+                AddManifestCandidatesFromUrlValue(payload, fallbackElement.GetString(), quality: null, context);
+            }
+        }
+    }
+
+    private static void AddManifestCandidatesFromUrlValue(
+        AllohaBnsiPayload payload,
+        string? rawUrlValue,
+        int? quality,
+        ManifestCandidateContext context)
+    {
+        foreach (var url in SplitAlternativeUrls(rawUrlValue))
+        {
+            payload.ManifestCandidates.Add(new AllohaManifestCandidate
+            {
+                Quality = quality,
+                Url = url,
+                AudioTrackId = context.AudioTrackId,
+                VoiceName = context.VoiceName
+            });
+        }
     }
 
     private async Task<string> DownloadManifestAsync(
@@ -891,11 +924,6 @@ public sealed class AllohaPlaybackService
             .First();
     }
 
-    private static string SelectManifestUrl(IReadOnlyList<AllohaManifestCandidate> candidates, int preferredQuality)
-    {
-        return SelectManifestCandidate(candidates, preferredQuality).Url;
-    }
-
     private static List<AllohaManifestCandidate> FilterCandidatesByVoice(
         IReadOnlyList<AllohaManifestCandidate> candidates,
         string? preferredVoiceName)
@@ -981,6 +1009,26 @@ public sealed class AllohaPlaybackService
         }
 
         return url + (url.Contains('?', StringComparison.Ordinal) ? "&" : "?") + "_r=" + DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+    }
+
+    private static Uri CreateAllowedIframeRequestUri(string requestUrl)
+    {
+        var normalizedUrl = (requestUrl ?? string.Empty).Trim();
+        if (!Uri.TryCreate(normalizedUrl, UriKind.Absolute, out var uri) ||
+            !string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase) ||
+            !IsAllowedIframeHost(uri.Host))
+        {
+            throw new InvalidOperationException("Alloha iframe URL is not allowed.");
+        }
+
+        return uri;
+    }
+
+    private static bool IsAllowedIframeHost(string host)
+    {
+        var normalizedHost = (host ?? string.Empty).Trim();
+        return normalizedHost.Equals("alloha.yani.tv", StringComparison.OrdinalIgnoreCase) ||
+               normalizedHost.Equals("larkin-as.stloadi.live", StringComparison.OrdinalIgnoreCase);
     }
 
     private static string BuildBorthHeader(string viewporti)
@@ -1404,7 +1452,7 @@ public sealed class AllohaPlaybackService
         {
             var originalLine = lines[i];
             var line = originalLine.Trim();
-            if (line.Length == 0 || line.StartsWith("#", StringComparison.Ordinal))
+            if (line.Length == 0 || line.StartsWith('#'))
             {
                 lines[i] = RewriteManifestDirectiveUris(session, baseUri, manifestUrl, originalLine, proxyBaseUrl, parentResourceId);
                 continue;
@@ -1561,19 +1609,17 @@ public sealed class AllohaPlaybackService
 
         var currentReferer = session.ManifestUrl;
         if (session.ProxyResourceParentIds.TryGetValue(resourceKey, out var parentResourceId) &&
-            !string.IsNullOrWhiteSpace(parentResourceId))
+            !string.IsNullOrWhiteSpace(parentResourceId) &&
+            !TryResolveCurrentProxyResourceUrl(
+                session,
+                parentResourceId,
+                session.ProxyResources.TryGetValue(parentResourceId, out var parentUrl) ? parentUrl : string.Empty,
+                session.ProxyResourceReferers.TryGetValue(parentResourceId, out var parentReferer) ? parentReferer : string.Empty,
+                visited,
+                out currentReferer,
+                out _))
         {
-            if (!TryResolveCurrentProxyResourceUrl(
-                    session,
-                    parentResourceId,
-                    session.ProxyResources.TryGetValue(parentResourceId, out var parentUrl) ? parentUrl : string.Empty,
-                    session.ProxyResourceReferers.TryGetValue(parentResourceId, out var parentReferer) ? parentReferer : string.Empty,
-                    visited,
-                    out currentReferer,
-                    out _))
-            {
-                return false;
-            }
+            return false;
         }
 
         var resourceReference = ResolveProxyResourceReference(session, resourceKey, upstreamUrl, refererUrl);
@@ -1660,12 +1706,11 @@ public sealed class AllohaPlaybackService
     private static string GetProxyResourceFileSuffix(Uri absoluteUrl)
     {
         var pathAndQuery = absoluteUrl.PathAndQuery;
-        foreach (var knownSuffix in new[] { ".m3u8", ".m4s", ".mp4", ".ts", ".aac", ".vtt" })
+        var knownSuffix = ProxyResourceFileSuffixes
+            .FirstOrDefault(suffix => pathAndQuery.Contains(suffix, StringComparison.OrdinalIgnoreCase));
+        if (!string.IsNullOrEmpty(knownSuffix))
         {
-            if (pathAndQuery.IndexOf(knownSuffix, StringComparison.OrdinalIgnoreCase) >= 0)
-            {
-                return knownSuffix;
-            }
+            return knownSuffix;
         }
 
         var suffix = Path.GetExtension(absoluteUrl.AbsolutePath ?? string.Empty);
@@ -1701,7 +1746,7 @@ public sealed class AllohaPlaybackService
         return normalized.Substring(0, 200);
     }
 
-    private void CleanupExpiredEntries()
+    private static void CleanupExpiredEntries()
     {
         foreach (var pair in ResolutionCache)
         {
@@ -1810,6 +1855,8 @@ public sealed class AllohaPlaybackService
         public string AudioTrackId { get; init; } = string.Empty;
         public string VoiceName { get; init; } = string.Empty;
     }
+
+    private sealed record ManifestCandidateContext(string AudioTrackId, string VoiceName);
 }
 
 public sealed class AllohaPlaybackSession

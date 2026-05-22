@@ -35,6 +35,7 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
     private static readonly TimeSpan ScanCompletedDebounce = TimeSpan.FromSeconds(1);
     private static readonly TimeSpan ScanPollInterval = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan StartupDebounce = TimeSpan.FromSeconds(15);
+    private static readonly char[] PreferredTokenSeparators = { '|', ',', ';' };
 
     private readonly ILibraryManager _libraryManager;
     private readonly IFileSystem _fileSystem;
@@ -208,7 +209,7 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
         if (_mergeDebounceTimer == null)
         {
             _mergeDebounceTimer = new Timer(
-                _ => _ = MergeWorkerAsync(reason),
+                _ => MergeWorkerAsync(reason).ConfigureAwait(false),
                 null,
                 delay,
                 Timeout.InfiniteTimeSpan);
@@ -357,15 +358,9 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
             reason);
     }
 
-    private async Task<bool> MergeEpisodeGroupAsync(IReadOnlyList<Video> items, string[] preferredTokens)
+    private static async Task<bool> MergeEpisodeGroupAsync(List<Video> items, string[] preferredTokens)
     {
-        // Remove null/empty path items, dedupe by Id.
-        var list = items
-            .Where(i => i != null && !string.IsNullOrWhiteSpace(i.Path))
-            .GroupBy(i => i.Id)
-            .Select(g => g.First())
-            .ToList();
-
+        var list = BuildMergeCandidates(items);
         if (list.Count < 2)
         {
             return false;
@@ -378,109 +373,159 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
         }
 
         var desiredPrimaryId = primary.Id.ToString("N", CultureInfo.InvariantCulture);
+        var desiredAlternates = BuildDesiredAlternates(list, primary.Id);
 
-        // Build desired alternates list (all other items), unique by Path.
-        var seenPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var desiredAlternates = new List<LinkedChild>(list.Count - 1);
-
-        foreach (var v in list.Where(v => v.Id != primary.Id))
-        {
-            var p = (v.Path ?? string.Empty).Trim();
-            if (p.Length == 0)
-            {
-                continue;
-            }
-
-            if (seenPaths.Add(p))
-            {
-                desiredAlternates.Add(new LinkedChild
-                {
-                    Path = p,
-                    ItemId = v.Id
-                });
-            }
-        }
-
-        // Nothing to link? (shouldn't happen with list.Count>=2)
         if (desiredAlternates.Count == 0)
         {
             return false;
         }
 
-        // Detect no-op quickly (optional but reduces DB writes).
-        var alreadyPrimaryOk = string.IsNullOrEmpty(primary.PrimaryVersionId);
-        var alreadyAlternatesOk = LinkedChildrenSetEquals(primary.LinkedAlternateVersions, desiredAlternates);
-
-        var allChildrenOk = true;
-        foreach (var v in list.Where(v => v.Id != primary.Id))
-        {
-            // Each child must point to primary and must not have its own LinkedAlternateVersions.
-            var okPrimary = string.Equals(v.PrimaryVersionId ?? string.Empty, desiredPrimaryId, StringComparison.OrdinalIgnoreCase);
-            var okLinks = v.LinkedAlternateVersions == null || v.LinkedAlternateVersions.Length == 0;
-
-            if (!okPrimary || !okLinks)
-            {
-                allChildrenOk = false;
-                break;
-            }
-        }
-
-        if (alreadyPrimaryOk && alreadyAlternatesOk && allChildrenOk)
+        if (IsEpisodeGroupAlreadyMerged(primary, list, desiredPrimaryId, desiredAlternates))
         {
             return false;
         }
 
-        var changed = false;
+        var childrenChanged = await UpdateChildVersionsAsync(list, primary.Id, desiredPrimaryId).ConfigureAwait(false);
+        var primaryChanged = await UpdatePrimaryVersionAsync(primary, desiredAlternates).ConfigureAwait(false);
 
-        // Update children first.
-        foreach (var child in list.Where(v => v.Id != primary.Id))
+        return childrenChanged || primaryChanged;
+    }
+
+    private static List<Video> BuildMergeCandidates(IEnumerable<Video> items)
+    {
+        return items
+            .Where(i => i != null && !string.IsNullOrWhiteSpace(i.Path))
+            .GroupBy(i => i.Id)
+            .Select(g => g.First())
+            .ToList();
+    }
+
+    private static List<LinkedChild> BuildDesiredAlternates(List<Video> items, Guid primaryId)
+    {
+        var seenPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var desiredAlternates = new List<LinkedChild>(items.Count - 1);
+
+        foreach (var item in items.Where(v => v.Id != primaryId))
         {
-            if (!string.Equals(child.PrimaryVersionId ?? string.Empty, desiredPrimaryId, StringComparison.OrdinalIgnoreCase))
-            {
-                child.SetPrimaryVersionId(desiredPrimaryId);
-                changed = true;
-            }
-
-            if (child.LinkedAlternateVersions != null && child.LinkedAlternateVersions.Length > 0)
-            {
-                child.LinkedAlternateVersions = Array.Empty<LinkedChild>();
-                changed = true;
-            }
-
-            if (changed)
-            {
-                await child.UpdateToRepositoryAsync(ItemUpdateType.MetadataEdit, CancellationToken.None).ConfigureAwait(false);
-            }
-
-            // reset flag per child-update call to avoid skipping next ones
-            changed = false;
+            AddDesiredAlternate(item, seenPaths, desiredAlternates);
         }
 
-        // Update primary.
-        var primaryChanged = false;
+        return desiredAlternates;
+    }
+
+    private static void AddDesiredAlternate(Video item, HashSet<string> seenPaths, List<LinkedChild> desiredAlternates)
+    {
+        var path = (item.Path ?? string.Empty).Trim();
+        if (path.Length == 0 || !seenPaths.Add(path))
+        {
+            return;
+        }
+
+        desiredAlternates.Add(new LinkedChild
+        {
+            Path = path,
+            ItemId = item.Id
+        });
+    }
+
+    private static bool IsEpisodeGroupAlreadyMerged(
+        Video primary,
+        IReadOnlyList<Video> items,
+        string desiredPrimaryId,
+        IReadOnlyList<LinkedChild> desiredAlternates)
+    {
+        return string.IsNullOrEmpty(primary.PrimaryVersionId)
+               && LinkedChildrenSetEquals(primary.LinkedAlternateVersions, desiredAlternates)
+               && AreChildVersionsAlreadyMerged(items, primary.Id, desiredPrimaryId);
+    }
+
+    private static bool AreChildVersionsAlreadyMerged(
+        IEnumerable<Video> items,
+        Guid primaryId,
+        string desiredPrimaryId)
+    {
+        return items
+            .Where(v => v.Id != primaryId)
+            .All(v => IsChildVersionAlreadyMerged(v, desiredPrimaryId));
+    }
+
+    private static bool IsChildVersionAlreadyMerged(Video child, string desiredPrimaryId)
+    {
+        return string.Equals(child.PrimaryVersionId ?? string.Empty, desiredPrimaryId, StringComparison.OrdinalIgnoreCase)
+               && (child.LinkedAlternateVersions == null || child.LinkedAlternateVersions.Length == 0);
+    }
+
+    private static async Task<bool> UpdateChildVersionsAsync(
+        IEnumerable<Video> items,
+        Guid primaryId,
+        string desiredPrimaryId)
+    {
+        var anyChanged = false;
+
+        foreach (var child in items.Where(v => v.Id != primaryId))
+        {
+            if (!UpdateChildVersionLinks(child, desiredPrimaryId))
+            {
+                continue;
+            }
+
+            await child.UpdateToRepositoryAsync(ItemUpdateType.MetadataEdit, CancellationToken.None).ConfigureAwait(false);
+            anyChanged = true;
+        }
+
+        return anyChanged;
+    }
+
+    private static bool UpdateChildVersionLinks(Video child, string desiredPrimaryId)
+    {
+        var changed = false;
+
+        if (!string.Equals(child.PrimaryVersionId ?? string.Empty, desiredPrimaryId, StringComparison.OrdinalIgnoreCase))
+        {
+            child.SetPrimaryVersionId(desiredPrimaryId);
+            changed = true;
+        }
+
+        if (child.LinkedAlternateVersions != null && child.LinkedAlternateVersions.Length > 0)
+        {
+            child.LinkedAlternateVersions = Array.Empty<LinkedChild>();
+            changed = true;
+        }
+
+        return changed;
+    }
+
+    private static async Task<bool> UpdatePrimaryVersionAsync(Video primary, IReadOnlyList<LinkedChild> desiredAlternates)
+    {
+        if (!UpdatePrimaryVersionLinks(primary, desiredAlternates))
+        {
+            return false;
+        }
+
+        await primary.UpdateToRepositoryAsync(ItemUpdateType.MetadataEdit, CancellationToken.None).ConfigureAwait(false);
+        return true;
+    }
+
+    private static bool UpdatePrimaryVersionLinks(Video primary, IReadOnlyList<LinkedChild> desiredAlternates)
+    {
+        var changed = false;
 
         if (!string.IsNullOrEmpty(primary.PrimaryVersionId))
         {
             primary.SetPrimaryVersionId(null);
-            primaryChanged = true;
+            changed = true;
         }
 
         if (!LinkedChildrenSetEquals(primary.LinkedAlternateVersions, desiredAlternates))
         {
             primary.LinkedAlternateVersions = desiredAlternates.ToArray();
-            primaryChanged = true;
+            changed = true;
         }
 
-        if (primaryChanged)
-        {
-            await primary.UpdateToRepositoryAsync(ItemUpdateType.MetadataEdit, CancellationToken.None).ConfigureAwait(false);
-            return true;
-        }
-
-        return true; // children updated
+        return changed;
     }
 
-    private static Video? PickPrimaryByPreferredFilter(IReadOnlyList<Video> items, string[] preferredTokens)
+    private static Video? PickPrimaryByPreferredFilter(List<Video> items, string[] preferredTokens)
     {
         if (items == null || items.Count == 0)
         {
@@ -492,71 +537,57 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
             .OrderBy(v => GetFileNameNoExt(v.Path), StringComparer.OrdinalIgnoreCase)
             .ToList();
 
-        // 1) PreferredTranslationFilter wins (substring match against STRM filename).
-        //
-        // IMPORTANT:
-        // When STRM-per-voice mode is enabled, we create filenames using SafeFilename(...) and invalid
-        // filename characters are replaced with '_' (Windows constraint).
-        // Users often copy-paste tokens from original translation names, which can contain ':' or '/',
-        // so we try both raw token and its "filename-safe" form.
-        if (preferredTokens.Length > 0)
+        return PickPreferredTranslation(ordered, preferredTokens)
+               ?? PickCurrentPrimary(ordered)
+               ?? PickBaseNameVersion(ordered)
+               ?? ordered[0];
+    }
+
+    private static Video? PickPreferredTranslation(IReadOnlyList<Video> ordered, IEnumerable<string> preferredTokens)
+    {
+        foreach (var token in preferredTokens)
         {
-            foreach (var token in preferredTokens)
+            var needleRaw = (token ?? string.Empty).Trim();
+            if (needleRaw.Length == 0)
             {
-                var needleRaw = (token ?? string.Empty).Trim();
-                if (needleRaw.Length == 0)
-                {
-                    continue;
-                }
+                continue;
+            }
 
-                var needleSafe = NormalizeTokenForFilename(needleRaw);
-
-                var hit = ordered.FirstOrDefault(v =>
-                {
-                    var fn = GetFileNameNoExt(v.Path);
-                    if (fn.Contains(needleRaw, StringComparison.OrdinalIgnoreCase))
-                    {
-                        return true;
-                    }
-
-                    return needleSafe.Length > 0 && fn.Contains(needleSafe, StringComparison.OrdinalIgnoreCase);
-                });
-
-                if (hit != null)
-                {
-                    return hit;
-                }
+            var hit = PickPreferredTranslation(ordered, needleRaw);
+            if (hit != null)
+            {
+                return hit;
             }
         }
 
-        // 2) Keep current primary if already merged.
-        var currentPrimary = ordered.FirstOrDefault(v =>
+        return null;
+    }
+
+    private static Video? PickPreferredTranslation(IReadOnlyList<Video> ordered, string needleRaw)
+    {
+        var needleSafe = NormalizeTokenForFilename(needleRaw);
+        return ordered.FirstOrDefault(v => FileNameMatchesPreferredToken(v.Path, needleRaw, needleSafe));
+    }
+
+    private static bool FileNameMatchesPreferredToken(string? path, string needleRaw, string needleSafe)
+    {
+        var fileName = GetFileNameNoExt(path);
+        return fileName.Contains(needleRaw, StringComparison.OrdinalIgnoreCase)
+               || (needleSafe.Length > 0 && fileName.Contains(needleSafe, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static Video? PickCurrentPrimary(IEnumerable<Video> ordered)
+    {
+        return ordered.FirstOrDefault(v =>
             string.IsNullOrEmpty(v.PrimaryVersionId) &&
             v.LinkedAlternateVersions != null &&
             v.LinkedAlternateVersions.Length > 0);
+    }
 
-        if (currentPrimary != null)
-        {
-            return currentPrimary;
-        }
-
-        // 3) Prefer "base" file without explicit translation suffix (e.g. "S01E01.strm").
-        var baseNameHit = ordered.FirstOrDefault(v =>
-        {
-            var fn = GetFileNameNoExt(v.Path);
-
-            // Very simple heuristic:
-            // If it contains " - " it's probably "SxxEyy - Translation".
-            return fn.IndexOf(" - ", StringComparison.OrdinalIgnoreCase) < 0;
-        });
-
-        if (baseNameHit != null)
-        {
-            return baseNameHit;
-        }
-
-        // 4) Deterministic fallback: first by filename (stable).
-        return ordered.First();
+    private static Video? PickBaseNameVersion(IEnumerable<Video> ordered)
+    {
+        return ordered.FirstOrDefault(v =>
+            GetFileNameNoExt(v.Path).IndexOf(" - ", StringComparison.OrdinalIgnoreCase) < 0);
     }
 
     private static string NormalizeTokenForFilename(string token)
@@ -670,16 +701,16 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
             return Array.Empty<string>();
         }
 
-        return s.Split(new[] { '|', ',', ';' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+        return s.Split(PreferredTokenSeparators, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
             .Where(t => !string.IsNullOrWhiteSpace(t))
             .ToArray();
     }
 
-    private static bool LinkedChildrenSetEquals(IReadOnlyList<LinkedChild>? existing, IReadOnlyList<LinkedChild> desired)
+    private static bool LinkedChildrenSetEquals(LinkedChild[]? existing, IReadOnlyList<LinkedChild> desired)
     {
         existing ??= Array.Empty<LinkedChild>();
 
-        if (existing.Count != desired.Count)
+        if (existing.Length != desired.Count)
         {
             // We still compare as sets: quick exit on count mismatch is ok because both are unique-by-path in desired.
             // existing might contain duplicates, so set compare is needed.

@@ -10,22 +10,24 @@ namespace YummyKodik.Kodik
     /// </summary>
     public static class KodikTitleResolver
     {
-        private static readonly Regex NonWordRegex = new("[^\\p{L}\\p{Nd}]+", RegexOptions.Compiled);
+        private static readonly TimeSpan RegexMatchTimeout = TimeSpan.FromSeconds(1);
+        private static readonly Regex NonWordRegex = new(
+            "[^\\p{L}\\p{Nd}]+",
+            RegexOptions.Compiled | RegexOptions.CultureInvariant,
+            RegexMatchTimeout);
 
         public static async Task<(KodikIdType IdType, string Id)> ResolveIdAsync(
             string slug,
             string title,
-            KodikClient kodikClient,
+            HttpClient httpClient,
+            string token,
             CancellationToken cancellationToken)
         {
-            // We need HttpClient from the existing KodikClient via reflection is not nice,
-            // so we simply create our own small HttpClient instance here for search.
-            using var http = new HttpClient();
+            ArgumentNullException.ThrowIfNull(httpClient);
 
-            var token = await KodikTokenProvider.GetTokenAsync(http, cancellationToken).ConfigureAwait(false);
             var uri = $"https://kodik-api.com/search?token={Uri.EscapeDataString(token)}&title={Uri.EscapeDataString(title)}";
 
-            using var resp = await http.GetAsync(uri, cancellationToken).ConfigureAwait(false);
+            using var resp = await httpClient.GetAsync(uri, cancellationToken).ConfigureAwait(false);
             var json = await resp.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
 
             if (!resp.IsSuccessStatusCode)

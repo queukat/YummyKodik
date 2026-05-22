@@ -103,7 +103,8 @@ public sealed class YummyVideoCatalog
 
     public int? GetFirstSupportedEpisodeNumber(YummyVideoProviderKind provider)
     {
-        var value = GetSupportedEpisodeNumbers(provider).FirstOrDefault();
+        var supportedEpisodes = GetSupportedEpisodeNumbers(provider);
+        var value = supportedEpisodes.Count > 0 ? supportedEpisodes[0] : 0;
         return value > 0 ? value : null;
     }
 
@@ -411,7 +412,7 @@ public sealed class YummyVideoCatalog
         }
 
         return allowFallback
-            ? episodeEntries.OrderBy(x => x.DisplayVoiceName, StringComparer.OrdinalIgnoreCase).FirstOrDefault()
+            ? episodeEntries.OrderBy(x => x.DisplayVoiceName, StringComparer.OrdinalIgnoreCase).First()
             : null;
     }
 
@@ -467,7 +468,7 @@ public sealed class YummyVideoCatalog
         }
 
         return allowFallback
-            ? episodeEntries.OrderBy(x => x.DisplayVoiceName, StringComparer.OrdinalIgnoreCase).FirstOrDefault()
+            ? episodeEntries.OrderBy(x => x.DisplayVoiceName, StringComparer.OrdinalIgnoreCase).First()
             : null;
     }
 

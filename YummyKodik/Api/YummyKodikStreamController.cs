@@ -51,6 +51,130 @@ namespace YummyKodik.Api
 
         private static readonly object PrefsLock = new();
 
+        private readonly record struct KodikStreamSelection(string TranslationId, bool WaitIfMissing, string Reason);
+
+        private readonly record struct KodikLinkAttempt(KodikClient Client, KodikLinkInfo? Link, Exception? Error);
+
+        private sealed record AllohaEmbeddedSourceRequest(
+            string? MovieToken,
+            string? RequestToken,
+            int TranslationId,
+            int Season,
+            string? Hidden,
+            string? RefererUrl);
+
+        private sealed record AllohaStreamRequest(
+            PluginConfiguration Cfg,
+            Guid UserId,
+            int Episode,
+            string? TranslationId,
+            long? AnimeId,
+            string? VoiceName,
+            AllohaEmbeddedSourceRequest EmbeddedSource,
+            string? SessionId,
+            int Quality,
+            string? Format,
+            CancellationToken CancellationToken);
+
+        private sealed record AllohaSessionRequest(
+            PluginConfiguration Cfg,
+            Guid UserId,
+            long AnimeId,
+            int Episode,
+            string? RequestedVoice,
+            int Quality,
+            CancellationToken CancellationToken);
+
+        private sealed record CvhStreamRequest(
+            PluginConfiguration Cfg,
+            Guid UserId,
+            int Episode,
+            string? TranslationId,
+            long? AnimeId,
+            string? VoiceName,
+            int Quality,
+            string? Format,
+            CancellationToken CancellationToken);
+
+        private sealed record KodikStreamRequest(
+            PluginConfiguration Cfg,
+            Guid UserId,
+            string? Type,
+            string? Id,
+            int Episode,
+            string? TranslationId,
+            int Quality,
+            string? Format,
+            CancellationToken CancellationToken);
+
+        private sealed record KodikLinkRequest(
+            KodikClient Kodik,
+            HttpClient Http,
+            PluginConfiguration Cfg,
+            KodikIdType IdType,
+            string Id,
+            int Episode,
+            string TranslationId,
+            CancellationToken CancellationToken);
+
+        private sealed record KodikTranslationFallbackRequest(
+            KodikClient Kodik,
+            HttpClient Http,
+            PluginConfiguration Cfg,
+            IReadOnlyList<KodikTranslation> Translations,
+            string[] PreferredTokens,
+            KodikIdType IdType,
+            string Id,
+            int Episode,
+            KodikStreamSelection Selection,
+            Exception? LastUpstreamError,
+            bool LogSuccess,
+            CancellationToken CancellationToken);
+
+        private sealed record MissingKodikStreamLinkRequest(
+            PluginConfiguration Cfg,
+            Guid UserId,
+            KodikIdType IdType,
+            string Id,
+            int Episode,
+            string ExplicitTranslationId,
+            int Quality,
+            string? Format,
+            KodikStreamSelection Selection,
+            Exception? LastUpstreamError,
+            CancellationToken CancellationToken);
+
+        private sealed record KodikRedirectRequest(
+            PluginConfiguration Cfg,
+            Guid UserId,
+            KodikIdType IdType,
+            string Id,
+            int Episode,
+            string ExplicitTranslationId,
+            int Quality,
+            string? Format,
+            string SeriesKey,
+            KodikStreamSelection Selection,
+            KodikLinkInfo Link);
+
+        private sealed record KodikFallbackAfterFailureRequest(
+            Guid UserId,
+            string? Type,
+            string? Id,
+            int Episode,
+            string? TranslationId,
+            string? Provider,
+            string? Format,
+            Exception OriginalError,
+            bool AllowProviderSpecified,
+            CancellationToken CancellationToken);
+
+        private readonly record struct KodikFallbackLinkAttempt(
+            KodikClient Client,
+            KodikLinkInfo? Link,
+            Exception? Error,
+            KodikStreamSelection Selection);
+
         public YummyKodikStreamController(
             ILogger<YummyKodikStreamController> logger,
             IHttpClientFactory httpClientFactory,
@@ -129,11 +253,10 @@ namespace YummyKodik.Api
                         kodik,
                         http,
                         cfg,
-                        cancellationToken,
-                        k => k.GetAnimeInfoAsync(request.KodikId, request.KodikIdType, cancellationToken))
+                        k => k.GetAnimeInfoAsync(request.KodikId, request.KodikIdType, cancellationToken),
+                        cancellationToken)
                     .ConfigureAwait(false);
 
-                kodik = infoRes.Client;
                 var info = infoRes.Result;
 
                 var preferredTokens = StringTokenParser.ParseTokens(cfg.PreferredTranslationFilter);
@@ -208,9 +331,15 @@ namespace YummyKodik.Api
                 bool changed;
                 lock (PrefsLock)
                 {
-                    changed = IsYummyProviderRequest(request)
-                        ? SetYummyVoicePreference(cfg, auth.UserId, request.AnimeId, request.Provider, tid)
-                        : cfg.SetUserSeriesPreferredTranslationId(auth.UserId, seriesKey, string.IsNullOrWhiteSpace(tid) ? null : tid);
+                    if (IsYummyProviderRequest(request))
+                    {
+                        changed = SetYummyVoicePreference(cfg, auth.UserId, request.AnimeId, request.Provider, tid);
+                    }
+                    else
+                    {
+                        var translationId = string.IsNullOrWhiteSpace(tid) ? null : tid;
+                        changed = cfg.SetUserSeriesPreferredTranslationId(auth.UserId, seriesKey, translationId);
+                    }
                     if (changed)
                     {
                         Plugin.Instance.SaveConfiguration();
@@ -256,408 +385,68 @@ namespace YummyKodik.Api
                 return BadRequest("ep is required (ep must be > 0)");
             }
 
-            Guid userId = Guid.Empty;
-            try
-            {
-                var auth = await _authorizationContext.GetAuthorizationInfo(HttpContext).ConfigureAwait(false);
-                if (auth.IsAuthenticated)
-                {
-                    userId = auth.UserId;
-                }
-            }
-            catch
-            {
-                // Ignore auth parsing errors for streaming.
-            }
+            var userId = await GetOptionalStreamingUserIdAsync().ConfigureAwait(false);
 
             try
             {
                 var cfg = Plugin.Instance.Configuration;
-                var quality = cfg.PreferredQuality > 0 ? cfg.PreferredQuality : 720;
+                var quality = GetPreferredQuality(cfg);
                 var providerValue = (provider ?? string.Empty).Trim();
 
-                if (string.Equals(providerValue, YummyKodikStreamUri.AllohaProvider, StringComparison.OrdinalIgnoreCase))
+                if (IsStreamProvider(providerValue, YummyKodikStreamUri.AllohaProvider))
                 {
-                    var requestedVoice = voice ?? tr;
-                    try
-                    {
-                        AllohaPlaybackSession session;
-                        if (!string.IsNullOrWhiteSpace(sessionId) &&
-                            _allohaPlaybackService.TryGetSession(sessionId, out var cachedSession))
-                        {
-                            session = cachedSession;
-                        }
-                        else
-                        {
-                            if (!animeId.HasValue || animeId.Value <= 0)
-                            {
-                                return BadRequest("animeId is required for Alloha streams");
-                            }
-
-                            if (TryBuildDirectAllohaSource(
+                    return await ResolveAllohaStreamRequestAsync(
+                            new AllohaStreamRequest(
+                                cfg,
+                                userId,
+                                ep,
+                                tr,
+                                animeId,
+                                voice,
+                                new AllohaEmbeddedSourceRequest(
                                     allohaMovieToken,
                                     allohaRequestToken,
                                     allohaTranslationId,
                                     allohaSeason,
-                                    ep,
                                     allohaHidden,
-                                    allohaRefererUrl,
-                                    out var directSource))
-                            {
-                                try
-                                {
-                                    var directSession = await _allohaPlaybackService.CreateSessionAsync(directSource, quality, requestedVoice, cancellationToken)
-                                        .ConfigureAwait(false);
-                                    if (!AllohaSessionSupportsRequestedVoice(directSession, requestedVoice))
-                                    {
-                                        _logger.LogWarning(
-                                            "Alloha embedded source voice mismatch: user={UserId} animeId={AnimeId} ep={Ep} requestedVoice={RequestedVoice} translationId={TranslationId} selectedVoice={SelectedVoice} availableVoices={AvailableVoices}",
-                                            userId,
-                                            animeId.Value,
-                                            ep,
-                                            requestedVoice,
-                                            directSource.TranslationId,
-                                            directSession.SelectedVoiceName,
-                                            string.Join(", ", directSession.AvailableVoiceNames));
-
-                                        throw new InvalidOperationException("Alloha embedded source voice mismatch.");
-                                    }
-                                    else
-                                    {
-                                        session = directSession;
-
-                                        if (!string.IsNullOrWhiteSpace(requestedVoice))
-                                        {
-                                            TrySaveYummyVoicePreference(cfg, userId, animeId.Value, YummyStreamProviderKind.Alloha, requestedVoice);
-                                        }
-
-                                        _logger.LogInformation(
-                                            "Alloha manifest prepared from embedded source: user={UserId} animeId={AnimeId} ep={Ep} requestedVoice={RequestedVoice} translationId={TranslationId}",
-                                            userId,
-                                            animeId.Value,
-                                            ep,
-                                            requestedVoice,
-                                            directSource.TranslationId);
-                                    }
-                                }
-                                catch (Exception ex) when (IsYummyProviderFallbackException(ex))
-                                {
-                                    _logger.LogWarning(
-                                        ex,
-                                        "Alloha embedded source failed, falling back to live resolution. user={UserId} animeId={AnimeId} ep={Ep} requestedVoice={RequestedVoice} translationId={TranslationId}",
-                                        userId,
-                                        animeId.Value,
-                                        ep,
-                                        requestedVoice,
-                                        directSource.TranslationId);
-
-                                    session = await ResolveAllohaSessionAsync(
-                                            cfg,
-                                            userId,
-                                            animeId.Value,
-                                            ep,
-                                            requestedVoice,
-                                            quality,
-                                            cancellationToken)
-                                        .ConfigureAwait(false);
-                                }
-                            }
-                            else
-                            {
-                                session = await ResolveAllohaSessionAsync(
-                                        cfg,
-                                        userId,
-                                        animeId.Value,
-                                        ep,
-                                        requestedVoice,
-                                        quality,
-                                        cancellationToken)
-                                    .ConfigureAwait(false);
-                            }
-                        }
-
-                        Response.Headers["Cache-Control"] = "no-store";
-                        return Content(
-                            AllohaPlaybackService.BuildManifestResponseBody(session, BuildAllohaProxyBaseUrl()),
-                            "application/vnd.apple.mpegurl");
-                    }
-                    catch (Exception ex) when (
-                        animeId.HasValue &&
-                        animeId.Value > 0 &&
-                        IsYummyProviderFallbackException(ex))
-                    {
-                        _logger.LogWarning(
-                            ex,
-                            "Alloha stream attempt failed, trying fallback providers. user={UserId} animeId={AnimeId} ep={Ep} requestedVoice={RequestedVoice}",
-                            userId,
-                            animeId.Value,
-                            ep,
-                            requestedVoice);
-
-                        return await ResolveYummyFallbackStreamAsync(
-                                cfg,
-                                userId,
-                                YummyStreamProviderKind.Alloha,
-                                animeId.Value,
-                                ep,
-                                requestedVoice,
+                                    allohaRefererUrl),
+                                sessionId,
                                 quality,
                                 format,
-                                ex,
-                                cancellationToken)
-                            .ConfigureAwait(false);
-                    }
+                                cancellationToken))
+                        .ConfigureAwait(false);
                 }
 
-                if (string.Equals(providerValue, YummyKodikStreamUri.CvhProvider, StringComparison.OrdinalIgnoreCase))
+                if (IsStreamProvider(providerValue, YummyKodikStreamUri.CvhProvider))
                 {
-                    if (!animeId.HasValue || animeId.Value <= 0)
-                    {
-                        return BadRequest("animeId is required for CVH streams");
-                    }
-
-                    var requestedVoice = voice ?? tr;
-                    try
-                    {
-                        var catalog = await LoadYummyVideoCatalogAsync(cfg, animeId.Value.ToString(), cancellationToken).ConfigureAwait(false);
-                        return await ResolveCvhStreamFromCatalogAsync(
-                                cfg,
-                                userId,
-                                catalog,
-                                animeId.Value,
-                                ep,
-                                requestedVoice,
-                                quality,
-                                format,
-                                "primary",
-                                cancellationToken)
-                            .ConfigureAwait(false);
-                    }
-                    catch (Exception ex) when (IsYummyProviderFallbackException(ex))
-                    {
-                        _logger.LogWarning(
-                            ex,
-                            "CVH stream attempt failed, trying fallback providers. user={UserId} animeId={AnimeId} ep={Ep} requestedVoice={RequestedVoice}",
-                            userId,
-                            animeId.Value,
-                            ep,
-                            requestedVoice);
-
-                        return await ResolveYummyFallbackStreamAsync(
-                                cfg,
-                                userId,
-                                YummyStreamProviderKind.Cvh,
-                                animeId.Value,
-                                ep,
-                                requestedVoice,
-                                quality,
-                                format,
-                                ex,
-                                cancellationToken)
-                            .ConfigureAwait(false);
-                    }
+                    return await ResolveCvhStreamRequestAsync(
+                            new CvhStreamRequest(cfg, userId, ep, tr, animeId, voice, quality, format, cancellationToken))
+                        .ConfigureAwait(false);
                 }
 
-                if (string.IsNullOrWhiteSpace(type) || string.IsNullOrWhiteSpace(id))
-                {
-                    return BadRequest("type and id are required for Kodik streams");
-                }
-
-                if (!Enum.TryParse<KodikIdType>(type, true, out var idType))
-                {
-                    return BadRequest("unknown type");
-                }
-
-                var http = _httpClientFactory.CreateClient(HttpClientNames.Kodik);
-                var token = await ResolveKodikTokenAsync(http, cfg, cancellationToken).ConfigureAwait(false);
-                var kodik = new KodikClient(http, token);
-
-                var infoRes = await ExecuteWithAutoTokenRefreshAsync(
-                        kodik,
-                        http,
-                        cfg,
-                        cancellationToken,
-                        k => k.GetAnimeInfoAsync(id, idType, cancellationToken))
+                return await ResolveKodikStreamRequestAsync(
+                        new KodikStreamRequest(cfg, userId, type, id, ep, tr, quality, format, cancellationToken))
                     .ConfigureAwait(false);
-
-                kodik = infoRes.Client;
-                var info = infoRes.Result;
-
-                var seriesKey = KodikPlaybackSelector.BuildSeriesKey(idType, id);
-
-                var explicitTr = (tr ?? string.Empty).Trim();
-                var preferredTokens = StringTokenParser.ParseTokens(cfg.PreferredTranslationFilter);
-
-                var savedTrId = cfg.GetUserSeriesPreferredTranslationId(userId, seriesKey);
-
-                var (chosenTrId, waitIfMissing, reason) = KodikPlaybackSelector.PickTranslationForPlayback(
-                    info.Translations,
-                    preferredTokens,
-                    savedTrId,
-                    explicitTr,
-                    ep);
-
-                if (string.IsNullOrWhiteSpace(chosenTrId))
-                {
-                    chosenTrId = "0";
-                }
-
-                KodikLinkInfo? link = null;
-                Exception? lastUpstreamError = null;
-
-                try
-                {
-                    var linkRes = await ExecuteWithAutoTokenRefreshAsync(
-                            kodik,
-                            http,
-                            cfg,
-                            cancellationToken,
-                            k => k.GetEpisodeLinkAsync(id, idType, ep, chosenTrId, cancellationToken))
-                        .ConfigureAwait(false);
-
-                    kodik = linkRes.Client;
-                    link = linkRes.Result;
-                }
-                catch (Exception ex) when (
-                    (ex is KodikException && ex is not KodikTokenException) ||
-                    ex is HttpRequestException ||
-                    ex is TaskCanceledException)
-                {
-                    lastUpstreamError = ex;
-
-                    _logger.LogWarning(
-                        ex,
-                        "Episode link attempt failed. type={Type} id={Id} ep={Ep} tr={TrId} reason={Reason}",
-                        idType, id, ep, chosenTrId, reason);
-                }
-
-                // If the chosen translation is one of preferred (or explicitly selected), we do not fall back.
-                // This enforces "preferred exists -> wait" behavior.
-                if (link == null && string.IsNullOrWhiteSpace(explicitTr) && !waitIfMissing)
-                {
-                    foreach (var fallbackTrId in KodikPlaybackSelector.BuildFallbackTranslationCandidates(
-                                 info.Translations,
-                                 preferredTokens,
-                                 chosenTrId,
-                                 ep))
-                    {
-                        try
-                        {
-                            var linkRes = await ExecuteWithAutoTokenRefreshAsync(
-                                    kodik,
-                                    http,
-                                    cfg,
-                                    cancellationToken,
-                                    k => k.GetEpisodeLinkAsync(id, idType, ep, fallbackTrId, cancellationToken))
-                                .ConfigureAwait(false);
-
-                            kodik = linkRes.Client;
-                            link = linkRes.Result;
-
-                            _logger.LogInformation(
-                                "Fallback translation succeeded. type={Type} id={Id} ep={Ep} from={FromTr} to={ToTr} reason={Reason}",
-                                idType, id, ep, chosenTrId, fallbackTrId, reason);
-
-                            chosenTrId = fallbackTrId;
-                            reason = reason + "+fallback";
-                            waitIfMissing = false;
-                            break;
-                        }
-                        catch (Exception ex) when (
-                            (ex is KodikException && ex is not KodikTokenException) ||
-                            ex is HttpRequestException ||
-                            ex is TaskCanceledException)
-                        {
-                            lastUpstreamError = ex;
-
-                            _logger.LogDebug(
-                                ex,
-                                "Fallback translation attempt failed. type={Type} id={Id} ep={Ep} tr={TrId}",
-                                idType, id, ep, fallbackTrId);
-                        }
-                    }
-                }
-
-                if (link == null)
-                {
-                    var yummyKodikFallback = await TryResolveKodikStreamFromYummyIframeAsync(
-                            cfg,
-                            userId,
-                            idType,
-                            id,
-                            ep,
-                            explicitTr,
-                            quality,
-                            format,
-                            lastUpstreamError,
-                            cancellationToken)
-                        .ConfigureAwait(false);
-                    if (yummyKodikFallback != null)
-                    {
-                        return yummyKodikFallback;
-                    }
-
-                    if (lastUpstreamError != null)
-                    {
-                        _logger.LogWarning(
-                            lastUpstreamError,
-                            "All link attempts failed. type={Type} id={Id} ep={Ep} chosenTr={TrId} reason={Reason}",
-                            idType, id, ep, chosenTrId, reason);
-                    }
-
-                    if (waitIfMissing)
-                    {
-                        Response.Headers["Cache-Control"] = "no-store";
-                        Response.Headers["Retry-After"] = "3600";
-                        return StatusCode(503, "Preferred translation exists but is not available for this episode yet.");
-                    }
-
-                    return StatusCode(502, "Upstream error");
-                }
-
-                var fmt = (format ?? "mp4").Trim().ToLowerInvariant();
-                var targetUrl = fmt == "hls"
-                    ? KodikClient.BuildHlsUrl(link, quality)
-                    : KodikClient.BuildMp4Url(link, quality);
-
-                Response.Headers["Cache-Control"] = "no-store";
-
-                if (!string.IsNullOrWhiteSpace(explicitTr))
-                {
-                    TrySaveTranslationId(cfg, userId, seriesKey, explicitTr);
-                }
-
-                _logger.LogInformation(
-                    "Stream redirect: user={UserId} type={Type} id={Id} ep={Ep} tr={TrId} reason={Reason} -> {Url}",
-                    userId,
-                    idType, id, ep, chosenTrId, reason, targetUrl);
-
-                return Redirect(targetUrl);
             }
             catch (KodikTokenException ex)
             {
                 _logger.LogWarning(ex, "YummyKodik stream failed due to Kodik token. type={Type} id={Id} ep={Ep}", type, id, ep);
-                if (Enum.TryParse<KodikIdType>(type, true, out var fallbackIdType) &&
-                    !string.IsNullOrWhiteSpace(id))
-                {
-                    var fallbackCfg = Plugin.Instance.Configuration;
-                    var fallbackQuality = fallbackCfg.PreferredQuality > 0 ? fallbackCfg.PreferredQuality : 720;
-                    var yummyKodikFallback = await TryResolveKodikStreamFromYummyIframeAsync(
-                            fallbackCfg,
+                var yummyKodikFallback = await TryResolveKodikStreamFallbackAfterFailureAsync(
+                        new KodikFallbackAfterFailureRequest(
                             userId,
-                            fallbackIdType,
+                            type,
                             id,
                             ep,
                             tr,
-                            fallbackQuality,
+                            provider,
                             format,
                             ex,
-                            cancellationToken)
-                        .ConfigureAwait(false);
-                    if (yummyKodikFallback != null)
-                    {
-                        return yummyKodikFallback;
-                    }
+                            AllowProviderSpecified: true,
+                            cancellationToken))
+                    .ConfigureAwait(false);
+                if (yummyKodikFallback != null)
+                {
+                    return yummyKodikFallback;
                 }
 
                 return StatusCode(503, "Kodik token is missing or invalid. Configure KodikToken in plugin settings.");
@@ -665,32 +454,843 @@ namespace YummyKodik.Api
             catch (Exception ex)
             {
                 _logger.LogError(ex, "YummyKodik stream failed. type={Type} id={Id} ep={Ep}", type, id, ep);
-                if (string.IsNullOrWhiteSpace(provider) &&
-                    Enum.TryParse<KodikIdType>(type, true, out var fallbackIdType) &&
-                    !string.IsNullOrWhiteSpace(id))
-                {
-                    var fallbackCfg = Plugin.Instance.Configuration;
-                    var fallbackQuality = fallbackCfg.PreferredQuality > 0 ? fallbackCfg.PreferredQuality : 720;
-                    var yummyKodikFallback = await TryResolveKodikStreamFromYummyIframeAsync(
-                            fallbackCfg,
+                var yummyKodikFallback = await TryResolveKodikStreamFallbackAfterFailureAsync(
+                        new KodikFallbackAfterFailureRequest(
                             userId,
-                            fallbackIdType,
+                            type,
                             id,
                             ep,
                             tr,
-                            fallbackQuality,
+                            provider,
                             format,
                             ex,
-                            cancellationToken)
-                        .ConfigureAwait(false);
-                    if (yummyKodikFallback != null)
-                    {
-                        return yummyKodikFallback;
-                    }
+                            AllowProviderSpecified: false,
+                            cancellationToken))
+                    .ConfigureAwait(false);
+                if (yummyKodikFallback != null)
+                {
+                    return yummyKodikFallback;
                 }
 
                 return StatusCode(502, "Upstream error");
             }
+        }
+
+        private async Task<Guid> GetOptionalStreamingUserIdAsync()
+        {
+            try
+            {
+                var auth = await _authorizationContext.GetAuthorizationInfo(HttpContext).ConfigureAwait(false);
+                return auth.IsAuthenticated ? auth.UserId : Guid.Empty;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "Ignoring auth parsing error for streaming.");
+                return Guid.Empty;
+            }
+        }
+
+        private async Task<IActionResult> ResolveAllohaStreamRequestAsync(AllohaStreamRequest request)
+        {
+            var requestedVoice = request.VoiceName ?? request.TranslationId;
+
+            try
+            {
+                if (TryGetCachedAllohaSession(request.SessionId, out var cachedSession))
+                {
+                    return BuildAllohaManifestResult(cachedSession);
+                }
+
+                if (!TryGetPositiveAnimeId(request.AnimeId, out var resolvedAnimeId))
+                {
+                    return BadRequest("animeId is required for Alloha streams");
+                }
+
+                var session = await ResolveNewAllohaSessionForStreamAsync(
+                        new AllohaSessionRequest(
+                            request.Cfg,
+                            request.UserId,
+                            resolvedAnimeId,
+                            request.Episode,
+                            requestedVoice,
+                            request.Quality,
+                            request.CancellationToken),
+                        request.EmbeddedSource)
+                    .ConfigureAwait(false);
+
+                return BuildAllohaManifestResult(session);
+            }
+            catch (Exception ex) when (CanTryYummyProviderFallback(request.AnimeId, ex))
+            {
+                var resolvedAnimeId = request.AnimeId.GetValueOrDefault();
+                _logger.LogWarning(
+                    ex,
+                    "Alloha stream attempt failed, trying fallback providers. user={UserId} animeId={AnimeId} ep={Ep} requestedVoice={RequestedVoice}",
+                    request.UserId,
+                    resolvedAnimeId,
+                    request.Episode,
+                    requestedVoice);
+
+                return await ResolveYummyFallbackStreamAsync(
+                        request.Cfg,
+                        request.UserId,
+                        YummyStreamProviderKind.Alloha,
+                        resolvedAnimeId,
+                        request.Episode,
+                        requestedVoice,
+                        request.Quality,
+                        request.Format,
+                        ex,
+                        request.CancellationToken)
+                    .ConfigureAwait(false);
+            }
+        }
+
+        private async Task<AllohaPlaybackSession> ResolveNewAllohaSessionForStreamAsync(
+            AllohaSessionRequest request,
+            AllohaEmbeddedSourceRequest embeddedSource)
+        {
+            if (!TryBuildDirectAllohaSource(
+                    embeddedSource.MovieToken,
+                    embeddedSource.RequestToken,
+                    embeddedSource.TranslationId,
+                    embeddedSource.Season,
+                    request.Episode,
+                    embeddedSource.Hidden,
+                    embeddedSource.RefererUrl,
+                    out var directSource))
+            {
+                return await ResolveAllohaSessionAsync(
+                        request.Cfg,
+                        request.UserId,
+                        request.AnimeId,
+                        request.Episode,
+                        request.RequestedVoice,
+                        request.Quality,
+                        request.CancellationToken)
+                    .ConfigureAwait(false);
+            }
+
+            return await ResolveDirectOrLiveAllohaSessionAsync(
+                    request,
+                    directSource)
+                .ConfigureAwait(false);
+        }
+
+        private async Task<AllohaPlaybackSession> ResolveDirectOrLiveAllohaSessionAsync(
+            AllohaSessionRequest request,
+            YummyAllohaSource directSource)
+        {
+            try
+            {
+                var directSession = await _allohaPlaybackService.CreateSessionAsync(
+                        directSource,
+                        request.Quality,
+                        request.RequestedVoice,
+                        request.CancellationToken)
+                    .ConfigureAwait(false);
+                EnsureDirectAllohaSessionSupportsVoice(
+                    request.UserId,
+                    request.AnimeId,
+                    request.Episode,
+                    request.RequestedVoice,
+                    directSource,
+                    directSession);
+
+                if (!string.IsNullOrWhiteSpace(request.RequestedVoice))
+                {
+                    TrySaveYummyVoicePreference(
+                        request.Cfg,
+                        request.UserId,
+                        request.AnimeId,
+                        YummyStreamProviderKind.Alloha,
+                        request.RequestedVoice);
+                }
+
+                _logger.LogInformation(
+                    "Alloha manifest prepared from embedded source: user={UserId} animeId={AnimeId} ep={Ep} requestedVoice={RequestedVoice} translationId={TranslationId}",
+                    request.UserId,
+                    request.AnimeId,
+                    request.Episode,
+                    request.RequestedVoice,
+                    directSource.TranslationId);
+
+                return directSession;
+            }
+            catch (Exception ex) when (IsYummyProviderFallbackException(ex))
+            {
+                _logger.LogWarning(
+                    ex,
+                    "Alloha embedded source failed, falling back to live resolution. user={UserId} animeId={AnimeId} ep={Ep} requestedVoice={RequestedVoice} translationId={TranslationId}",
+                    request.UserId,
+                    request.AnimeId,
+                    request.Episode,
+                    request.RequestedVoice,
+                    directSource.TranslationId);
+
+                return await ResolveAllohaSessionAsync(
+                        request.Cfg,
+                        request.UserId,
+                        request.AnimeId,
+                        request.Episode,
+                        request.RequestedVoice,
+                        request.Quality,
+                        request.CancellationToken)
+                    .ConfigureAwait(false);
+            }
+        }
+
+        private void EnsureDirectAllohaSessionSupportsVoice(
+            Guid userId,
+            long animeId,
+            int episode,
+            string? requestedVoice,
+            YummyAllohaSource directSource,
+            AllohaPlaybackSession directSession)
+        {
+            if (AllohaSessionSupportsRequestedVoice(directSession, requestedVoice))
+            {
+                return;
+            }
+
+            _logger.LogWarning(
+                "Alloha embedded source voice mismatch: user={UserId} animeId={AnimeId} ep={Ep} requestedVoice={RequestedVoice} translationId={TranslationId} selectedVoice={SelectedVoice} availableVoices={AvailableVoices}",
+                userId,
+                animeId,
+                episode,
+                requestedVoice,
+                directSource.TranslationId,
+                directSession.SelectedVoiceName,
+                string.Join(", ", directSession.AvailableVoiceNames));
+
+            throw new InvalidOperationException("Alloha embedded source voice mismatch.");
+        }
+
+        private async Task<IActionResult> ResolveCvhStreamRequestAsync(CvhStreamRequest request)
+        {
+            if (!TryGetPositiveAnimeId(request.AnimeId, out var resolvedAnimeId))
+            {
+                return BadRequest("animeId is required for CVH streams");
+            }
+
+            var requestedVoice = request.VoiceName ?? request.TranslationId;
+            try
+            {
+                var catalog = await LoadYummyVideoCatalogAsync(
+                        request.Cfg,
+                        resolvedAnimeId.ToString(),
+                        request.CancellationToken)
+                    .ConfigureAwait(false);
+                return await ResolveCvhStreamFromCatalogAsync(
+                        request.Cfg,
+                        request.UserId,
+                        catalog,
+                        resolvedAnimeId,
+                        request.Episode,
+                        requestedVoice,
+                        request.Quality,
+                        request.Format,
+                        "primary",
+                        request.CancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception ex) when (IsYummyProviderFallbackException(ex))
+            {
+                _logger.LogWarning(
+                    ex,
+                    "CVH stream attempt failed, trying fallback providers. user={UserId} animeId={AnimeId} ep={Ep} requestedVoice={RequestedVoice}",
+                    request.UserId,
+                    resolvedAnimeId,
+                    request.Episode,
+                    requestedVoice);
+
+                return await ResolveYummyFallbackStreamAsync(
+                        request.Cfg,
+                        request.UserId,
+                        YummyStreamProviderKind.Cvh,
+                        resolvedAnimeId,
+                        request.Episode,
+                        requestedVoice,
+                        request.Quality,
+                        request.Format,
+                        ex,
+                        request.CancellationToken)
+                    .ConfigureAwait(false);
+            }
+        }
+
+        private async Task<IActionResult> ResolveKodikStreamRequestAsync(KodikStreamRequest request)
+        {
+            if (string.IsNullOrWhiteSpace(request.Type) || string.IsNullOrWhiteSpace(request.Id))
+            {
+                return BadRequest("type and id are required for Kodik streams");
+            }
+
+            if (!Enum.TryParse<KodikIdType>(request.Type, true, out var idType))
+            {
+                return BadRequest("unknown type");
+            }
+
+            var http = _httpClientFactory.CreateClient(HttpClientNames.Kodik);
+            var token = await ResolveKodikTokenAsync(http, request.Cfg, request.CancellationToken).ConfigureAwait(false);
+            var kodik = new KodikClient(http, token);
+            var infoRes = await LoadKodikInfoAsync(kodik, http, request.Cfg, request.Id, idType, request.CancellationToken)
+                .ConfigureAwait(false);
+
+            kodik = infoRes.Client;
+            var info = infoRes.Result;
+            var seriesKey = KodikPlaybackSelector.BuildSeriesKey(idType, request.Id);
+            var explicitTr = (request.TranslationId ?? string.Empty).Trim();
+            var preferredTokens = StringTokenParser.ParseTokens(request.Cfg.PreferredTranslationFilter);
+            var savedTrId = request.Cfg.GetUserSeriesPreferredTranslationId(request.UserId, seriesKey);
+            var selection = PickKodikStreamSelection(info.Translations, preferredTokens, savedTrId, explicitTr, request.Episode);
+
+            var linkAttempt = await TryResolveKodikEpisodeLinkAsync(
+                    new KodikLinkRequest(
+                        kodik,
+                        http,
+                        request.Cfg,
+                        idType,
+                        request.Id,
+                        request.Episode,
+                        selection.TranslationId,
+                        request.CancellationToken))
+                .ConfigureAwait(false);
+            LogPrimaryKodikLinkFailure(linkAttempt.Error, idType, request.Id, request.Episode, selection);
+
+            var link = linkAttempt.Link;
+            kodik = linkAttempt.Client;
+            var lastUpstreamError = linkAttempt.Error;
+
+            if (ShouldTryKodikTranslationFallback(link, explicitTr, selection))
+            {
+                var fallbackAttempt = await TryResolveKodikTranslationFallbackAsync(
+                        new KodikTranslationFallbackRequest(
+                            kodik,
+                            http,
+                            request.Cfg,
+                            info.Translations,
+                            preferredTokens,
+                            idType,
+                            request.Id,
+                            request.Episode,
+                            selection,
+                            lastUpstreamError,
+                            LogSuccess: true,
+                            request.CancellationToken))
+                    .ConfigureAwait(false);
+
+                link = fallbackAttempt.Link;
+                selection = fallbackAttempt.Selection;
+                lastUpstreamError = fallbackAttempt.Error;
+            }
+
+            if (link == null)
+            {
+                return await ResolveMissingKodikStreamLinkAsync(
+                        new MissingKodikStreamLinkRequest(
+                            request.Cfg,
+                            request.UserId,
+                            idType,
+                            request.Id,
+                            request.Episode,
+                            explicitTr,
+                            request.Quality,
+                            request.Format,
+                            selection,
+                            lastUpstreamError,
+                            request.CancellationToken))
+                    .ConfigureAwait(false);
+            }
+
+            return RedirectKodikStream(
+                new KodikRedirectRequest(
+                    request.Cfg,
+                    request.UserId,
+                    idType,
+                    request.Id,
+                    request.Episode,
+                    explicitTr,
+                    request.Quality,
+                    request.Format,
+                    seriesKey,
+                    selection,
+                    link));
+        }
+
+        private static async Task<(KodikClient Client, KodikAnimeInfo Result)> LoadKodikInfoAsync(
+            KodikClient kodik,
+            HttpClient http,
+            PluginConfiguration cfg,
+            string id,
+            KodikIdType idType,
+            CancellationToken cancellationToken)
+        {
+            return await ExecuteWithAutoTokenRefreshAsync(
+                    kodik,
+                    http,
+                    cfg,
+                    k => k.GetAnimeInfoAsync(id, idType, cancellationToken),
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        private static KodikStreamSelection PickKodikStreamSelection(
+            IReadOnlyList<KodikTranslation> translations,
+            string[] preferredTokens,
+            string? savedTrId,
+            string explicitTr,
+            int episode)
+        {
+            var (chosenTrId, waitIfMissing, reason) = KodikPlaybackSelector.PickTranslationForPlayback(
+                translations,
+                preferredTokens,
+                savedTrId,
+                explicitTr,
+                episode);
+
+            return NormalizeKodikStreamSelection(chosenTrId, waitIfMissing, reason);
+        }
+
+        private static KodikStreamSelection PickKodikFallbackSelection(
+            IReadOnlyList<KodikTranslation> translations,
+            string[] preferredTokens,
+            string? savedTrId,
+            string requestedVoice,
+            string savedYummyVoice,
+            int episode)
+        {
+            if (TryPickExplicitKodikFallbackSelection(translations, requestedVoice, episode, out var explicitSelection))
+            {
+                return explicitSelection;
+            }
+
+            if (TryPickSavedYummyVoiceKodikFallbackSelection(translations, savedYummyVoice, episode, out var savedSelection))
+            {
+                return savedSelection;
+            }
+
+            var (chosenTrId, waitIfMissing, reason) = KodikPlaybackSelector.PickTranslationForPlayback(
+                translations,
+                preferredTokens,
+                savedTrId,
+                explicitTranslationId: string.Empty,
+                episode);
+
+            return NormalizeKodikStreamSelection(chosenTrId, waitIfMissing, reason);
+        }
+
+        private static bool TryPickExplicitKodikFallbackSelection(
+            IReadOnlyList<KodikTranslation> translations,
+            string requestedVoice,
+            int episode,
+            out KodikStreamSelection selection)
+        {
+            selection = default;
+            if (string.IsNullOrWhiteSpace(requestedVoice))
+            {
+                return false;
+            }
+
+            var translation = FindKodikTranslationByVoiceName(translations, requestedVoice, episode);
+            if (translation == null || string.IsNullOrWhiteSpace(translation.Id))
+            {
+                throw new InvalidOperationException("Requested Kodik fallback translation is unavailable from upstream.");
+            }
+
+            selection = new KodikStreamSelection(translation.Id.Trim(), true, "fallback-explicit-voice");
+            return true;
+        }
+
+        private static bool TryPickSavedYummyVoiceKodikFallbackSelection(
+            IReadOnlyList<KodikTranslation> translations,
+            string savedYummyVoice,
+            int episode,
+            out KodikStreamSelection selection)
+        {
+            selection = default;
+            if (string.IsNullOrWhiteSpace(savedYummyVoice))
+            {
+                return false;
+            }
+
+            var translation = FindKodikTranslationByVoiceName(translations, savedYummyVoice, episode);
+            if (translation == null || string.IsNullOrWhiteSpace(translation.Id))
+            {
+                return false;
+            }
+
+            selection = new KodikStreamSelection(translation.Id.Trim(), true, "fallback-saved-yummy-voice");
+            return true;
+        }
+
+        private static KodikStreamSelection NormalizeKodikStreamSelection(
+            string? translationId,
+            bool waitIfMissing,
+            string reason)
+        {
+            var normalizedTranslationId = string.IsNullOrWhiteSpace(translationId)
+                ? "0"
+                : translationId.Trim();
+
+            return new KodikStreamSelection(normalizedTranslationId, waitIfMissing, reason);
+        }
+
+        private static async Task<KodikLinkAttempt> TryResolveKodikEpisodeLinkAsync(KodikLinkRequest request)
+        {
+            try
+            {
+                var linkRes = await ExecuteWithAutoTokenRefreshAsync(
+                        request.Kodik,
+                        request.Http,
+                        request.Cfg,
+                        k => k.GetEpisodeLinkAsync(
+                            request.Id,
+                            request.IdType,
+                            request.Episode,
+                            request.TranslationId,
+                            request.CancellationToken),
+                        request.CancellationToken)
+                    .ConfigureAwait(false);
+
+                return new KodikLinkAttempt(linkRes.Client, linkRes.Result, null);
+            }
+            catch (Exception ex) when (IsRetryableKodikLinkException(ex))
+            {
+                return new KodikLinkAttempt(request.Kodik, null, ex);
+            }
+        }
+
+        private async Task<KodikFallbackLinkAttempt> TryResolveKodikTranslationFallbackAsync(
+            KodikTranslationFallbackRequest request)
+        {
+            var currentClient = request.Kodik;
+            var currentError = request.LastUpstreamError;
+
+            foreach (var fallbackTrId in KodikPlaybackSelector.BuildFallbackTranslationCandidates(
+                         request.Translations,
+                         request.PreferredTokens,
+                         request.Selection.TranslationId,
+                         request.Episode))
+            {
+                var attempt = await TryResolveKodikEpisodeLinkAsync(
+                        new KodikLinkRequest(
+                            currentClient,
+                            request.Http,
+                            request.Cfg,
+                            request.IdType,
+                            request.Id,
+                            request.Episode,
+                            fallbackTrId,
+                            request.CancellationToken))
+                    .ConfigureAwait(false);
+
+                currentClient = attempt.Client;
+                if (attempt.Link != null)
+                {
+                    if (request.LogSuccess)
+                    {
+                        _logger.LogInformation(
+                            "Fallback translation succeeded. type={Type} id={Id} ep={Ep} from={FromTr} to={ToTr} reason={Reason}",
+                            request.IdType,
+                            request.Id,
+                            request.Episode,
+                            request.Selection.TranslationId,
+                            fallbackTrId,
+                            request.Selection.Reason);
+                    }
+
+                    var fallbackSelection = new KodikStreamSelection(
+                        fallbackTrId,
+                        false,
+                        request.Selection.Reason + "+fallback");
+
+                    return new KodikFallbackLinkAttempt(currentClient, attempt.Link, null, fallbackSelection);
+                }
+
+                currentError = attempt.Error ?? currentError;
+                LogKodikFallbackTranslationFailure(
+                    attempt.Error,
+                    request.IdType,
+                    request.Id,
+                    request.Episode,
+                    fallbackTrId);
+            }
+
+            return new KodikFallbackLinkAttempt(currentClient, null, currentError, request.Selection);
+        }
+
+        private async Task<IActionResult> ResolveMissingKodikStreamLinkAsync(MissingKodikStreamLinkRequest request)
+        {
+            var yummyKodikFallback = await TryResolveKodikStreamFromYummyIframeAsync(
+                    request.Cfg,
+                    request.UserId,
+                    request.IdType,
+                    request.Id,
+                    request.Episode,
+                    request.ExplicitTranslationId,
+                    request.Quality,
+                    request.Format,
+                    request.LastUpstreamError,
+                    request.CancellationToken)
+                .ConfigureAwait(false);
+            if (yummyKodikFallback != null)
+            {
+                return yummyKodikFallback;
+            }
+
+            LogAllKodikLinkAttemptsFailed(
+                request.LastUpstreamError,
+                request.IdType,
+                request.Id,
+                request.Episode,
+                request.Selection);
+            if (request.Selection.WaitIfMissing)
+            {
+                SetNoStoreCacheHeader();
+                Response.Headers.RetryAfter = "3600";
+                return StatusCode(503, "Preferred translation exists but is not available for this episode yet.");
+            }
+
+            return StatusCode(502, "Upstream error");
+        }
+
+        private RedirectResult RedirectKodikStream(KodikRedirectRequest request)
+        {
+            var fmt = (request.Format ?? "mp4").Trim().ToLowerInvariant();
+            var targetUrl = fmt == "hls"
+                ? KodikClient.BuildHlsUrl(request.Link, request.Quality)
+                : KodikClient.BuildMp4Url(request.Link, request.Quality);
+
+            SetNoStoreCacheHeader();
+
+            if (!string.IsNullOrWhiteSpace(request.ExplicitTranslationId))
+            {
+                TrySaveTranslationId(
+                    request.Cfg,
+                    request.UserId,
+                    request.SeriesKey,
+                    request.ExplicitTranslationId);
+            }
+
+            _logger.LogInformation(
+                "Stream redirect: user={UserId} type={Type} id={Id} ep={Ep} tr={TrId} reason={Reason} -> {Url}",
+                request.UserId,
+                request.IdType,
+                request.Id,
+                request.Episode,
+                request.Selection.TranslationId,
+                request.Selection.Reason,
+                targetUrl);
+
+            return Redirect(targetUrl);
+        }
+
+        private static KodikLinkInfo RequireKodikFallbackLink(
+            KodikLinkInfo? link,
+            KodikStreamSelection selection,
+            Exception? lastUpstreamError)
+        {
+            if (link != null)
+            {
+                return link;
+            }
+
+            throw new InvalidOperationException(
+                $"Kodik fallback link is unavailable for translation '{selection.TranslationId}' ({selection.Reason}).",
+                lastUpstreamError);
+        }
+
+        private RedirectResult RedirectKodikFallbackStream(KodikRedirectRequest request, string requestedVoice)
+        {
+            _logger.LogInformation(
+                "Kodik fallback stream selected. user={UserId} type={Type} id={Id} ep={Ep} requestedVoice={RequestedVoice} tr={TrId} reason={Reason}",
+                request.UserId,
+                request.IdType,
+                request.Id,
+                request.Episode,
+                requestedVoice,
+                request.Selection.TranslationId,
+                request.Selection.Reason);
+
+            return RedirectKodikStream(request);
+        }
+
+        private async Task<IActionResult?> TryResolveKodikStreamFallbackAfterFailureAsync(
+            KodikFallbackAfterFailureRequest request)
+        {
+            if (!request.AllowProviderSpecified && !string.IsNullOrWhiteSpace(request.Provider))
+            {
+                return null;
+            }
+
+            if (!Enum.TryParse<KodikIdType>(request.Type, true, out var fallbackIdType) ||
+                string.IsNullOrWhiteSpace(request.Id))
+            {
+                return null;
+            }
+
+            var fallbackCfg = Plugin.Instance.Configuration;
+            var fallbackQuality = GetPreferredQuality(fallbackCfg);
+            return await TryResolveKodikStreamFromYummyIframeAsync(
+                    fallbackCfg,
+                    request.UserId,
+                    fallbackIdType,
+                    request.Id,
+                    request.Episode,
+                    request.TranslationId,
+                    fallbackQuality,
+                    request.Format,
+                    request.OriginalError,
+                    request.CancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        private ContentResult BuildAllohaManifestResult(AllohaPlaybackSession session)
+        {
+            SetNoStoreCacheHeader();
+            return Content(
+                AllohaPlaybackService.BuildManifestResponseBody(session, BuildAllohaProxyBaseUrl()),
+                "application/vnd.apple.mpegurl");
+        }
+
+        private void SetNoStoreCacheHeader()
+        {
+            Response.Headers.CacheControl = "no-store";
+        }
+
+        private static bool TryGetCachedAllohaSession(string? sessionId, out AllohaPlaybackSession session)
+        {
+            session = default!;
+            return !string.IsNullOrWhiteSpace(sessionId) &&
+                   AllohaPlaybackService.TryGetSession(sessionId, out session);
+        }
+
+        private static bool TryGetPositiveAnimeId(long? animeId, out long resolvedAnimeId)
+        {
+            resolvedAnimeId = animeId.GetValueOrDefault();
+            return resolvedAnimeId > 0;
+        }
+
+        private static bool CanTryYummyProviderFallback(long? animeId, Exception ex)
+        {
+            return animeId.HasValue &&
+                   animeId.Value > 0 &&
+                   IsYummyProviderFallbackException(ex);
+        }
+
+        private static bool IsStreamProvider(string providerValue, string expectedProvider)
+        {
+            return string.Equals(providerValue, expectedProvider, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool ShouldTryKodikTranslationFallback(
+            KodikLinkInfo? link,
+            string explicitTranslationId,
+            KodikStreamSelection selection)
+        {
+            return link == null &&
+                   string.IsNullOrWhiteSpace(explicitTranslationId) &&
+                   !selection.WaitIfMissing;
+        }
+
+        private static bool IsRetryableKodikLinkException(Exception ex)
+        {
+            return (ex is KodikException && ex is not KodikTokenException) ||
+                   ex is HttpRequestException ||
+                   ex is TaskCanceledException;
+        }
+
+        private static int GetPreferredQuality(PluginConfiguration cfg)
+        {
+            return cfg.PreferredQuality > 0 ? cfg.PreferredQuality : 720;
+        }
+
+        private void LogPrimaryKodikLinkFailure(
+            Exception? error,
+            KodikIdType idType,
+            string id,
+            int episode,
+            KodikStreamSelection selection)
+        {
+            if (error == null)
+            {
+                return;
+            }
+
+            _logger.LogWarning(
+                error,
+                "Episode link attempt failed. type={Type} id={Id} ep={Ep} tr={TrId} reason={Reason}",
+                idType,
+                id,
+                episode,
+                selection.TranslationId,
+                selection.Reason);
+        }
+
+        private void LogKodikFallbackLinkFailure(
+            Exception? error,
+            KodikIdType idType,
+            string id,
+            int episode,
+            KodikStreamSelection selection)
+        {
+            if (error == null)
+            {
+                return;
+            }
+
+            _logger.LogWarning(
+                error,
+                "Kodik fallback link attempt failed. type={Type} id={Id} ep={Ep} tr={TrId} reason={Reason}",
+                idType,
+                id,
+                episode,
+                selection.TranslationId,
+                selection.Reason);
+        }
+
+        private void LogKodikFallbackTranslationFailure(
+            Exception? error,
+            KodikIdType idType,
+            string id,
+            int episode,
+            string fallbackTrId)
+        {
+            if (error == null)
+            {
+                return;
+            }
+
+            _logger.LogDebug(
+                error,
+                "Fallback translation attempt failed. type={Type} id={Id} ep={Ep} tr={TrId}",
+                idType,
+                id,
+                episode,
+                fallbackTrId);
+        }
+
+        private void LogAllKodikLinkAttemptsFailed(
+            Exception? error,
+            KodikIdType idType,
+            string id,
+            int episode,
+            KodikStreamSelection selection)
+        {
+            if (error == null)
+            {
+                return;
+            }
+
+            _logger.LogWarning(
+                error,
+                "All link attempts failed. type={Type} id={Id} ep={Ep} chosenTr={TrId} reason={Reason}",
+                idType,
+                id,
+                episode,
+                selection.TranslationId,
+                selection.Reason);
         }
 
         [AllowAnonymous]
@@ -708,7 +1308,7 @@ namespace YummyKodik.Api
                 return BadRequest("sessionId is required");
             }
 
-            if (!_allohaPlaybackService.TryGetSession(sessionKey, out var session))
+            if (!AllohaPlaybackService.TryGetSession(sessionKey, out var session))
             {
                 return StatusCode(410, "Alloha session expired.");
             }
@@ -719,7 +1319,7 @@ namespace YummyKodik.Api
                 return BadRequest("resource is required");
             }
 
-            if (!_allohaPlaybackService.TryResolveProxyResourceUrl(session, resourceKey, out var resourceUrl))
+            if (!AllohaPlaybackService.TryResolveProxyResourceUrl(session, resourceKey, out var resourceUrl))
             {
                 return NotFound("Alloha proxy resource was not found.");
             }
@@ -730,7 +1330,7 @@ namespace YummyKodik.Api
                     .DownloadProxyResourceAsync(session, resourceKey, resourceUrl, BuildAllohaProxyBaseUrl(), cancellationToken)
                     .ConfigureAwait(false);
 
-                Response.Headers["Cache-Control"] = "no-store";
+                SetNoStoreCacheHeader();
                 return File(response.Content, response.ContentType);
             }
             catch (Exception ex)
@@ -757,7 +1357,7 @@ namespace YummyKodik.Api
 
             var cvhHttp = _httpClientFactory.CreateClient(HttpClientNames.Cvh);
             var cvh = new CvhClient(cvhHttp);
-            if (!cvh.TryGetSession(sessionKey, out var session))
+            if (!CvhClient.TryGetSession(sessionKey, out var session))
             {
                 return StatusCode(410, "CVH session expired.");
             }
@@ -768,7 +1368,7 @@ namespace YummyKodik.Api
                 return BadRequest("resource is required");
             }
 
-            if (!cvh.TryResolveProxyResourceUrl(session, resourceKey, out var resourceUrl))
+            if (!CvhClient.TryResolveProxyResourceUrl(session, resourceKey, out var resourceUrl))
             {
                 return NotFound("CVH proxy resource was not found.");
             }
@@ -779,7 +1379,7 @@ namespace YummyKodik.Api
                     .DownloadProxyResourceAsync(session, resourceUrl, BuildCvhProxyBaseUrl(), cancellationToken)
                     .ConfigureAwait(false);
 
-                Response.Headers["Cache-Control"] = "no-store";
+                SetNoStoreCacheHeader();
                 return File(response.Content, response.ContentType);
             }
             catch (Exception ex)
@@ -797,15 +1397,15 @@ namespace YummyKodik.Api
                 return configured;
             }
 
-            return await KodikTokenProvider.GetTokenAsync(http, ct).ConfigureAwait(false);
+            return await KodikTokenProvider.GetTokenAsync(http, cancellationToken: ct).ConfigureAwait(false);
         }
 
         private static async Task<(KodikClient Client, T Result)> ExecuteWithAutoTokenRefreshAsync<T>(
             KodikClient client,
             HttpClient http,
             PluginConfiguration cfg,
-            CancellationToken ct,
-            Func<KodikClient, Task<T>> action)
+            Func<KodikClient, Task<T>> action,
+            CancellationToken ct)
         {
             try
             {
@@ -817,10 +1417,10 @@ namespace YummyKodik.Api
                 KodikTokenProvider.InvalidateCache();
 
                 var freshToken = await KodikTokenProvider.GetTokenAsync(
-                        http,
-                        ct,
-                        forceRefresh: true,
-                        allowStaleOnFailure: false)
+                    http,
+                    forceRefresh: true,
+                    allowStaleOnFailure: false,
+                    cancellationToken: ct)
                     .ConfigureAwait(false);
 
                 var refreshedClient = new KodikClient(http, freshToken);
@@ -1141,14 +1741,13 @@ namespace YummyKodik.Api
 
             var normalizedLeftKey = TranslationNameKeyNormalizer.Normalize(normalizedLeft);
             var normalizedRightKey = TranslationNameKeyNormalizer.Normalize(normalizedRight);
-            if (!string.IsNullOrWhiteSpace(normalizedLeftKey) && !string.IsNullOrWhiteSpace(normalizedRightKey))
+            if (!string.IsNullOrWhiteSpace(normalizedLeftKey) &&
+                !string.IsNullOrWhiteSpace(normalizedRightKey) &&
+                (string.Equals(normalizedLeftKey, normalizedRightKey, StringComparison.Ordinal) ||
+                 normalizedLeftKey.Contains(normalizedRightKey, StringComparison.Ordinal) ||
+                 normalizedRightKey.Contains(normalizedLeftKey, StringComparison.Ordinal)))
             {
-                if (string.Equals(normalizedLeftKey, normalizedRightKey, StringComparison.Ordinal) ||
-                    normalizedLeftKey.Contains(normalizedRightKey, StringComparison.Ordinal) ||
-                    normalizedRightKey.Contains(normalizedLeftKey, StringComparison.Ordinal))
-                {
-                    return true;
-                }
+                return true;
             }
 
             return string.Equals(normalizedLeft, normalizedRight, StringComparison.OrdinalIgnoreCase) ||
@@ -1192,7 +1791,7 @@ namespace YummyKodik.Api
             return entry != null;
         }
 
-        private static IReadOnlyList<YummyVideoProviderKind> GetFallbackProviderOrder(YummyStreamProviderKind failedProvider)
+        private static YummyVideoProviderKind[] GetFallbackProviderOrder(YummyStreamProviderKind failedProvider)
         {
             return failedProvider switch
             {
@@ -1583,7 +2182,6 @@ namespace YummyKodik.Api
         {
             var requestedVoice = (explicitVoiceName ?? string.Empty).Trim();
             var savedVoice = GetSavedYummyVoiceName(cfg, userId, animeId, YummyStreamProviderKind.Cvh);
-            string? chosenVoice;
             string reason;
             YummyVideoEntry? chosenEntry;
 
@@ -1593,8 +2191,6 @@ namespace YummyKodik.Api
                 {
                     throw new InvalidOperationException("Requested CVH translation is unavailable from upstream.");
                 }
-
-                chosenVoice = chosenEntry!.DisplayVoiceName;
                 reason = "explicit";
             }
             else
@@ -1609,7 +2205,7 @@ namespace YummyKodik.Api
                     throw new InvalidOperationException($"Saved voice is available from {savedVoiceProvider}.");
                 }
 
-                chosenVoice = catalog.PickPreferredVoiceName(
+                var chosenVoice = catalog.PickPreferredVoiceName(
                     YummyVideoProviderKind.Cvh,
                     episode,
                     requestedVoice,
@@ -1653,7 +2249,7 @@ namespace YummyKodik.Api
                 throw new InvalidOperationException("Requested CVH translation is unavailable from upstream.");
             }
 
-            Response.Headers["Cache-Control"] = "no-store";
+            SetNoStoreCacheHeader();
 
             if (!string.IsNullOrWhiteSpace(requestedVoice))
             {
@@ -1679,7 +2275,7 @@ namespace YummyKodik.Api
             {
                 var session = await cvh.CreatePlaybackSessionAsync(chosenEntry.Cvh, quality, cancellationToken)
                     .ConfigureAwait(false);
-                Response.Headers["Cache-Control"] = "no-store";
+                SetNoStoreCacheHeader();
                 return Content(
                     CvhClient.BuildManifestResponseBody(session, BuildCvhProxyBaseUrl()),
                     "application/vnd.apple.mpegurl");
@@ -1706,7 +2302,7 @@ namespace YummyKodik.Api
                 : string.Empty;
             var (anime, catalog) = await LoadYummyVideoContextAsync(cfg, animeId.ToString(), cancellationToken)
                 .ConfigureAwait(false);
-            Exception? lastError = originalError;
+            var fallbackErrors = new List<Exception> { originalError };
 
             foreach (var provider in GetFallbackProviderOrder(failedProvider))
             {
@@ -1759,7 +2355,7 @@ namespace YummyKodik.Api
                             episode,
                             requestedVoice);
 
-                        Response.Headers["Cache-Control"] = "no-store";
+                        SetNoStoreCacheHeader();
                         return Content(
                             AllohaPlaybackService.BuildManifestResponseBody(session, BuildAllohaProxyBaseUrl()),
                             "application/vnd.apple.mpegurl");
@@ -1767,7 +2363,7 @@ namespace YummyKodik.Api
                 }
                 catch (Exception ex) when (IsYummyProviderFallbackException(ex))
                 {
-                    lastError = ex;
+                    fallbackErrors.Add(ex);
                     _logger.LogWarning(
                         ex,
                         "Yummy provider fallback attempt failed. from={FromProvider} to={ToProvider} animeId={AnimeId} ep={Ep} requestedVoice={RequestedVoice}",
@@ -1795,7 +2391,7 @@ namespace YummyKodik.Api
             }
             catch (Exception ex) when (IsYummyProviderFallbackException(ex))
             {
-                lastError = ex;
+                fallbackErrors.Add(ex);
                 _logger.LogWarning(
                     ex,
                     "Kodik fallback attempt failed. from={FromProvider} animeId={AnimeId} ep={Ep} requestedVoice={RequestedVoice}",
@@ -1805,7 +2401,7 @@ namespace YummyKodik.Api
                     requestedVoice);
             }
 
-            throw new InvalidOperationException("All provider fallback attempts failed.", lastError);
+            throw new InvalidOperationException("All provider fallback attempts failed.", fallbackErrors[^1]);
         }
 
         private async Task<IActionResult> ResolveKodikFallbackStreamAsync(
@@ -1827,13 +2423,7 @@ namespace YummyKodik.Api
             var http = _httpClientFactory.CreateClient(HttpClientNames.Kodik);
             var token = await ResolveKodikTokenAsync(http, cfg, cancellationToken).ConfigureAwait(false);
             var kodik = new KodikClient(http, token);
-
-            var infoRes = await ExecuteWithAutoTokenRefreshAsync(
-                    kodik,
-                    http,
-                    cfg,
-                    cancellationToken,
-                    k => k.GetAnimeInfoAsync(id, idType, cancellationToken))
+            var infoRes = await LoadKodikInfoAsync(kodik, http, cfg, id, idType, cancellationToken)
                 .ConfigureAwait(false);
 
             kodik = infoRes.Client;
@@ -1843,153 +2433,68 @@ namespace YummyKodik.Api
             var seriesKey = KodikPlaybackSelector.BuildSeriesKey(idType, id);
             var preferredTokens = StringTokenParser.ParseTokens(cfg.PreferredTranslationFilter);
             var savedTrId = cfg.GetUserSeriesPreferredTranslationId(userId, seriesKey);
-            string chosenTrId;
-            bool waitIfMissing;
-            string reason;
+            var selection = PickKodikFallbackSelection(
+                info.Translations,
+                preferredTokens,
+                savedTrId,
+                requestedVoice,
+                savedYummyVoice,
+                episode);
 
-            if (!string.IsNullOrWhiteSpace(requestedVoice))
-            {
-                var translation = FindKodikTranslationByVoiceName(info.Translations, requestedVoice, episode);
-                if (translation == null || string.IsNullOrWhiteSpace(translation.Id))
-                {
-                    throw new InvalidOperationException("Requested Kodik fallback translation is unavailable from upstream.");
-                }
-
-                chosenTrId = translation.Id.Trim();
-                waitIfMissing = true;
-                reason = "fallback-explicit-voice";
-            }
-            else if (!string.IsNullOrWhiteSpace(savedYummyVoice) &&
-                     FindKodikTranslationByVoiceName(info.Translations, savedYummyVoice, episode) is { } savedVoiceTranslation &&
-                     !string.IsNullOrWhiteSpace(savedVoiceTranslation.Id))
-            {
-                chosenTrId = savedVoiceTranslation.Id.Trim();
-                waitIfMissing = true;
-                reason = "fallback-saved-yummy-voice";
-            }
-            else
-            {
-                (chosenTrId, waitIfMissing, reason) = KodikPlaybackSelector.PickTranslationForPlayback(
-                    info.Translations,
-                    preferredTokens,
-                    savedTrId,
-                    explicitTranslationId: string.Empty,
-                    episode);
-            }
-
-            if (string.IsNullOrWhiteSpace(chosenTrId))
-            {
-                chosenTrId = "0";
-            }
-
-            KodikLinkInfo? link = null;
-            Exception? lastUpstreamError = null;
-
-            try
-            {
-                var linkRes = await ExecuteWithAutoTokenRefreshAsync(
+            var linkAttempt = await TryResolveKodikEpisodeLinkAsync(
+                    new KodikLinkRequest(
                         kodik,
                         http,
                         cfg,
-                        cancellationToken,
-                        k => k.GetEpisodeLinkAsync(id, idType, episode, chosenTrId, cancellationToken))
-                    .ConfigureAwait(false);
+                        idType,
+                        id,
+                        episode,
+                        selection.TranslationId,
+                        cancellationToken))
+                .ConfigureAwait(false);
+            LogKodikFallbackLinkFailure(linkAttempt.Error, idType, id, episode, selection);
 
-                kodik = linkRes.Client;
-                link = linkRes.Result;
-            }
-            catch (Exception ex) when (
-                (ex is KodikException && ex is not KodikTokenException) ||
-                ex is HttpRequestException ||
-                ex is TaskCanceledException)
+            var link = linkAttempt.Link;
+            var lastUpstreamError = linkAttempt.Error;
+
+            if (ShouldTryKodikTranslationFallback(link, requestedVoice, selection))
             {
-                lastUpstreamError = ex;
-                _logger.LogWarning(
-                    ex,
-                    "Kodik fallback link attempt failed. type={Type} id={Id} ep={Ep} tr={TrId} reason={Reason}",
-                    idType,
-                    id,
-                    episode,
-                    chosenTrId,
-                    reason);
-            }
-
-            if (link == null && string.IsNullOrWhiteSpace(requestedVoice) && !waitIfMissing)
-            {
-                foreach (var fallbackTrId in KodikPlaybackSelector.BuildFallbackTranslationCandidates(
-                             info.Translations,
-                             preferredTokens,
-                             chosenTrId,
-                             episode))
-                {
-                    try
-                    {
-                        var linkRes = await ExecuteWithAutoTokenRefreshAsync(
-                                kodik,
-                                http,
-                                cfg,
-                                cancellationToken,
-                                k => k.GetEpisodeLinkAsync(id, idType, episode, fallbackTrId, cancellationToken))
-                            .ConfigureAwait(false);
-
-                        kodik = linkRes.Client;
-                        link = linkRes.Result;
-                        chosenTrId = fallbackTrId;
-                        reason += "+fallback";
-                        waitIfMissing = false;
-                        break;
-                    }
-                    catch (Exception ex) when (
-                        (ex is KodikException && ex is not KodikTokenException) ||
-                        ex is HttpRequestException ||
-                        ex is TaskCanceledException)
-                    {
-                        lastUpstreamError = ex;
-                        _logger.LogDebug(
-                            ex,
-                            "Kodik fallback translation attempt failed. type={Type} id={Id} ep={Ep} tr={TrId}",
+                var fallbackAttempt = await TryResolveKodikTranslationFallbackAsync(
+                        new KodikTranslationFallbackRequest(
+                            linkAttempt.Client,
+                            http,
+                            cfg,
+                            info.Translations,
+                            preferredTokens,
                             idType,
                             id,
                             episode,
-                            fallbackTrId);
-                    }
-                }
+                            selection,
+                            lastUpstreamError,
+                            LogSuccess: false,
+                            cancellationToken))
+                    .ConfigureAwait(false);
+
+                link = fallbackAttempt.Link;
+                selection = fallbackAttempt.Selection;
+                lastUpstreamError = fallbackAttempt.Error;
             }
 
-            if (link == null)
-            {
-                throw new InvalidOperationException(
-                    waitIfMissing
-                        ? "Preferred Kodik fallback translation is not available for this episode yet."
-                        : "Kodik fallback link is unavailable.",
-                    lastUpstreamError);
-            }
-
-            var fmt = (format ?? "hls").Trim().ToLowerInvariant();
-            var targetUrl = fmt == "hls"
-                ? KodikClient.BuildHlsUrl(link, quality)
-                : KodikClient.BuildMp4Url(link, quality);
-
-            Response.Headers["Cache-Control"] = "no-store";
-
-            if (!string.IsNullOrWhiteSpace(requestedVoice))
-            {
-                TrySaveTranslationId(cfg, userId, seriesKey, chosenTrId);
-            }
-
-            _logger.LogInformation(
-                "Kodik fallback stream resolved: user={UserId} type={Type} id={Id} ep={Ep} requestedVoice={RequestedVoice} tr={TrId} reason={Reason} format={Format} -> {Url}",
-                userId,
-                idType,
-                id,
-                episode,
-                requestedVoice,
-                chosenTrId,
-                reason,
-                fmt,
-                targetUrl);
-
-            return Redirect(targetUrl);
+            link = RequireKodikFallbackLink(link, selection, lastUpstreamError);
+            return RedirectKodikFallbackStream(
+                new KodikRedirectRequest(
+                    cfg,
+                    userId,
+                    idType,
+                    id,
+                    episode,
+                    string.Empty,
+                    quality,
+                    format,
+                    seriesKey,
+                    selection,
+                    link),
+                requestedVoice);
         }
 
         private async Task<IActionResult?> TryResolveKodikStreamFromYummyIframeAsync(
@@ -2046,7 +2551,7 @@ namespace YummyKodik.Api
                     ? KodikClient.BuildHlsUrl(link, quality)
                     : KodikClient.BuildMp4Url(link, quality);
 
-                Response.Headers["Cache-Control"] = "no-store";
+                SetNoStoreCacheHeader();
 
                 var tid = (translationId ?? string.Empty).Trim();
                 if (!string.IsNullOrWhiteSpace(tid))

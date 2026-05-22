@@ -4,9 +4,11 @@ namespace YummyKodik.Shikimori;
 
 public static class ShikimoriSeriesLayoutResolver
 {
+    private static readonly TimeSpan RegexMatchTimeout = TimeSpan.FromSeconds(1);
     private static readonly Regex PartSuffixRegex = new(
         @"(?:^|[\s\.:|,-])(?:part|часть)\s*\d+\s*$",
-        RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
+        RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.IgnoreCase,
+        RegexMatchTimeout);
 
     public static ShikimoriSeriesLayoutInfo? BuildFromMainlineChain(IReadOnlyList<ShikimoriSeriesLayoutNode>? rootToCurrent)
     {

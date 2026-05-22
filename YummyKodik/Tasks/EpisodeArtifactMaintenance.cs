@@ -118,60 +118,115 @@ public static class EpisodeArtifactMaintenance
         int maxAvailableEpisodeNumber,
         Action<string>? deleteFile = null)
     {
-        if (string.IsNullOrWhiteSpace(seasonDir) ||
-            !Directory.Exists(seasonDir) ||
-            maxAvailableEpisodeNumber <= 0)
+        var delete = deleteFile ?? (p => TryDeleteFile(logger, p));
+
+        foreach (var path in FindUnexpectedEpisodeArtifacts(
+                     seasonDir,
+                     seasonNumber,
+                     expectedEpisodeFileBaseNames,
+                     maxAvailableEpisodeNumber))
         {
-            return;
+            delete(path);
+        }
+    }
+
+    public static IReadOnlyList<string> FindUnexpectedEpisodeArtifacts(
+        string seasonDir,
+        int seasonNumber,
+        IReadOnlyDictionary<int, HashSet<string>> expectedEpisodeFileBaseNames,
+        int maxAvailableEpisodeNumber)
+    {
+        if (string.IsNullOrWhiteSpace(seasonDir) ||
+            !Directory.Exists(seasonDir))
+        {
+            return Array.Empty<string>();
         }
 
-        var pattern = new Regex(
+        var episodeArtifactPattern = new Regex(
             @"^S(?<season>\d{2})E(?<episode>\d{2})(?: - .+)?$",
             RegexOptions.CultureInvariant | RegexOptions.IgnoreCase,
             TimeSpan.FromSeconds(1));
 
-        foreach (var path in Directory.EnumerateFiles(seasonDir))
+        return Directory.EnumerateFiles(seasonDir)
+            .Where(path => ShouldDeleteUnexpectedEpisodeArtifact(
+                path,
+                seasonNumber,
+                expectedEpisodeFileBaseNames,
+                maxAvailableEpisodeNumber,
+                episodeArtifactPattern))
+            .ToArray();
+    }
+
+    private static bool ShouldDeleteUnexpectedEpisodeArtifact(
+        string path,
+        int seasonNumber,
+        IReadOnlyDictionary<int, HashSet<string>> expectedEpisodeFileBaseNames,
+        int maxAvailableEpisodeNumber,
+        Regex episodeArtifactPattern)
+    {
+        if (!TryParseEpisodeArtifact(
+                path,
+                seasonNumber,
+                episodeArtifactPattern,
+                out var episodeNumber,
+                out var fileBaseName))
         {
-            var extension = Path.GetExtension(path);
-            if (!string.Equals(extension, ".strm", StringComparison.OrdinalIgnoreCase) &&
-                !string.Equals(extension, ".nfo", StringComparison.OrdinalIgnoreCase))
-            {
-                continue;
-            }
-
-            var fileBaseName = Path.GetFileNameWithoutExtension(path);
-            if (string.IsNullOrWhiteSpace(fileBaseName))
-            {
-                continue;
-            }
-
-            var match = pattern.Match(fileBaseName);
-            if (!match.Success)
-            {
-                continue;
-            }
-
-            if (!int.TryParse(match.Groups["season"].Value, out var parsedSeason) ||
-                parsedSeason != Math.Max(1, seasonNumber) ||
-                !int.TryParse(match.Groups["episode"].Value, out var episodeNumber))
-            {
-                continue;
-            }
-
-            if (episodeNumber > maxAvailableEpisodeNumber)
-            {
-                (deleteFile ?? (p => TryDeleteFile(logger, p)))(path);
-                continue;
-            }
-
-            if (expectedEpisodeFileBaseNames.TryGetValue(episodeNumber, out var expectedFileBaseNames) &&
-                expectedFileBaseNames.Contains(fileBaseName))
-            {
-                continue;
-            }
-
-            (deleteFile ?? (p => TryDeleteFile(logger, p)))(path);
+            return false;
         }
+
+        var isExpected = IsExpectedEpisodeFileBaseName(expectedEpisodeFileBaseNames, episodeNumber, fileBaseName);
+        if (maxAvailableEpisodeNumber <= 0)
+        {
+            return !isExpected;
+        }
+
+        return episodeNumber > maxAvailableEpisodeNumber || !isExpected;
+    }
+
+    private static bool TryParseEpisodeArtifact(
+        string path,
+        int seasonNumber,
+        Regex episodeArtifactPattern,
+        out int episodeNumber,
+        out string fileBaseName)
+    {
+        episodeNumber = 0;
+        fileBaseName = Path.GetFileNameWithoutExtension(path) ?? string.Empty;
+
+        if (!IsEpisodeArtifactExtension(Path.GetExtension(path)) ||
+            string.IsNullOrWhiteSpace(fileBaseName))
+        {
+            return false;
+        }
+
+        var match = episodeArtifactPattern.Match(fileBaseName);
+        if (!match.Success)
+        {
+            return false;
+        }
+
+        if (!int.TryParse(match.Groups["season"].Value, out var parsedSeason) ||
+            parsedSeason != Math.Max(1, seasonNumber))
+        {
+            return false;
+        }
+
+        return int.TryParse(match.Groups["episode"].Value, out episodeNumber);
+    }
+
+    private static bool IsExpectedEpisodeFileBaseName(
+        IReadOnlyDictionary<int, HashSet<string>> expectedEpisodeFileBaseNames,
+        int episodeNumber,
+        string fileBaseName)
+    {
+        return expectedEpisodeFileBaseNames.TryGetValue(episodeNumber, out var expectedFileBaseNames) &&
+               expectedFileBaseNames.Contains(fileBaseName);
+    }
+
+    private static bool IsEpisodeArtifactExtension(string extension)
+    {
+        return string.Equals(extension, ".strm", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(extension, ".nfo", StringComparison.OrdinalIgnoreCase);
     }
 
     private static void TryDeleteFile(ILogger logger, string path)

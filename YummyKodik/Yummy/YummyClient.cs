@@ -17,6 +17,11 @@ namespace YummyKodik.Yummy
     /// </summary>
     public sealed class YummyClient
     {
+        private static readonly JsonSerializerOptions CaseInsensitiveJsonOptions = new()
+        {
+            PropertyNameCaseInsensitive = true
+        };
+
         private readonly HttpClient _httpClient;
         private readonly string _clientId;
         private readonly string _baseUrl;
@@ -27,7 +32,7 @@ namespace YummyKodik.Yummy
         {
             _httpClient = httpClient ?? throw new ArgumentNullException(nameof(httpClient));
             _clientId = clientId?.Trim() ?? string.Empty;
-            _baseUrl = (baseUrl ?? string.Empty).TrimEnd('/') ?? throw new ArgumentNullException(nameof(baseUrl));
+            _baseUrl = (baseUrl ?? string.Empty).TrimEnd('/');
         }
 
         public void SetAccessToken(string? token)
@@ -65,8 +70,7 @@ namespace YummyKodik.Yummy
 
                 if (response.IsSuccessStatusCode)
                 {
-                    var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
-                    var wrapper = JsonSerializer.Deserialize<YummyAnimeGetWrapper>(content, options);
+                    var wrapper = JsonSerializer.Deserialize<YummyAnimeGetWrapper>(content, CaseInsensitiveJsonOptions);
 
                     if (wrapper?.Response == null)
                     {
@@ -125,8 +129,7 @@ namespace YummyKodik.Yummy
                 ThrowTypedError(response.StatusCode, content);
             }
 
-            var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
-            var wrapper = JsonSerializer.Deserialize<YummyUserListWrapper>(content, options);
+            var wrapper = JsonSerializer.Deserialize<YummyUserListWrapper>(content, CaseInsensitiveJsonOptions);
 
             return wrapper?.Response ?? new List<YummyUserListItem>(0);
         }
@@ -176,8 +179,7 @@ namespace YummyKodik.Yummy
                 ThrowTypedError(response.StatusCode, content);
             }
 
-            var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
-            var wrapper = JsonSerializer.Deserialize<YummyLoginWrapper>(content, options);
+            var wrapper = JsonSerializer.Deserialize<YummyLoginWrapper>(content, CaseInsensitiveJsonOptions);
 
             if (wrapper?.Response == null || !wrapper.Response.Success || string.IsNullOrWhiteSpace(wrapper.Response.Token))
             {
@@ -213,8 +215,7 @@ namespace YummyKodik.Yummy
                 ThrowTypedError(response.StatusCode, content);
             }
 
-            var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
-            var wrapper = JsonSerializer.Deserialize<YummyTokenWrapper>(content, options);
+            var wrapper = JsonSerializer.Deserialize<YummyTokenWrapper>(content, CaseInsensitiveJsonOptions);
 
             var token = wrapper?.Response?.Token?.Trim() ?? string.Empty;
             if (string.IsNullOrWhiteSpace(token))
@@ -360,7 +361,7 @@ namespace YummyKodik.Yummy
             }
 
             var q = query;
-            if (q.StartsWith("?", StringComparison.Ordinal))
+            if (q.StartsWith('?'))
             {
                 q = q.Substring(1);
             }

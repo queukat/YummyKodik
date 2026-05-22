@@ -8,6 +8,7 @@ tmp/
 .dotnet-cli/
 .dotnet-home/
 .playwright-cli/
+.sonarqube/
 _tmp_*
 scripts/remove-jellyfin-series-*.ps1
 tools/repair-yummykodik-jellyfin-db.ps1

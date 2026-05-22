@@ -41,15 +41,7 @@ public sealed class JellyfinWebSeriesTranslationBootstrapHostedService : IHosted
             Path.Combine(root, "wwwroot", "index.html")
         };
 
-        foreach (var candidate in candidates)
-        {
-            if (File.Exists(candidate))
-            {
-                return candidate;
-            }
-        }
-
-        return null;
+        return Array.Find(candidates, File.Exists);
     }
 
     private void TryEnsureBootstrapScript()

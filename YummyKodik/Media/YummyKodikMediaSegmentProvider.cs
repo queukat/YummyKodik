@@ -127,8 +127,8 @@ public sealed class YummyKodikMediaSegmentProvider : IMediaSegmentProvider
                     kodik,
                     http,
                     cfg,
-                    cancellationToken,
-                    client => client.GetEpisodeTimingsAsync(id, idType, episode, translationId, cancellationToken))
+                    client => client.GetEpisodeTimingsAsync(id, idType, episode, translationId, cancellationToken),
+                    cancellationToken)
                 .ConfigureAwait(false);
 
             var segments = BuildSegments(request.ItemId, timingsRes.Result);
@@ -335,8 +335,8 @@ public sealed class YummyKodikMediaSegmentProvider : IMediaSegmentProvider
                     kodik,
                     http,
                     cfg,
-                    cancellationToken,
-                    client => client.GetAnimeInfoAsync(id, idType, cancellationToken))
+                    client => client.GetAnimeInfoAsync(id, idType, cancellationToken),
+                    cancellationToken)
                 .ConfigureAwait(false);
 
             var seriesKey = KodikPlaybackSelector.BuildSeriesKey(idType, id);
@@ -373,15 +373,15 @@ public sealed class YummyKodikMediaSegmentProvider : IMediaSegmentProvider
             return configured;
         }
 
-        return await KodikTokenProvider.GetTokenAsync(http, ct).ConfigureAwait(false);
+        return await KodikTokenProvider.GetTokenAsync(http, cancellationToken: ct).ConfigureAwait(false);
     }
 
     private static async Task<(KodikClient Client, T Result)> ExecuteWithAutoTokenRefreshAsync<T>(
         KodikClient client,
         HttpClient http,
         PluginConfiguration cfg,
-        CancellationToken ct,
-        Func<KodikClient, Task<T>> action)
+        Func<KodikClient, Task<T>> action,
+        CancellationToken ct)
     {
         try
         {
@@ -394,9 +394,9 @@ public sealed class YummyKodikMediaSegmentProvider : IMediaSegmentProvider
 
             var freshToken = await KodikTokenProvider.GetTokenAsync(
                     http,
-                    ct,
                     forceRefresh: true,
-                    allowStaleOnFailure: false)
+                    allowStaleOnFailure: false,
+                    cancellationToken: ct)
                 .ConfigureAwait(false);
 
             var refreshedClient = new KodikClient(http, freshToken);
@@ -624,6 +624,16 @@ public sealed class YummyKodikMediaSegmentProvider : IMediaSegmentProvider
         };
     }
 
+    private static YummyVideoProviderKind[] GetProviderFallbackOrder(YummyStreamProviderKind provider)
+    {
+        return provider switch
+        {
+            YummyStreamProviderKind.Cvh => new[] { YummyVideoProviderKind.Cvh, YummyVideoProviderKind.Alloha },
+            YummyStreamProviderKind.Alloha => new[] { YummyVideoProviderKind.Alloha, YummyVideoProviderKind.Cvh },
+            _ => new[] { YummyVideoProviderKind.Alloha, YummyVideoProviderKind.Cvh }
+        };
+    }
+
     private static bool TryResolveSiblingYummyContext(
         BaseItem item,
         int episode,
@@ -635,44 +645,57 @@ public sealed class YummyKodikMediaSegmentProvider : IMediaSegmentProvider
         preferredVoiceName = ExtractVoiceNameFromPath(item.Path);
         providerOrder = Array.Empty<YummyVideoProviderKind>();
 
-        if (string.IsNullOrWhiteSpace(item.Path) ||
-            !item.Path.EndsWith(".strm", StringComparison.OrdinalIgnoreCase) ||
-            !File.Exists(item.Path))
+        if (!TryGetSiblingDirectory(item.Path, out var directory))
         {
             return false;
         }
 
-        var directory = Path.GetDirectoryName(item.Path);
-        if (string.IsNullOrWhiteSpace(directory) || !Directory.Exists(directory))
+        var bestRequest = FindBestSiblingYummyRequest(directory, item.Path, episode, preferredVoiceName);
+        if (bestRequest == null)
         {
             return false;
         }
 
+        animeId = bestRequest.AnimeId;
+        preferredVoiceName = ResolvePreferredSiblingVoiceName(preferredVoiceName, bestRequest);
+        providerOrder = GetProviderFallbackOrder(bestRequest.Provider);
+
+        return true;
+    }
+
+    private static bool TryGetSiblingDirectory(string? itemPath, out string directory)
+    {
+        directory = string.Empty;
+
+        if (string.IsNullOrWhiteSpace(itemPath) ||
+            !itemPath.EndsWith(".strm", StringComparison.OrdinalIgnoreCase) ||
+            !File.Exists(itemPath))
+        {
+            return false;
+        }
+
+        directory = Path.GetDirectoryName(itemPath) ?? string.Empty;
+        return !string.IsNullOrWhiteSpace(directory) && Directory.Exists(directory);
+    }
+
+    private static YummyStreamRequest? FindBestSiblingYummyRequest(
+        string directory,
+        string itemPath,
+        int episode,
+        string preferredVoiceName)
+    {
         YummyStreamRequest? bestRequest = null;
         var bestScore = int.MinValue;
 
         foreach (var siblingPath in Directory.EnumerateFiles(directory, "*.strm", SearchOption.TopDirectoryOnly))
         {
-            if (string.Equals(siblingPath, item.Path, StringComparison.OrdinalIgnoreCase))
+            if (string.Equals(siblingPath, itemPath, StringComparison.OrdinalIgnoreCase))
             {
                 continue;
             }
 
-            string logicalUri;
-            try
-            {
-                logicalUri = File.ReadAllText(siblingPath).Trim();
-            }
-            catch
-            {
-                continue;
-            }
-
-            if (!YummyKodikStreamUri.TryParseRequest(logicalUri, out var siblingRequest) ||
-                siblingRequest.Provider is not YummyStreamProviderKind.Cvh and not YummyStreamProviderKind.Alloha ||
-                !siblingRequest.Episode.HasValue ||
-                siblingRequest.Episode.Value != episode ||
-                siblingRequest.AnimeId <= 0)
+            if (!TryReadSiblingYummyRequest(siblingPath, out var siblingRequest) ||
+                !IsMatchingSiblingRequest(siblingRequest, episode))
             {
                 continue;
             }
@@ -687,25 +710,39 @@ public sealed class YummyKodikMediaSegmentProvider : IMediaSegmentProvider
             bestRequest = siblingRequest;
         }
 
-        if (bestRequest == null)
+        return bestRequest;
+    }
+
+    private static bool TryReadSiblingYummyRequest(string siblingPath, out YummyStreamRequest request)
+    {
+        request = null!;
+
+        string logicalUri;
+        try
+        {
+            logicalUri = File.ReadAllText(siblingPath).Trim();
+        }
+        catch
         {
             return false;
         }
 
-        animeId = bestRequest.AnimeId;
-        if (string.IsNullOrWhiteSpace(preferredVoiceName))
-        {
-            preferredVoiceName = bestRequest.VoiceName ?? string.Empty;
-        }
+        return YummyKodikStreamUri.TryParseRequest(logicalUri, out request);
+    }
 
-        providerOrder = bestRequest.Provider switch
-        {
-            YummyStreamProviderKind.Cvh => new[] { YummyVideoProviderKind.Cvh, YummyVideoProviderKind.Alloha },
-            YummyStreamProviderKind.Alloha => new[] { YummyVideoProviderKind.Alloha, YummyVideoProviderKind.Cvh },
-            _ => new[] { YummyVideoProviderKind.Alloha, YummyVideoProviderKind.Cvh }
-        };
+    private static bool IsMatchingSiblingRequest(YummyStreamRequest request, int episode)
+    {
+        return request.Provider is YummyStreamProviderKind.Cvh or YummyStreamProviderKind.Alloha &&
+               request.Episode.HasValue &&
+               request.Episode.Value == episode &&
+               request.AnimeId > 0;
+    }
 
-        return true;
+    private static string ResolvePreferredSiblingVoiceName(string preferredVoiceName, YummyStreamRequest request)
+    {
+        return string.IsNullOrWhiteSpace(preferredVoiceName)
+            ? request.VoiceName ?? string.Empty
+            : preferredVoiceName;
     }
 
     private static int ScoreSiblingYummyRequest(YummyStreamRequest request, string preferredVoiceName)

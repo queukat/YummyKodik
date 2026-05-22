@@ -1,8 +1,10 @@
 using System.Globalization;
+using System.Collections.Concurrent;
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Threading;
 
 namespace YummyKodik.Shikimori;
 
@@ -37,7 +39,7 @@ public sealed class ShikimoriGraphQlClient
 
     private readonly HttpClient _httpClient;
     private readonly string _endpoint;
-    private readonly Dictionary<long, ShikimoriAnimeResponse?> _animeCache = new();
+    private readonly ConcurrentDictionary<long, Lazy<Task<ShikimoriAnimeResponse?>>> _animeCache = new();
 
     public ShikimoriGraphQlClient(HttpClient httpClient, string? endpoint = null)
     {
@@ -58,7 +60,7 @@ public sealed class ShikimoriGraphQlClient
         var seen = new HashSet<long>();
         var currentId = shikimoriId;
 
-        while (currentId > 0 && seen.Add(currentId))
+        while (seen.Add(currentId))
         {
             var anime = await GetAnimeAsync(currentId, cancellationToken).ConfigureAwait(false);
             if (anime == null)
@@ -71,8 +73,9 @@ public sealed class ShikimoriGraphQlClient
             var prequelId = anime.Related?
                 .Where(x => string.Equals(x.RelationKind, "prequel", StringComparison.OrdinalIgnoreCase))
                 .Select(x => x.Anime)
-                .Where(x => x != null && ShikimoriSeriesLayoutResolver.IsMainlineKind(x.Kind))
-                .Select(x => ParseId(x!.Id))
+                .OfType<ShikimoriRelatedAnimeResponse>()
+                .Where(IsMainlineRelatedAnime)
+                .Select(x => ParseId(x.Id))
                 .FirstOrDefault(x => x > 0) ?? 0;
 
             if (prequelId <= 0)
@@ -92,13 +95,32 @@ public sealed class ShikimoriGraphQlClient
         return ShikimoriSeriesLayoutResolver.BuildFromMainlineChain(currentToRoot);
     }
 
+    private static bool IsMainlineRelatedAnime(ShikimoriRelatedAnimeResponse anime)
+    {
+        return ShikimoriSeriesLayoutResolver.IsMainlineKind(anime.Kind);
+    }
+
     private async Task<ShikimoriAnimeResponse?> GetAnimeAsync(long shikimoriId, CancellationToken cancellationToken)
     {
-        if (_animeCache.TryGetValue(shikimoriId, out var cached))
-        {
-            return cached;
-        }
+        var lazy = _animeCache.GetOrAdd(
+            shikimoriId,
+            id => new Lazy<Task<ShikimoriAnimeResponse?>>(
+                () => FetchAnimeAsync(id, cancellationToken),
+                LazyThreadSafetyMode.ExecutionAndPublication));
 
+        try
+        {
+            return await lazy.Value.ConfigureAwait(false);
+        }
+        catch
+        {
+            _animeCache.TryRemove(new KeyValuePair<long, Lazy<Task<ShikimoriAnimeResponse?>>>(shikimoriId, lazy));
+            throw;
+        }
+    }
+
+    private async Task<ShikimoriAnimeResponse?> FetchAnimeAsync(long shikimoriId, CancellationToken cancellationToken)
+    {
         var payload = JsonSerializer.Serialize(
             new
             {
@@ -132,7 +154,6 @@ public sealed class ShikimoriGraphQlClient
         }
 
         var anime = envelope?.Data?.Animes?.FirstOrDefault();
-        _animeCache[shikimoriId] = anime;
         return anime;
     }
 

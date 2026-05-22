@@ -1,5 +1,4 @@
 using System.Globalization;
-using System.Security.Cryptography.X509Certificates;
 using System.Text.Json;
 using YummyKodik.Alloha;
 using YummyKodik.Cvh;
@@ -7,12 +6,52 @@ using YummyKodik.Kodik;
 using YummyKodik.Util;
 using YummyKodik.Yummy;
 
-return await CrosswalkTool.RunAsync(args).ConfigureAwait(false);
+namespace YummyKodik.CrosswalkTool;
+
+internal static class Program
+{
+    private static async Task<int> Main(string[] args)
+    {
+        return await CrosswalkTool.RunAsync(args).ConfigureAwait(false);
+    }
+}
 
 internal static class CrosswalkTool
 {
-    private const string DefaultConfigPath = @"C:\ProgramData\Jellyfin\Server\plugins\configurations\YummyKodik.xml";
-    private const string DefaultAllohaTokenPath = @"C:\ProgramData\Jellyfin\Server\plugins\YummyKodik_1.1.0.0\AllohaApiToken.txt";
+    private const string ProviderKodik = "kodik";
+    private const string ProviderCvh = "cvh";
+    private const string ProviderAlloha = "alloha";
+    private const int KodikPlayerId = 4;
+    private const int CvhPlayerId = 3;
+    private const int AllohaPlayerId = 2;
+    private const string DefaultAllohaPluginDirectoryName = "YummyKodik_1.1.0.0";
+    private const string DefaultYummyApiHost = "api.yani.tv";
+
+    private static readonly string[] ProviderNames =
+    {
+        ProviderKodik,
+        ProviderCvh,
+        ProviderAlloha
+    };
+
+    private static readonly string DefaultConfigPath = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+        "Jellyfin",
+        "Server",
+        "plugins",
+        "configurations",
+        "YummyKodik.xml");
+
+    private static readonly string DefaultAllohaTokenPath = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+        "Jellyfin",
+        "Server",
+        "plugins",
+        DefaultAllohaPluginDirectoryName,
+        "AllohaApiToken.txt");
+
+    private static readonly string DefaultYummyApiBaseUrl =
+        new UriBuilder(Uri.UriSchemeHttps, DefaultYummyApiHost).Uri.GetLeftPart(UriPartial.Authority);
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -28,14 +67,15 @@ internal static class CrosswalkTool
         Directory.CreateDirectory(outputDirectory);
 
         var anchorReport = await LoadAnchorReportAsync(anchorReportPath).ConfigureAwait(false);
-        var anchors = anchorReport.TopCandidates
-            .Where(x => !string.IsNullOrWhiteSpace(x.Slug))
+        var anchorSlugs = anchorReport.TopCandidates
+            .Select(anchor => anchor.Slug)
+            .Where(slug => !string.IsNullOrWhiteSpace(slug))
             .Take(options.Top)
             .ToArray();
 
-        if (anchors.Length == 0)
+        if (anchorSlugs.Length == 0)
         {
-            Console.Error.WriteLine("No anchor titles found.");
+            await Console.Error.WriteLineAsync("No anchor titles found.").ConfigureAwait(false);
             return 1;
         }
 
@@ -44,117 +84,26 @@ internal static class CrosswalkTool
         using var yummyHttp = CreateDefaultHttpClient();
         using var kodikHttp = CreateDefaultHttpClient();
         using var cvhHttp = CreateDefaultHttpClient();
-        using var allohaHttp = CreateUnsafeCertificateHttpClient();
+        using var allohaHttp = CreateDefaultHttpClient();
 
         var yummyClient = new YummyClient(yummyHttp, config.YummyClientId, config.YummyApiBaseUrl);
 
-        string? kodikToken = null;
-        string? kodikTokenError = null;
-        try
-        {
-            kodikToken = await KodikTokenResolver.ResolveTokenAsync(kodikHttp).ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            kodikTokenError = ex.Message;
-        }
+        var kodikToken = await ResolveKodikTokenAsync(kodikHttp).ConfigureAwait(false);
 
         var aliasObservations = new List<AliasObservation>();
         var orthographicObservations = new List<AliasObservation>();
         var titleReports = new List<TitleCrosswalkReport>();
 
-        foreach (var anchor in anchors)
+        foreach (var anchorSlug in anchorSlugs)
         {
-            var anime = await yummyClient.GetAnimeAsync(anchor.Slug, includeVideos: true).ConfigureAwait(false);
+            var anime = await yummyClient.GetAnimeAsync(anchorSlug, includeVideos: true).ConfigureAwait(false);
             var yummyCoverage = BuildYummyCoverage(anime);
+            var titleReport = CreateTitleReport(anchorSlug, anime, yummyCoverage);
+            var coverageContext = new TitleCoverageContext(titleReport, aliasObservations, orthographicObservations, anime.Title, anchorSlug, yummyCoverage);
 
-            var titleReport = new TitleCrosswalkReport
-            {
-                Slug = anchor.Slug,
-                Title = anime.Title,
-                AnimeId = anime.AnimeId,
-                ShikimoriId = anime.RemoteIds?.ShikimoriId ?? 0,
-                KpId = anime.RemoteIds?.KpId ?? 0,
-                ProviderReports = new List<ProviderCoverageReport>()
-            };
-
-            foreach (var providerName in new[] { "kodik", "cvh", "alloha" })
-            {
-                titleReport.ProviderReports.Add(new ProviderCoverageReport
-                {
-                    Provider = providerName,
-                    YummyCoverage = ProjectCoverage(yummyCoverage.GetValueOrDefault(providerName)),
-                    LiveCoverage = Array.Empty<CoverageRow>()
-                });
-            }
-
-            if (!string.IsNullOrWhiteSpace(kodikToken))
-            {
-                try
-                {
-                    var kodikCoverage = await BuildKodikCoverageAsync(anime, kodikHttp, kodikToken).ConfigureAwait(false);
-                    ReplaceProviderReport(titleReport.ProviderReports, "kodik", ProjectCoverage(yummyCoverage.GetValueOrDefault("kodik")), ProjectCoverage(kodikCoverage));
-                    MatchCoverage(
-                        aliasObservations,
-                        orthographicObservations,
-                        anime.Title,
-                        anchor.Slug,
-                        "kodik",
-                        yummyCoverage.GetValueOrDefault("kodik"),
-                        kodikCoverage);
-                }
-                catch (Exception ex)
-                {
-                    titleReport.Errors.Add("kodik: " + ex.Message);
-                }
-            }
-            else if (!string.IsNullOrWhiteSpace(kodikTokenError))
-            {
-                titleReport.Errors.Add("kodik token: " + kodikTokenError);
-            }
-
-            try
-            {
-                var cvhCoverage = await BuildCvhCoverageAsync(anime, cvhHttp).ConfigureAwait(false);
-                ReplaceProviderReport(titleReport.ProviderReports, "cvh", ProjectCoverage(yummyCoverage.GetValueOrDefault("cvh")), ProjectCoverage(cvhCoverage));
-                MatchCoverage(
-                    aliasObservations,
-                    orthographicObservations,
-                    anime.Title,
-                    anchor.Slug,
-                    "cvh",
-                    yummyCoverage.GetValueOrDefault("cvh"),
-                    cvhCoverage);
-            }
-            catch (Exception ex)
-            {
-                titleReport.Errors.Add("cvh: " + ex.Message);
-            }
-
-            if (!string.IsNullOrWhiteSpace(config.AllohaApiToken) && (anime.RemoteIds?.KpId ?? 0) > 0)
-            {
-                try
-                {
-                    var allohaCoverage = await BuildAllohaCoverageAsync(anime.RemoteIds!.KpId!.Value, config.AllohaApiToken, allohaHttp).ConfigureAwait(false);
-                    ReplaceProviderReport(titleReport.ProviderReports, "alloha", ProjectCoverage(yummyCoverage.GetValueOrDefault("alloha")), ProjectCoverage(allohaCoverage));
-                    MatchCoverage(
-                        aliasObservations,
-                        orthographicObservations,
-                        anime.Title,
-                        anchor.Slug,
-                        "alloha",
-                        yummyCoverage.GetValueOrDefault("alloha"),
-                        allohaCoverage);
-                }
-                catch (Exception ex)
-                {
-                    titleReport.Errors.Add("alloha: " + ex.Message);
-                }
-            }
-            else
-            {
-                titleReport.Errors.Add("alloha token missing or kpId unavailable.");
-            }
+            await AddKodikCoverageAsync(coverageContext, anime, kodikHttp, kodikToken).ConfigureAwait(false);
+            await AddCvhCoverageAsync(coverageContext, anime, cvhHttp).ConfigureAwait(false);
+            await AddAllohaCoverageAsync(coverageContext, anime, config, allohaHttp).ConfigureAwait(false);
 
             titleReports.Add(titleReport);
         }
@@ -162,26 +111,21 @@ internal static class CrosswalkTool
         var strongAliases = BuildAliasSuggestions(aliasObservations);
         var orthographicVariants = BuildAliasSuggestions(orthographicObservations);
 
-        var timestamp = DateTime.UtcNow.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture);
-        var jsonPath = Path.Combine(outputDirectory, $"multi-anchor-crosswalk-{timestamp}.json");
-        var markdownPath = Path.Combine(outputDirectory, $"multi-anchor-crosswalk-{timestamp}.md");
-
         var report = new MultiAnchorCrosswalkReport
         {
             GeneratedAtUtc = DateTime.UtcNow,
             AnchorReportPath = anchorReportPath,
-            AnchorCount = anchors.Length,
-            KodikTokenResolved = !string.IsNullOrWhiteSpace(kodikToken),
-            KodikTokenError = kodikTokenError ?? string.Empty,
+            AnchorCount = anchorSlugs.Length,
+            KodikTokenResolved = !string.IsNullOrWhiteSpace(kodikToken.Token),
+            KodikTokenError = kodikToken.Error ?? string.Empty,
             StrongAliases = strongAliases,
             OrthographicVariants = orthographicVariants,
             Titles = titleReports
         };
 
-        await File.WriteAllTextAsync(jsonPath, JsonSerializer.Serialize(report, JsonOptions)).ConfigureAwait(false);
-        await File.WriteAllTextAsync(markdownPath, BuildMarkdown(report)).ConfigureAwait(false);
+        var outputFiles = await WriteReportAsync(outputDirectory, report).ConfigureAwait(false);
 
-        Console.WriteLine(JsonSerializer.Serialize(new
+        await Console.Out.WriteLineAsync(JsonSerializer.Serialize(new
         {
             report.GeneratedAtUtc,
             report.AnchorCount,
@@ -191,12 +135,142 @@ internal static class CrosswalkTool
             orthographicVariantCount = report.OrthographicVariants.Length,
             outputFiles = new
             {
-                json = jsonPath,
-                markdown = markdownPath
+                json = outputFiles.JsonPath,
+                markdown = outputFiles.MarkdownPath
             }
-        }, JsonOptions));
+        }, JsonOptions)).ConfigureAwait(false);
 
         return 0;
+    }
+
+    private static async Task<KodikTokenResult> ResolveKodikTokenAsync(HttpClient httpClient)
+    {
+        try
+        {
+            var token = await KodikTokenResolver.ResolveTokenAsync(httpClient).ConfigureAwait(false);
+            return new KodikTokenResult(token, Error: null);
+        }
+        catch (Exception ex)
+        {
+            return new KodikTokenResult(Token: null, ex.Message);
+        }
+    }
+
+    private static TitleCrosswalkReport CreateTitleReport(
+        string slug,
+        YummyAnimeResponse anime,
+        Dictionary<string, Dictionary<string, HashSet<int>>> yummyCoverage)
+    {
+        return new TitleCrosswalkReport
+        {
+            Slug = slug,
+            Title = anime.Title,
+            AnimeId = anime.AnimeId,
+            ShikimoriId = anime.RemoteIds?.ShikimoriId ?? 0,
+            KpId = anime.RemoteIds?.KpId ?? 0,
+            ProviderReports = ProviderNames
+                .Select(providerName => new ProviderCoverageReport
+                {
+                    Provider = providerName,
+                    YummyCoverage = ProjectCoverage(yummyCoverage.GetValueOrDefault(providerName)),
+                    LiveCoverage = Array.Empty<CoverageRow>()
+                })
+                .ToList()
+        };
+    }
+
+    private static async Task AddKodikCoverageAsync(
+        TitleCoverageContext context,
+        YummyAnimeResponse anime,
+        HttpClient httpClient,
+        KodikTokenResult kodikToken)
+    {
+        if (string.IsNullOrWhiteSpace(kodikToken.Token))
+        {
+            if (!string.IsNullOrWhiteSpace(kodikToken.Error))
+            {
+                context.TitleReport.Errors.Add(ProviderKodik + " token: " + kodikToken.Error);
+            }
+
+            return;
+        }
+
+        try
+        {
+            var liveCoverage = await BuildKodikCoverageAsync(anime, httpClient, kodikToken.Token).ConfigureAwait(false);
+            UpdateProviderCoverage(context, ProviderKodik, liveCoverage);
+        }
+        catch (Exception ex)
+        {
+            context.TitleReport.Errors.Add(ProviderKodik + ": " + ex.Message);
+        }
+    }
+
+    private static async Task AddCvhCoverageAsync(
+        TitleCoverageContext context,
+        YummyAnimeResponse anime,
+        HttpClient httpClient)
+    {
+        try
+        {
+            var liveCoverage = await BuildCvhCoverageAsync(anime, httpClient).ConfigureAwait(false);
+            UpdateProviderCoverage(context, ProviderCvh, liveCoverage);
+        }
+        catch (Exception ex)
+        {
+            context.TitleReport.Errors.Add(ProviderCvh + ": " + ex.Message);
+        }
+    }
+
+    private static async Task AddAllohaCoverageAsync(
+        TitleCoverageContext context,
+        YummyAnimeResponse anime,
+        ToolConfig config,
+        HttpClient httpClient)
+    {
+        if (!TryGetAllohaKpId(config, anime, out var kpId))
+        {
+            context.TitleReport.Errors.Add(ProviderAlloha + " token missing or kpId unavailable.");
+            return;
+        }
+
+        try
+        {
+            var liveCoverage = await BuildAllohaCoverageAsync(kpId, config.AllohaApiToken, httpClient).ConfigureAwait(false);
+            UpdateProviderCoverage(context, ProviderAlloha, liveCoverage);
+        }
+        catch (Exception ex)
+        {
+            context.TitleReport.Errors.Add(ProviderAlloha + ": " + ex.Message);
+        }
+    }
+
+    private static bool TryGetAllohaKpId(ToolConfig config, YummyAnimeResponse anime, out long kpId)
+    {
+        kpId = anime.RemoteIds?.KpId ?? 0;
+        return !string.IsNullOrWhiteSpace(config.AllohaApiToken) && kpId > 0;
+    }
+
+    private static void UpdateProviderCoverage(
+        TitleCoverageContext context,
+        string provider,
+        Dictionary<string, HashSet<int>> liveCoverage)
+    {
+        var providerYummyCoverage = context.YummyCoverage.GetValueOrDefault(provider);
+        ReplaceProviderReport(context.TitleReport.ProviderReports, provider, ProjectCoverage(providerYummyCoverage), ProjectCoverage(liveCoverage));
+        MatchCoverage(context, provider, providerYummyCoverage, liveCoverage);
+    }
+
+    private static async Task<ReportOutputFiles> WriteReportAsync(string outputDirectory, MultiAnchorCrosswalkReport report)
+    {
+        var timestamp = report.GeneratedAtUtc.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture);
+        var jsonPath = Path.Combine(outputDirectory, $"multi-anchor-crosswalk-{timestamp}.json");
+        var markdownPath = Path.Combine(outputDirectory, $"multi-anchor-crosswalk-{timestamp}.md");
+
+        await File.WriteAllTextAsync(jsonPath, JsonSerializer.Serialize(report, JsonOptions)).ConfigureAwait(false);
+        await File.WriteAllTextAsync(markdownPath, BuildMarkdown(report)).ConfigureAwait(false);
+
+        return new ReportOutputFiles(jsonPath, markdownPath);
     }
 
     private static ToolOptions ParseOptions(string[] args)
@@ -207,28 +281,31 @@ internal static class CrosswalkTool
         var allohaTokenPath = DefaultAllohaTokenPath;
         var top = 10;
 
-        for (var i = 0; i < args.Length; i++)
+        var i = 0;
+        while (i < args.Length)
         {
             switch (args[i])
             {
                 case "--anchor-report":
-                    anchorReportPath = args[++i];
+                    anchorReportPath = ReadOptionValue(args, ref i);
                     break;
                 case "--output-dir":
-                    outputDirectory = args[++i];
+                    outputDirectory = ReadOptionValue(args, ref i);
                     break;
                 case "--top":
-                    top = int.Parse(args[++i], CultureInfo.InvariantCulture);
+                    top = int.Parse(ReadOptionValue(args, ref i), CultureInfo.InvariantCulture);
                     break;
                 case "--config":
-                    configPath = args[++i];
+                    configPath = ReadOptionValue(args, ref i);
                     break;
                 case "--alloha-token":
-                    allohaTokenPath = args[++i];
+                    allohaTokenPath = ReadOptionValue(args, ref i);
                     break;
                 default:
                     throw new InvalidOperationException("Unknown argument: " + args[i]);
             }
+
+            i++;
         }
 
         if (top <= 0)
@@ -237,6 +314,18 @@ internal static class CrosswalkTool
         }
 
         return new ToolOptions(anchorReportPath, outputDirectory, top, configPath, allohaTokenPath);
+    }
+
+    private static string ReadOptionValue(string[] args, ref int optionIndex)
+    {
+        var valueIndex = optionIndex + 1;
+        if (valueIndex >= args.Length)
+        {
+            throw new InvalidOperationException("Missing value for argument: " + args[optionIndex]);
+        }
+
+        optionIndex = valueIndex;
+        return args[valueIndex];
     }
 
     private static string ResolveAnchorReportPath(string anchorReportPath)
@@ -291,7 +380,7 @@ internal static class CrosswalkTool
             var doc = new System.Xml.XmlDocument();
             doc.Load(configPath);
             var root = doc.DocumentElement;
-            config.YummyApiBaseUrl = root?.SelectSingleNode("YummyApiBaseUrl")?.InnerText?.Trim() ?? "https://api.yani.tv";
+            config.YummyApiBaseUrl = root?.SelectSingleNode("YummyApiBaseUrl")?.InnerText?.Trim() ?? DefaultYummyApiBaseUrl;
             config.YummyClientId = root?.SelectSingleNode("YummyClientId")?.InnerText?.Trim() ?? string.Empty;
         }
 
@@ -311,26 +400,13 @@ internal static class CrosswalkTool
         };
     }
 
-    private static HttpClient CreateUnsafeCertificateHttpClient()
-    {
-        var handler = new HttpClientHandler
-        {
-            ServerCertificateCustomValidationCallback = static (_, _, _, _) => true
-        };
-
-        return new HttpClient(handler, disposeHandler: true)
-        {
-            Timeout = TimeSpan.FromSeconds(60)
-        };
-    }
-
     private static Dictionary<string, Dictionary<string, HashSet<int>>> BuildYummyCoverage(YummyAnimeResponse anime)
     {
         var result = new Dictionary<string, Dictionary<string, HashSet<int>>>(StringComparer.Ordinal)
         {
-            ["kodik"] = new(StringComparer.OrdinalIgnoreCase),
-            ["cvh"] = new(StringComparer.OrdinalIgnoreCase),
-            ["alloha"] = new(StringComparer.OrdinalIgnoreCase)
+            [ProviderKodik] = new(StringComparer.OrdinalIgnoreCase),
+            [ProviderCvh] = new(StringComparer.OrdinalIgnoreCase),
+            [ProviderAlloha] = new(StringComparer.OrdinalIgnoreCase)
         };
 
         foreach (var video in anime.Videos ?? Enumerable.Empty<YummyVideoItem>())
@@ -344,9 +420,9 @@ internal static class CrosswalkTool
 
             var provider = video.Data.PlayerId switch
             {
-                4 => "kodik",
-                3 => "cvh",
-                2 => "alloha",
+                KodikPlayerId => ProviderKodik,
+                CvhPlayerId => ProviderCvh,
+                AllohaPlayerId => ProviderAlloha,
                 _ => string.Empty
             };
 
@@ -388,11 +464,7 @@ internal static class CrosswalkTool
                 continue;
             }
 
-            var episodes = translation.AvailableEpisodes.Count > 0
-                ? translation.AvailableEpisodes
-                : translation.MaxEpisode > 0
-                    ? Enumerable.Range(1, translation.MaxEpisode).ToArray()
-                    : Array.Empty<int>();
+            var episodes = GetAvailableEpisodes(translation);
 
             foreach (var episode in episodes)
             {
@@ -404,6 +476,18 @@ internal static class CrosswalkTool
         }
 
         return result;
+    }
+
+    private static IReadOnlyCollection<int> GetAvailableEpisodes(KodikTranslation translation)
+    {
+        if (translation.AvailableEpisodes.Count > 0)
+        {
+            return translation.AvailableEpisodes;
+        }
+
+        return translation.MaxEpisode > 0
+            ? Enumerable.Range(1, translation.MaxEpisode).ToArray()
+            : Array.Empty<int>();
     }
 
     private static async Task<Dictionary<string, HashSet<int>>> BuildCvhCoverageAsync(
@@ -453,10 +537,7 @@ internal static class CrosswalkTool
     }
 
     private static void MatchCoverage(
-        List<AliasObservation> aliasObservations,
-        List<AliasObservation> orthographicObservations,
-        string title,
-        string slug,
+        TitleCoverageContext context,
         string provider,
         Dictionary<string, HashSet<int>>? yummyCoverage,
         Dictionary<string, HashSet<int>> nativeCoverage)
@@ -468,75 +549,107 @@ internal static class CrosswalkTool
 
         foreach (var nativePair in nativeCoverage)
         {
-            var nativeSignature = BuildEpisodeSignature(nativePair.Value);
-            if (nativeSignature.Length == 0)
+            var match = TryCreateAliasMatch(context, provider, nativePair, yummyCoverage, nativeCoverage);
+            if (match == null)
             {
                 continue;
             }
 
-            var yummyMatches = yummyCoverage
-                .Where(x => string.Equals(BuildEpisodeSignature(x.Value), nativeSignature, StringComparison.Ordinal))
-                .ToArray();
-            if (yummyMatches.Length != 1)
+            if (match.IsOrthographicVariant)
             {
+                context.OrthographicObservations.Add(match.Observation);
                 continue;
             }
 
-            var yummyPair = yummyMatches[0];
-            var reverseMatches = nativeCoverage
-                .Where(x => string.Equals(BuildEpisodeSignature(x.Value), nativeSignature, StringComparison.Ordinal))
-                .ToArray();
-            if (reverseMatches.Length != 1)
-            {
-                continue;
-            }
-
-            var nativeName = nativePair.Key.Trim();
-            var yummyName = yummyPair.Key.Trim();
-            if (nativeName.Length == 0 || yummyName.Length == 0)
-            {
-                continue;
-            }
-
-            var nativeKey = TranslationNameKeyNormalizer.Normalize(nativeName);
-            var yummyKey = TranslationNameKeyNormalizer.Normalize(yummyName);
-            if (nativeKey.Length == 0 || yummyKey.Length == 0)
-            {
-                continue;
-            }
-
-            if (string.Equals(nativeKey, yummyKey, StringComparison.Ordinal))
-            {
-                if (!string.Equals(nativeName, yummyName, StringComparison.OrdinalIgnoreCase))
-                {
-                    orthographicObservations.Add(new AliasObservation
-                    {
-                        Provider = provider,
-                        NativeName = nativeName,
-                        NativeKey = nativeKey,
-                        YummyName = yummyName,
-                        YummyKey = yummyKey,
-                        Title = title,
-                        Slug = slug,
-                        EpisodeCount = nativePair.Value.Count
-                    });
-                }
-
-                continue;
-            }
-
-            aliasObservations.Add(new AliasObservation
-            {
-                Provider = provider,
-                NativeName = nativeName,
-                NativeKey = nativeKey,
-                YummyName = yummyName,
-                YummyKey = yummyKey,
-                Title = title,
-                Slug = slug,
-                EpisodeCount = nativePair.Value.Count
-            });
+            context.AliasObservations.Add(match.Observation);
         }
+    }
+
+    private static AliasMatch? TryCreateAliasMatch(
+        TitleCoverageContext context,
+        string provider,
+        KeyValuePair<string, HashSet<int>> nativePair,
+        Dictionary<string, HashSet<int>> yummyCoverage,
+        Dictionary<string, HashSet<int>> nativeCoverage)
+    {
+        var nativeSignature = BuildEpisodeSignature(nativePair.Value);
+        if (nativeSignature.Length == 0)
+        {
+            return null;
+        }
+
+        var yummyMatches = FindCoverageMatches(yummyCoverage, nativeSignature);
+        if (yummyMatches.Length != 1 || FindCoverageMatches(nativeCoverage, nativeSignature).Length != 1)
+        {
+            return null;
+        }
+
+        if (!TryCreateNamePair(nativePair.Key, yummyMatches[0].Key, out var namePair))
+        {
+            return null;
+        }
+
+        var isOrthographicVariant = string.Equals(namePair.NativeKey, namePair.YummyKey, StringComparison.Ordinal);
+        if (isOrthographicVariant && string.Equals(namePair.NativeName, namePair.YummyName, StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        var observation = CreateAliasObservation(context, provider, namePair, nativePair.Value.Count);
+        return new AliasMatch(observation, isOrthographicVariant);
+    }
+
+    private static KeyValuePair<string, HashSet<int>>[] FindCoverageMatches(
+        Dictionary<string, HashSet<int>> coverage,
+        string signature)
+    {
+        return coverage
+            .Where(x => string.Equals(BuildEpisodeSignature(x.Value), signature, StringComparison.Ordinal))
+            .ToArray();
+    }
+
+    private static bool TryCreateNamePair(
+        string nativeRawName,
+        string yummyRawName,
+        out TranslationNamePair namePair)
+    {
+        var nativeName = nativeRawName.Trim();
+        var yummyName = yummyRawName.Trim();
+        namePair = default;
+
+        if (nativeName.Length == 0 || yummyName.Length == 0)
+        {
+            return false;
+        }
+
+        var nativeKey = TranslationNameKeyNormalizer.Normalize(nativeName);
+        var yummyKey = TranslationNameKeyNormalizer.Normalize(yummyName);
+        if (nativeKey.Length == 0 || yummyKey.Length == 0)
+        {
+            return false;
+        }
+
+        namePair = new TranslationNamePair(nativeName, nativeKey, yummyName, yummyKey);
+        return true;
+    }
+
+    private static AliasObservation CreateAliasObservation(
+        TitleCoverageContext context,
+        string provider,
+        TranslationNamePair namePair,
+        int episodeCount)
+    {
+        return new AliasObservation
+        {
+            Provider = provider,
+            NativeName = namePair.NativeName,
+            NativeKey = namePair.NativeKey,
+            YummyName = namePair.YummyName,
+            YummyKey = namePair.YummyKey,
+            Title = context.Title,
+            Slug = context.Slug,
+            EpisodeCount = episodeCount
+        };
     }
 
     private static AliasSuggestion[] BuildAliasSuggestions(IEnumerable<AliasObservation> observations)
@@ -623,45 +736,67 @@ internal static class CrosswalkTool
     {
         foreach (var video in anime.Videos ?? Enumerable.Empty<YummyVideoItem>())
         {
-            if (video.Data?.PlayerId != 3)
+            if (TryCreateCvhSource(video, out var source))
             {
-                continue;
+                return source;
             }
-
-            var normalizedUrl = NormalizeUrl(video.IframeUrl);
-            if (!Uri.TryCreate(normalizedUrl, UriKind.Absolute, out var uri))
-            {
-                continue;
-            }
-
-            var query = ParseQuery(uri.Query);
-            if (!query.TryGetValue("anime_id", out var animeIdRaw) ||
-                !long.TryParse(animeIdRaw, NumberStyles.Integer, CultureInfo.InvariantCulture, out var animeId) ||
-                animeId <= 0)
-            {
-                continue;
-            }
-
-            if (!query.TryGetValue("episode", out var episodeRaw) ||
-                !int.TryParse(episodeRaw, NumberStyles.Integer, CultureInfo.InvariantCulture, out var episode) ||
-                episode <= 0)
-            {
-                continue;
-            }
-
-            query.TryGetValue("dubbing_code", out var dubbingCode);
-            query.TryGetValue("dubbing", out var dubbingName);
-
-            return new YummyCvhSource
-            {
-                AnimeId = animeId,
-                EpisodeNumber = episode,
-                DubbingCode = (dubbingCode ?? string.Empty).Trim(),
-                DubbingName = YummyVideoCatalog.NormalizeVoiceName(dubbingName)
-            };
         }
 
         return null;
+    }
+
+    private static bool TryCreateCvhSource(YummyVideoItem video, out YummyCvhSource? source)
+    {
+        source = null;
+        if (video.Data?.PlayerId != CvhPlayerId ||
+            !TryParseQuery(video.IframeUrl, out var query) ||
+            !TryGetPositiveInt64QueryValue(query, "anime_id", out var animeId) ||
+            !TryGetPositiveInt32QueryValue(query, "episode", out var episode))
+        {
+            return false;
+        }
+
+        query.TryGetValue("dubbing_code", out var dubbingCode);
+        query.TryGetValue("dubbing", out var dubbingName);
+
+        source = new YummyCvhSource
+        {
+            AnimeId = animeId,
+            EpisodeNumber = episode,
+            DubbingCode = (dubbingCode ?? string.Empty).Trim(),
+            DubbingName = YummyVideoCatalog.NormalizeVoiceName(dubbingName)
+        };
+
+        return true;
+    }
+
+    private static bool TryParseQuery(string url, out Dictionary<string, string> query)
+    {
+        query = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var normalizedUrl = NormalizeUrl(url);
+        if (!Uri.TryCreate(normalizedUrl, UriKind.Absolute, out var uri))
+        {
+            return false;
+        }
+
+        query = ParseQuery(uri.Query);
+        return true;
+    }
+
+    private static bool TryGetPositiveInt64QueryValue(Dictionary<string, string> query, string key, out long value)
+    {
+        value = 0;
+        return query.TryGetValue(key, out var raw) &&
+            long.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out value) &&
+            value > 0;
+    }
+
+    private static bool TryGetPositiveInt32QueryValue(Dictionary<string, string> query, string key, out int value)
+    {
+        value = 0;
+        return query.TryGetValue(key, out var raw) &&
+            int.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out value) &&
+            value > 0;
     }
 
     private static Dictionary<string, string> ParseQuery(string query)
@@ -763,9 +898,29 @@ internal static class CrosswalkTool
         string ConfigPath,
         string AllohaTokenPath);
 
+    private sealed record KodikTokenResult(string? Token, string? Error);
+
+    private sealed record ReportOutputFiles(string JsonPath, string MarkdownPath);
+
+    private sealed record TitleCoverageContext(
+        TitleCrosswalkReport TitleReport,
+        List<AliasObservation> AliasObservations,
+        List<AliasObservation> OrthographicObservations,
+        string Title,
+        string Slug,
+        Dictionary<string, Dictionary<string, HashSet<int>>> YummyCoverage);
+
+    private sealed record AliasMatch(AliasObservation Observation, bool IsOrthographicVariant);
+
+    private readonly record struct TranslationNamePair(
+        string NativeName,
+        string NativeKey,
+        string YummyName,
+        string YummyKey);
+
     private sealed class ToolConfig
     {
-        public string YummyApiBaseUrl { get; set; } = "https://api.yani.tv";
+        public string YummyApiBaseUrl { get; set; } = DefaultYummyApiBaseUrl;
         public string YummyClientId { get; set; } = string.Empty;
         public string AllohaApiToken { get; set; } = string.Empty;
     }
@@ -779,9 +934,6 @@ internal static class CrosswalkTool
     {
         public string Slug { get; set; } = string.Empty;
         public string Title { get; set; } = string.Empty;
-        public long AnimeId { get; set; }
-        public long KpId { get; set; }
-        public long ShikimoriId { get; set; }
     }
 
     private sealed class AliasObservation

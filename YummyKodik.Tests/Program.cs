@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http;
 using System.Reflection;
 using System.Text;
+using System.Text.Json;
 using Microsoft.Extensions.Logging.Abstractions;
 using YummyKodik.Cvh;
 using YummyKodik.Alloha;
@@ -44,6 +45,8 @@ var tests = new (string Name, Action Run)[]
     ("KodikClient_GetEpisodeTimingsAsync_UsesEpisodeLevelSearchLink", KodikClient_GetEpisodeTimingsAsync_UsesEpisodeLevelSearchLink),
     ("KodikClient_GetEpisodeLinkAsync_FallsBackToSeasonLinkWhenEpisodeLinkIsBroken", KodikClient_GetEpisodeLinkAsync_FallsBackToSeasonLinkWhenEpisodeLinkIsBroken),
     ("KodikClient_GetAnimeInfoAsync_FallsBackToHtmlFindPlayerResponse", KodikClient_GetAnimeInfoAsync_FallsBackToHtmlFindPlayerResponse),
+    ("KodikTokenResolver_DecodesOnlineModPayload", KodikTokenResolver_DecodesOnlineModPayload),
+    ("KodikTitleResolver_NormalizesUnicodeWords", KodikTitleResolver_NormalizesUnicodeWords),
     ("NeedsKodikSupplement_SkipsAnnouncementWithoutAvailableEpisodes", NeedsKodikSupplement_SkipsAnnouncementWithoutAvailableEpisodes),
     ("NeedsKodikSupplement_UsesKodikWhenAiredEpisodesExist", NeedsKodikSupplement_UsesKodikWhenAiredEpisodesExist),
     ("LimitToExpectedAvailableEpisodes_CapsProviderCoverageToAiredCount", LimitToExpectedAvailableEpisodes_CapsProviderCoverageToAiredCount),
@@ -79,6 +82,7 @@ var tests = new (string Name, Action Run)[]
     ("CvhClient_PrefersDubbingNameOverNumericDubbingCode", CvhClient_PrefersDubbingNameOverNumericDubbingCode),
     ("CvhClient_MatchesEquivalentVoiceKeys", CvhClient_MatchesEquivalentVoiceKeys),
     ("CvhClient_DoesNotFallbackToDifferentVoiceWhenPreferredVoiceIsMissing", CvhClient_DoesNotFallbackToDifferentVoiceWhenPreferredVoiceIsMissing),
+    ("CvhClient_RejectsInvalidSourceIdentifiers", CvhClient_RejectsInvalidSourceIdentifiers),
     ("CvhClient_ThrowsMeaningfulErrorOnEmptyPlaylist", CvhClient_ThrowsMeaningfulErrorOnEmptyPlaylist),
     ("CvhClient_DownloadManifestAddsHeadersAndRewritesUrls", CvhClient_DownloadManifestAddsHeadersAndRewritesUrls),
     ("CvhClient_BuildManifestResponseBody_ProxiesNestedPlaylists", CvhClient_BuildManifestResponseBody_ProxiesNestedPlaylists),
@@ -103,9 +107,20 @@ var tests = new (string Name, Action Run)[]
     ("ResolveEpisodeTranslationFileBaseName_ReusesExistingEquivalentArtifactName", ResolveEpisodeTranslationFileBaseName_ReusesExistingEquivalentArtifactName),
     ("KeepLatestEpisodePerResolvedLink_DropsEarlierEpisodesWhenKodikReusesSameVideo", KeepLatestEpisodePerResolvedLink_DropsEarlierEpisodesWhenKodikReusesSameVideo),
     ("CleanupUnexpectedEpisodeArtifacts_RemovesStaleFilesBeyondExpectedCoverage", CleanupUnexpectedEpisodeArtifacts_RemovesStaleFilesBeyondExpectedCoverage),
+    ("RefreshState_AllowsSingleFileSkipWhenFingerprintAndFilesMatch", RefreshState_AllowsSingleFileSkipWhenFingerprintAndFilesMatch),
+    ("RefreshState_InvalidatesSkipWhenInputsChange", RefreshState_InvalidatesSkipWhenInputsChange),
+    ("RefreshState_ExtraEpisodeArtifactsDisableSkip", RefreshState_ExtraEpisodeArtifactsDisableSkip),
+    ("RefreshState_ZeroExpectedEpisodesWithStaleArtifactsDisablesSkip", RefreshState_ZeroExpectedEpisodesWithStaleArtifactsDisablesSkip),
+    ("RefreshState_PreservesMultipleSeasonsInSeriesRoot", RefreshState_PreservesMultipleSeasonsInSeriesRoot),
+    ("RefreshTask_ProcessesAtMostTwoTitlesConcurrently", RefreshTask_ProcessesAtMostTwoTitlesConcurrently),
+    ("RefreshTask_RunGateSkipsConcurrentRun", RefreshTask_RunGateSkipsConcurrentRun),
+    ("RefreshTask_LazyKodikInitializationRunsOnlyWhenValueIsUsed", RefreshTask_LazyKodikInitializationRunsOnlyWhenValueIsUsed),
+    ("ShikimoriGraphQlClient_DeduplicatesConcurrentSameIdRequests", ShikimoriGraphQlClient_DeduplicatesConcurrentSameIdRequests),
+    ("RefreshState_PerVoiceModeDoesNotPreSkip", RefreshState_PerVoiceModeDoesNotPreSkip),
     ("AllohaPlaybackService_BuildsExpectedBorthSuffix", AllohaPlaybackService_BuildsExpectedBorthSuffix),
     ("AllohaPlaybackService_CreatesSessionViaIframeAndBnsi", AllohaPlaybackService_CreatesSessionViaIframeAndBnsi),
     ("AllohaPlaybackService_UsesIframeOriginForMirroredHost", AllohaPlaybackService_UsesIframeOriginForMirroredHost),
+    ("AllohaPlaybackService_RejectsUntrustedIframeUrl", AllohaPlaybackService_RejectsUntrustedIframeUrl),
     ("AllohaPlaybackService_PrefersRequestedVoiceWhenBnsiReturnsMultipleTracks", AllohaPlaybackService_PrefersRequestedVoiceWhenBnsiReturnsMultipleTracks),
     ("AllohaPlaybackService_UsesAlternateVoiceFieldWhenLabelIsOpaque", AllohaPlaybackService_UsesAlternateVoiceFieldWhenLabelIsOpaque),
     ("AllohaPlaybackService_MatchesShortAnilibAliasToAnilibria", AllohaPlaybackService_MatchesShortAnilibAliasToAnilibria),
@@ -369,7 +384,7 @@ static string TrimForProbe(string? value, int maxLength)
         return normalized;
     }
 
-    return normalized.Substring(0, maxLength) + "...";
+    return string.Concat(normalized.AsSpan(0, maxLength), "...");
 }
 
 static void ResolveSeasonNumber_UsesViewingOrderIndex()
@@ -398,7 +413,7 @@ static void LimitToExpectedAvailableEpisodes_CapsProviderCoverageToAiredCount()
         }
     };
 
-    var limited = YummyEpisodeAvailability.LimitToExpectedAvailableEpisodes(anime, new[] { 1 });
+    var limited = YummyEpisodeAvailability.LimitToExpectedAvailableEpisodes(anime, TestData.EpisodeOne);
 
     AssertEqual(1, limited.Length, "Provider coverage should be capped to the aired episode count.");
     AssertEqual(1, limited[0], "Only the first aired episode should remain available.");
@@ -449,7 +464,7 @@ static void LimitToExpectedAvailableEpisodes_PreservesExplicitProviderCoverageWh
         }
     };
 
-    var limited = YummyEpisodeAvailability.LimitToExpectedAvailableEpisodes(anime, new[] { 1, 2 });
+    var limited = YummyEpisodeAvailability.LimitToExpectedAvailableEpisodes(anime, TestData.EpisodesOneTwo);
 
     AssertEqual(2, limited.Length, "Provider-reported episode coverage should be preserved when aired lags behind live data.");
     AssertEqual(1, limited[0], "Episode ordering should stay normalized.");
@@ -474,7 +489,7 @@ static void LimitToExpectedAvailableEpisodes_KeepsKnownEpisodesWhenAiredCountIsU
         }
     };
 
-    var limited = YummyEpisodeAvailability.LimitToExpectedAvailableEpisodes(anime, new[] { 3, 1, 2, 2 });
+    var limited = YummyEpisodeAvailability.LimitToExpectedAvailableEpisodes(anime, TestData.UnorderedEpisodesWithDuplicate);
 
     AssertEqual(3, limited.Length, "When Yummy does not know aired count, existing provider episodes should be preserved.");
     AssertEqual(1, limited[0], "Episodes should be normalized and sorted.");
@@ -1076,6 +1091,35 @@ static void CvhClient_ThrowsMeaningfulErrorOnEmptyPlaylist()
         "Empty CVH payloads should throw a meaningful upstream error.");
 
     AssertTrue(ex.Message.Contains("empty playlist animeId=61549 response", StringComparison.OrdinalIgnoreCase), "Exception should explain that CVH returned an empty playlist response.");
+}
+
+static void CvhClient_RejectsInvalidSourceIdentifiers()
+{
+    using var http = new HttpClient(new DelegatingTestHandler(_ =>
+        throw new InvalidOperationException("CVH validation should fail before any HTTP request.")));
+    var client = new CvhClient(http);
+
+    var missingAnimeId = new YummyCvhSource
+    {
+        AnimeId = 0,
+        EpisodeNumber = 1
+    };
+
+    var animeIdError = AssertThrows<ArgumentOutOfRangeException>(
+        () => client.ResolveEpisodeStreamAsync(missingAnimeId, 720, CancellationToken.None).GetAwaiter().GetResult(),
+        "CVH should reject non-positive anime ids.");
+    AssertEqual("source", animeIdError.ParamName, "Exception should point to the invalid source object.");
+
+    var missingEpisodeNumber = new YummyCvhSource
+    {
+        AnimeId = 61549,
+        EpisodeNumber = 0
+    };
+
+    var episodeError = AssertThrows<ArgumentOutOfRangeException>(
+        () => client.ResolveEpisodeStreamAsync(missingEpisodeNumber, 720, CancellationToken.None).GetAwaiter().GetResult(),
+        "CVH should reject non-positive episode numbers.");
+    AssertEqual("source", episodeError.ParamName, "Exception should point to the invalid source object.");
 }
 
 static void CvhClient_PrefersDubbingNameOverNumericDubbingCode()
@@ -1681,6 +1725,61 @@ static void KodikClient_GetAnimeInfoAsync_FallsBackToHtmlFindPlayerResponse()
     AssertEqual("AniLibria", info.Translations[0].Name, "First translation should be parsed from the HTML fallback.");
     AssertEqual("110", info.Translations[0].Id, "Translation id should come from the HTML fallback select value.");
     AssertEqual(finalPlayerUrl, requests[2].RequestUri!.AbsoluteUri, "Fallback should follow the final player page url after find-player returns HTML.");
+}
+
+static void KodikTokenResolver_DecodesOnlineModPayload()
+{
+    const string expectedToken = "resolved-token";
+    var numbers = EncodeKodikSecret(expectedToken, "kodik");
+    var script =
+        "const endpoint = 'https://kodik-api.com/search';\n" +
+        "var token = Utils.decodeSecret([" + string.Join(",", numbers) + "]);";
+
+    var handler = new DelegatingTestHandler(request =>
+    {
+        if (request.Method == HttpMethod.Get &&
+            request.RequestUri!.AbsoluteUri == KodikTokenResolver.OnlineModUrl)
+        {
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(script)
+            };
+        }
+
+        throw new InvalidOperationException("Kodik token resolver should not use fallback when online_mod.js contains a decodable token.");
+    });
+
+    using var http = new HttpClient(handler);
+    var token = KodikTokenResolver.ResolveTokenAsync(http, CancellationToken.None)
+        .GetAwaiter()
+        .GetResult();
+
+    AssertEqual(expectedToken, token, "Kodik token resolver should decode the online_mod.js payload.");
+}
+
+static void KodikTitleResolver_NormalizesUnicodeWords()
+{
+    var normalized = InvokeStatic<string>(
+        typeof(KodikTitleResolver),
+        "Normalize",
+        " Блич: Thousand-Year Blood War 2!! ");
+
+    AssertEqual("бличthousandyearbloodwar2", normalized, "Kodik title normalization should keep letters and digits across alphabets.");
+}
+
+static int[] EncodeKodikSecret(string token, string decodeKey)
+{
+    var hash = InvokeStatic<string>(typeof(KodikTokenResolver), "Salt", "123456789" + decodeKey);
+    var hashBuilder = new StringBuilder(hash);
+    while (hashBuilder.Length < token.Length)
+    {
+        hashBuilder.Append(hash);
+    }
+
+    var expandedHash = hashBuilder.ToString();
+    return token
+        .Select((ch, index) => ch ^ expandedHash[index])
+        .ToArray();
 }
 
 static void CvhClient_BuildManifestResponseBody_ProxiesNestedPlaylists()
@@ -2409,12 +2508,7 @@ static void GenerateKodikEpisodeFilesAsync_FillsMissingTranslationsForExistingEp
     EpisodeArtifactMaintenance.TrackExpectedEpisodeTranslation(expectedEpisodeTranslationKeys, 1, "Dream Cast");
     EpisodeArtifactMaintenance.TrackExpectedEpisodeTranslation(expectedEpisodeTranslationKeys, 1, "AnimeVost");
 
-    var missing = new[]
-    {
-        "Dream Cast",
-        "AnimeVost",
-        "AniLibria"
-    }
+    var missing = TestData.KodikSupplementTranslationNames
         .Where(x => !EpisodeArtifactMaintenance.HasExpectedEpisodeTranslation(expectedEpisodeTranslationKeys, 1, x))
         .ToArray();
 
@@ -2505,6 +2599,387 @@ static void CleanupUnexpectedEpisodeArtifacts_RemovesStaleFilesBeyondExpectedCov
         AssertFalse(File.Exists(Path.Combine(seasonDir, "S02E01 - Old Voice.nfo")), "Unexpected translation NFO should be removed.");
         AssertFalse(File.Exists(Path.Combine(seasonDir, "S02E02 - Old Voice.strm")), "Episodes beyond the currently available range should be removed.");
         AssertFalse(File.Exists(Path.Combine(seasonDir, "S02E02 - Old Voice.nfo")), "NFO for unavailable future episodes should be removed.");
+    }
+    finally
+    {
+        TryDeleteDirectory(tempRoot);
+    }
+}
+
+static void RefreshState_AllowsSingleFileSkipWhenFingerprintAndFilesMatch()
+{
+    var tempRoot = Path.Combine(Path.GetTempPath(), "YummyKodikTests", Guid.NewGuid().ToString("N"));
+
+    try
+    {
+        var fixture = CreateRefreshStateFixture(tempRoot);
+        var written = RefreshStateManager.WriteSeasonStateAsync(
+                fixture.SeriesRoot,
+                fixture.Input,
+                fixture.ExpectedEpisodeFileBaseNames,
+                CancellationToken.None)
+            .GetAwaiter()
+            .GetResult();
+        AssertTrue(written, "Complete single-file artifacts should produce refresh state.");
+
+        var canSkip = RefreshStateManager.CanSkipSingleFileRefreshAsync(
+                fixture.SeriesRoot,
+                fixture.Input,
+                CancellationToken.None)
+            .GetAwaiter()
+            .GetResult();
+        AssertTrue(canSkip, "Matching fingerprint and complete managed files should allow the single-file pre-Kodik skip.");
+
+        var stateJson = File.ReadAllText(Path.Combine(fixture.SeriesRoot, RefreshStateManager.StateFileName));
+        AssertFalse(stateJson.Contains("secret-request", StringComparison.Ordinal), "Refresh state must not store raw secret-bearing STRM URLs.");
+    }
+    finally
+    {
+        TryDeleteDirectory(tempRoot);
+    }
+}
+
+static void RefreshState_InvalidatesSkipWhenInputsChange()
+{
+    var baseline = RefreshStateManager.BuildFingerprint(BuildRefreshStateFingerprintInput());
+    var cases = new (string Name, RefreshStateFingerprintInput Input)[]
+    {
+        ("ServerBaseUrl", BuildRefreshStateFingerprintInput(serverBaseUrl: "https://other.example")),
+        ("PreferredTranslationFilter", BuildRefreshStateFingerprintInput(preferredTranslationFilter: "dreamcast")),
+        ("Mode", BuildRefreshStateFingerprintInput(mode: "per-voice")),
+        ("ProviderCoverage", BuildRefreshStateFingerprintInput(providerCoverage: new[] { "ep:1:preferred:Cvh" })),
+        ("SeasonTitleIdentity", BuildRefreshStateFingerprintInput(seriesTitle: "Frieren Season Two", seasonNumber: 2)),
+        ("ExpectedEpisodeCount", BuildRefreshStateFingerprintInput(expectedAvailableEpisodes: 2))
+    };
+
+    foreach (var testCase in cases)
+    {
+        var fingerprint = RefreshStateManager.BuildFingerprint(testCase.Input);
+        AssertFalse(
+            string.Equals(baseline, fingerprint, StringComparison.Ordinal),
+            $"Fingerprint should change when {testCase.Name} changes.");
+    }
+
+    var tempRoot = Path.Combine(Path.GetTempPath(), "YummyKodikTests", Guid.NewGuid().ToString("N"));
+    try
+    {
+        var fixture = CreateRefreshStateFixture(tempRoot, fingerprint: baseline);
+        RefreshStateManager.WriteSeasonStateAsync(
+                fixture.SeriesRoot,
+                fixture.Input,
+                fixture.ExpectedEpisodeFileBaseNames,
+                CancellationToken.None)
+            .GetAwaiter()
+            .GetResult();
+
+        var changedFingerprintInput = BuildRefreshStateSeasonInput(fingerprint: cases[0].Input is { } changedInput
+            ? RefreshStateManager.BuildFingerprint(changedInput)
+            : string.Empty);
+        var changedFingerprintCanSkip = RefreshStateManager.CanSkipSingleFileRefreshAsync(
+                fixture.SeriesRoot,
+                changedFingerprintInput,
+                CancellationToken.None)
+            .GetAwaiter()
+            .GetResult();
+        AssertFalse(changedFingerprintCanSkip, "Changed fingerprint should disable state pre-skip.");
+
+        var changedExpectedCountInput = BuildRefreshStateSeasonInput(fingerprint: baseline, expectedAvailableEpisodes: 2);
+        var changedExpectedCountCanSkip = RefreshStateManager.CanSkipSingleFileRefreshAsync(
+                fixture.SeriesRoot,
+                changedExpectedCountInput,
+                CancellationToken.None)
+            .GetAwaiter()
+            .GetResult();
+        AssertFalse(changedExpectedCountCanSkip, "Changed expected episode count should disable state pre-skip.");
+    }
+    finally
+    {
+        TryDeleteDirectory(tempRoot);
+    }
+}
+
+static void RefreshState_ExtraEpisodeArtifactsDisableSkip()
+{
+    var tempRoot = Path.Combine(Path.GetTempPath(), "YummyKodikTests", Guid.NewGuid().ToString("N"));
+
+    try
+    {
+        var fixture = CreateRefreshStateFixture(tempRoot);
+        RefreshStateManager.WriteSeasonStateAsync(
+                fixture.SeriesRoot,
+                fixture.Input,
+                fixture.ExpectedEpisodeFileBaseNames,
+                CancellationToken.None)
+            .GetAwaiter()
+            .GetResult();
+
+        var seasonDir = Path.Combine(fixture.SeriesRoot, fixture.Input.SeasonKey);
+        File.WriteAllText(Path.Combine(seasonDir, "S01E02.strm"), "stale");
+        File.WriteAllText(Path.Combine(seasonDir, "S01E02.nfo"), "<episodedetails />");
+
+        var canSkip = RefreshStateManager.CanSkipSingleFileRefreshAsync(
+                fixture.SeriesRoot,
+                fixture.Input,
+                CancellationToken.None)
+            .GetAwaiter()
+            .GetResult();
+        AssertFalse(canSkip, "Extra episode-shaped artifacts should disable state pre-skip so full cleanup still runs.");
+    }
+    finally
+    {
+        TryDeleteDirectory(tempRoot);
+    }
+}
+
+static void RefreshState_ZeroExpectedEpisodesWithStaleArtifactsDisablesSkip()
+{
+    var tempRoot = Path.Combine(Path.GetTempPath(), "YummyKodikTests", Guid.NewGuid().ToString("N"));
+
+    try
+    {
+        var fingerprint = RefreshStateManager.BuildFingerprint(BuildRefreshStateFingerprintInput(
+            expectedAvailableEpisodes: 0,
+            providerCoverage: Array.Empty<string>()));
+        var fixture = CreateRefreshStateFixture(
+            tempRoot,
+            expectedAvailableEpisodes: 0,
+            fingerprint: fingerprint);
+
+        RefreshStateManager.WriteSeasonStateAsync(
+                fixture.SeriesRoot,
+                fixture.Input,
+                fixture.ExpectedEpisodeFileBaseNames,
+                CancellationToken.None)
+            .GetAwaiter()
+            .GetResult();
+
+        var seasonDir = Path.Combine(fixture.SeriesRoot, fixture.Input.SeasonKey);
+        var staleStrmPath = Path.Combine(seasonDir, "S01E01.strm");
+        var staleNfoPath = Path.Combine(seasonDir, "S01E01.nfo");
+        File.WriteAllText(staleStrmPath, "stale");
+        File.WriteAllText(staleNfoPath, "<episodedetails />");
+
+        var canSkip = RefreshStateManager.CanSkipSingleFileRefreshAsync(
+                fixture.SeriesRoot,
+                fixture.Input,
+                CancellationToken.None)
+            .GetAwaiter()
+            .GetResult();
+        AssertFalse(canSkip, "Zero-episode state must not skip when stale episode-shaped artifacts are present.");
+
+        EpisodeArtifactMaintenance.CleanupUnexpectedEpisodeArtifacts(
+            NullLogger.Instance,
+            seasonDir,
+            fixture.Input.SeasonNumber,
+            fixture.ExpectedEpisodeFileBaseNames,
+            maxAvailableEpisodeNumber: 0);
+
+        AssertFalse(File.Exists(staleStrmPath), "Zero-episode cleanup should remove stale STRM artifacts.");
+        AssertFalse(File.Exists(staleNfoPath), "Zero-episode cleanup should remove stale NFO artifacts.");
+    }
+    finally
+    {
+        TryDeleteDirectory(tempRoot);
+    }
+}
+
+static void RefreshState_PreservesMultipleSeasonsInSeriesRoot()
+{
+    var tempRoot = Path.Combine(Path.GetTempPath(), "YummyKodikTests", Guid.NewGuid().ToString("N"));
+
+    try
+    {
+        var seasonOne = CreateRefreshStateFixture(tempRoot, seasonNumber: 1);
+        var seasonTwo = CreateRefreshStateFixture(
+            tempRoot,
+            seasonNumber: 2,
+            fingerprint: RefreshStateManager.BuildFingerprint(BuildRefreshStateFingerprintInput(seasonNumber: 2)));
+
+        RefreshStateManager.WriteSeasonStateAsync(
+                seasonOne.SeriesRoot,
+                seasonOne.Input,
+                seasonOne.ExpectedEpisodeFileBaseNames,
+                CancellationToken.None)
+            .GetAwaiter()
+            .GetResult();
+        RefreshStateManager.WriteSeasonStateAsync(
+                seasonTwo.SeriesRoot,
+                seasonTwo.Input,
+                seasonTwo.ExpectedEpisodeFileBaseNames,
+                CancellationToken.None)
+            .GetAwaiter()
+            .GetResult();
+
+        using var document = JsonDocument.Parse(File.ReadAllText(Path.Combine(seasonOne.SeriesRoot, RefreshStateManager.StateFileName)));
+        var seasons = document.RootElement.GetProperty("seasons");
+        AssertTrue(seasons.TryGetProperty("Season 01", out _), "State file should keep the first season entry.");
+        AssertTrue(seasons.TryGetProperty("Season 02", out _), "State file should add the second season entry without overwriting season one.");
+
+        AssertTrue(
+            RefreshStateManager.CanSkipSingleFileRefreshAsync(seasonOne.SeriesRoot, seasonOne.Input, CancellationToken.None).GetAwaiter().GetResult(),
+            "Season one state should remain usable after writing season two.");
+        AssertTrue(
+            RefreshStateManager.CanSkipSingleFileRefreshAsync(seasonTwo.SeriesRoot, seasonTwo.Input, CancellationToken.None).GetAwaiter().GetResult(),
+            "Season two state should be usable from the shared state file.");
+    }
+    finally
+    {
+        TryDeleteDirectory(tempRoot);
+    }
+}
+
+static void RefreshTask_ProcessesAtMostTwoTitlesConcurrently()
+{
+    var active = 0;
+    var maxActive = 0;
+    var keys = Enumerable.Range(1, 8).Select(x => x.ToString()).ToArray();
+    var progress = new RecordingProgress();
+
+    InvokeRefreshTaskStaticTask(
+            "ProcessKeysInParallelAsync",
+            keys,
+            (Func<string, CancellationToken, Task>)(async (_, cancellationToken) =>
+            {
+                var current = Interlocked.Increment(ref active);
+                UpdateMax(ref maxActive, current);
+                await Task.Delay(40, cancellationToken).ConfigureAwait(false);
+                Interlocked.Decrement(ref active);
+            }),
+            progress,
+            NullLogger.Instance,
+            CancellationToken.None)
+        .GetAwaiter()
+        .GetResult();
+
+    AssertTrue(maxActive <= 2, "Refresh workers should never exceed MaxDegreeOfParallelism=2.");
+    AssertEqual(100.0, progress.Values.Last(), "Progress should reach 100 after all title workers complete.");
+}
+
+static void RefreshTask_RunGateSkipsConcurrentRun()
+{
+    using var gate = new SemaphoreSlim(1, 1);
+    var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+    var secondBodyRan = false;
+
+    var first = InvokeRefreshTaskStaticTaskResult<bool>(
+        "RunWithRunGateAsync",
+        gate,
+        NullLogger.Instance,
+        (Func<Task>)(async () =>
+        {
+            entered.SetResult();
+            await release.Task.ConfigureAwait(false);
+        }));
+
+    AssertTrue(entered.Task.Wait(TimeSpan.FromSeconds(2)), "First gated refresh body should start.");
+
+    var second = InvokeRefreshTaskStaticTaskResult<bool>(
+            "RunWithRunGateAsync",
+            gate,
+            NullLogger.Instance,
+            (Func<Task>)(() =>
+            {
+                secondBodyRan = true;
+                return Task.CompletedTask;
+            }))
+        .GetAwaiter()
+        .GetResult();
+
+    AssertFalse(second, "Second refresh should exit quickly while the run gate is held.");
+    AssertFalse(secondBodyRan, "Skipped refresh should not execute the body.");
+
+    release.SetResult();
+    AssertTrue(first.GetAwaiter().GetResult(), "First refresh should complete normally after releasing the gate.");
+}
+
+static void RefreshTask_LazyKodikInitializationRunsOnlyWhenValueIsUsed()
+{
+    var method = typeof(RefreshYummyKodikLibraryTask).GetMethod(
+        "CreateSharedLazyTask",
+        BindingFlags.Static | BindingFlags.NonPublic);
+    AssertTrue(method is not null, "Shared lazy task helper should exist.");
+
+    var calls = 0;
+    Func<Task<int>> factory = async () =>
+    {
+        Interlocked.Increment(ref calls);
+        await Task.Delay(40).ConfigureAwait(false);
+        return 42;
+    };
+
+    var lazy = (Lazy<Task<int>>)method!.MakeGenericMethod(typeof(int)).Invoke(null, new object[] { factory })!;
+    AssertEqual(0, calls, "Kodik lazy initialization should not run until the shared value is requested.");
+
+    var tasks = Enumerable.Range(0, 8)
+        .Select(_ => Task.Run(async () => await lazy.Value.ConfigureAwait(false)))
+        .ToArray();
+    var results = Task.WhenAll(tasks).GetAwaiter().GetResult();
+
+    AssertEqual(1, calls, "Concurrent Kodik lazy initialization requests should share one factory call.");
+    AssertTrue(results.All(value => value == 42), "All concurrent Kodik lazy callers should receive the initialized value.");
+}
+
+static void ShikimoriGraphQlClient_DeduplicatesConcurrentSameIdRequests()
+{
+    var requestCount = 0;
+    using var http = new HttpClient(new AsyncDelegatingTestHandler(async (_, cancellationToken) =>
+    {
+        Interlocked.Increment(ref requestCount);
+        await Task.Delay(50, cancellationToken).ConfigureAwait(false);
+
+        return new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("""
+                {
+                  "data": {
+                    "animes": [
+                      {
+                        "id": "52991",
+                        "name": "Sousou no Frieren",
+                        "russian": "Провожающая в последний путь Фрирен",
+                        "kind": "tv",
+                        "related": []
+                      }
+                    ]
+                  }
+                }
+                """)
+        };
+    }));
+    var client = new ShikimoriGraphQlClient(http, "https://shikimori.test/graphql");
+
+    var tasks = Enumerable.Range(0, 8)
+        .Select(_ => client.TryResolveSeriesLayoutAsync(52991, CancellationToken.None))
+        .ToArray();
+    Task.WhenAll(tasks).GetAwaiter().GetResult();
+
+    AssertEqual(1, requestCount, "Concurrent same-id Shikimori lookups should share one cached task.");
+    AssertTrue(tasks.All(task => task.Result?.SeasonNumber == 1), "All concurrent Shikimori lookups should receive the resolved layout.");
+}
+
+static void RefreshState_PerVoiceModeDoesNotPreSkip()
+{
+    var tempRoot = Path.Combine(Path.GetTempPath(), "YummyKodikTests", Guid.NewGuid().ToString("N"));
+
+    try
+    {
+        var fixture = CreateRefreshStateFixture(tempRoot, createStrmPerVoiceTranslation: true);
+        RefreshStateManager.WriteSeasonStateAsync(
+                fixture.SeriesRoot,
+                fixture.Input,
+                fixture.ExpectedEpisodeFileBaseNames,
+                CancellationToken.None)
+            .GetAwaiter()
+            .GetResult();
+
+        var canSkip = RefreshStateManager.CanSkipSingleFileRefreshAsync(
+                fixture.SeriesRoot,
+                fixture.Input,
+                CancellationToken.None)
+            .GetAwaiter()
+            .GetResult();
+        AssertFalse(canSkip, "Per-voice mode must not pre-skip Kodik lookup even when state and files match.");
     }
     finally
     {
@@ -2731,6 +3206,38 @@ static void AllohaPlaybackService_UsesIframeOriginForMirroredHost()
 
     AssertEqual(expectedOrigin, session.RequiredHttpHeaders["Origin"], "Resolved mirrored sessions should keep the iframe origin in required headers.");
     AssertEqual(iframeUrl, session.RequiredHttpHeaders["Referer"], "Resolved mirrored sessions should keep the iframe referer in required headers.");
+}
+
+static void AllohaPlaybackService_RejectsUntrustedIframeUrl()
+{
+    var handler = new DelegatingTestHandler(_ =>
+    {
+        throw new InvalidOperationException("Untrusted Alloha iframe URLs must be rejected before sending a request.");
+    });
+
+    using var http = new HttpClient(handler);
+    var ctor = typeof(AllohaPlaybackService).GetConstructor(
+        BindingFlags.Instance | BindingFlags.NonPublic,
+        binder: null,
+        types: new[] { typeof(Microsoft.Extensions.Logging.ILogger<AllohaPlaybackService>), typeof(HttpClient) },
+        modifiers: null);
+    AssertTrue(ctor is not null, "Alloha internal test constructor should exist for URL validation scenarios.");
+
+    var service = (AllohaPlaybackService)ctor!.Invoke(new object[] { NullLogger<AllohaPlaybackService>.Instance, http });
+    var source = new YummyAllohaSource
+    {
+        MovieToken = "movie",
+        RequestToken = "request",
+        TranslationId = 215,
+        SeasonNumber = 1,
+        EpisodeNumber = 1,
+        RefererUrl = "https://127.0.0.1:9443/private?token_movie=movie&translation=215&season=1&episode=1&token=request"
+    };
+
+    var ex = AssertThrows<InvalidOperationException>(
+        () => service.CreateSessionAsync(source, 1080, CancellationToken.None).GetAwaiter().GetResult(),
+        "Alloha should reject iframe URLs outside the known upstream hosts.");
+    AssertTrue(ex.Message.Contains("Alloha iframe URL is not allowed", StringComparison.Ordinal), "Exception should explain that the iframe URL is not allowed.");
 }
 
 static void AllohaPlaybackService_PrefersRequestedVoiceWhenBnsiReturnsMultipleTracks()
@@ -3911,6 +4418,131 @@ static YummyAnimeResponse BuildSlimeFourthSeasonAnime()
     };
 }
 
+static (string SeriesRoot, RefreshStateSeasonInput Input, Dictionary<int, HashSet<string>> ExpectedEpisodeFileBaseNames)
+    CreateRefreshStateFixture(
+        string tempRoot,
+        int seasonNumber = 1,
+        int expectedAvailableEpisodes = 1,
+        bool createStrmPerVoiceTranslation = false,
+        string? fingerprint = null)
+{
+    var seriesRoot = Path.Combine(tempRoot, "Series");
+    var seasonKey = RefreshStateManager.BuildSeasonKey(seasonNumber);
+    var seasonDir = Path.Combine(seriesRoot, seasonKey);
+    Directory.CreateDirectory(seasonDir);
+
+    File.WriteAllText(Path.Combine(seriesRoot, "tvshow.nfo"), NfoBuilder.BuildSeriesNfo("Frieren", "Plot"));
+
+    var expectedEpisodeFileBaseNames = new Dictionary<int, HashSet<string>>();
+    var effectiveSeasonNumber = seasonNumber >= 0 ? seasonNumber : 1;
+    for (var episodeNumber = 1; episodeNumber <= expectedAvailableEpisodes; episodeNumber++)
+    {
+        var fileBaseName = $"S{effectiveSeasonNumber:00}E{episodeNumber:00}";
+        File.WriteAllText(
+            Path.Combine(seasonDir, fileBaseName + ".strm"),
+            $"https://jellyfin.test/YummyKodik/stream?ep={episodeNumber}&allohaRequestToken=secret-request-{episodeNumber}" + Environment.NewLine);
+        File.WriteAllText(
+            Path.Combine(seasonDir, fileBaseName + ".nfo"),
+            NfoBuilder.BuildEpisodeNfo(episodeNumber, effectiveSeasonNumber, "Frieren", "Plot"));
+
+        expectedEpisodeFileBaseNames[episodeNumber] = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            fileBaseName
+        };
+    }
+
+    var input = BuildRefreshStateSeasonInput(
+        seasonNumber,
+        expectedAvailableEpisodes,
+        createStrmPerVoiceTranslation,
+        fingerprint ?? RefreshStateManager.BuildFingerprint(BuildRefreshStateFingerprintInput(seasonNumber: seasonNumber)));
+
+    return (seriesRoot, input, expectedEpisodeFileBaseNames);
+}
+
+static RefreshStateSeasonInput BuildRefreshStateSeasonInput(
+    int seasonNumber = 1,
+    int expectedAvailableEpisodes = 1,
+    bool createStrmPerVoiceTranslation = false,
+    string? fingerprint = null)
+{
+    return new RefreshStateSeasonInput
+    {
+        SeasonKey = RefreshStateManager.BuildSeasonKey(seasonNumber),
+        SeasonNumber = seasonNumber,
+        CleanKey = "frieren",
+        CreateStrmPerVoiceTranslation = createStrmPerVoiceTranslation,
+        Fingerprint = fingerprint ?? RefreshStateManager.BuildFingerprint(BuildRefreshStateFingerprintInput(seasonNumber: seasonNumber)),
+        ExpectedAvailableEpisodes = expectedAvailableEpisodes
+    };
+}
+
+static RefreshStateFingerprintInput BuildRefreshStateFingerprintInput(
+    string mode = "single-file",
+    string serverBaseUrl = "https://jellyfin.test",
+    string preferredTranslationFilter = "anilibria",
+    string seriesTitle = "Frieren",
+    int seasonNumber = 1,
+    int expectedAvailableEpisodes = 1,
+    IReadOnlyList<string>? providerCoverage = null)
+{
+    return new RefreshStateFingerprintInput
+    {
+        Mode = mode,
+        ServerBaseUrl = serverBaseUrl,
+        PreferredTranslationFilter = preferredTranslationFilter,
+        CleanKey = "frieren",
+        RawTitle = seasonNumber == 1 ? "Frieren" : "Frieren 2",
+        SeriesTitle = seriesTitle,
+        SeasonKey = RefreshStateManager.BuildSeasonKey(seasonNumber),
+        SeasonNumber = seasonNumber,
+        AnimeId = 52991,
+        AnimeUrl = "frieren",
+        ShikimoriId = 52991,
+        KinopoiskId = 123456,
+        ImdbId = "tt1234567",
+        ExpectedAvailableEpisodes = expectedAvailableEpisodes,
+        KnownSupportedEpisodes = Enumerable.Range(1, expectedAvailableEpisodes).ToArray(),
+        AllohaSupportedEpisodes = Enumerable.Range(1, expectedAvailableEpisodes).ToArray(),
+        CvhSupportedEpisodes = Array.Empty<int>(),
+        YummySupportedEpisodes = Enumerable.Range(1, expectedAvailableEpisodes).ToArray(),
+        ProviderCoverage = providerCoverage ?? new[] { "ep:1:preferred:Alloha" },
+        AllohaApiBaseUrl = "https://api.alloha.test",
+        AllohaApiTokenHash = RefreshStateManager.HashSecret("alloha-api-token")
+    };
+}
+
+static Task InvokeRefreshTaskStaticTask(string methodName, params object?[] args)
+{
+    var method = typeof(RefreshYummyKodikLibraryTask).GetMethod(methodName, BindingFlags.Static | BindingFlags.NonPublic);
+    AssertTrue(method is not null, methodName + " should exist.");
+    return (Task)method!.Invoke(null, args)!;
+}
+
+static Task<T> InvokeRefreshTaskStaticTaskResult<T>(string methodName, params object?[] args)
+{
+    var method = typeof(RefreshYummyKodikLibraryTask).GetMethod(methodName, BindingFlags.Static | BindingFlags.NonPublic);
+    AssertTrue(method is not null, methodName + " should exist.");
+    return (Task<T>)method!.Invoke(null, args)!;
+}
+
+static void UpdateMax(ref int target, int value)
+{
+    while (true)
+    {
+        var current = Volatile.Read(ref target);
+        if (value <= current)
+        {
+            return;
+        }
+
+        if (Interlocked.CompareExchange(ref target, value, current) == current)
+        {
+            return;
+        }
+    }
+}
+
 static void AssertEqual<T>(T expected, T actual, string message)
 {
     if (!EqualityComparer<T>.Default.Equals(expected, actual))
@@ -4004,6 +4636,46 @@ sealed class DelegatingTestHandler : HttpMessageHandler
     }
 }
 
+sealed class AsyncDelegatingTestHandler : HttpMessageHandler
+{
+    private readonly Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> _handler;
+
+    public AsyncDelegatingTestHandler(Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> handler)
+    {
+        _handler = handler;
+    }
+
+    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        return _handler(request, cancellationToken);
+    }
+}
+
+sealed class RecordingProgress : IProgress<double>
+{
+    private readonly object _gate = new();
+    private readonly List<double> _values = new();
+
+    public IReadOnlyList<double> Values
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _values.ToArray();
+            }
+        }
+    }
+
+    public void Report(double value)
+    {
+        lock (_gate)
+        {
+            _values.Add(value);
+        }
+    }
+}
+
 sealed class RecordingPassThroughHandler : DelegatingHandler
 {
     private readonly Action<string> _log;
@@ -4047,4 +4719,18 @@ sealed class RecordingPassThroughHandler : DelegatingHandler
             ? string.Join(", ", values)
             : string.Empty;
     }
+}
+
+static class TestData
+{
+    internal static readonly int[] EpisodeOne = { 1 };
+    internal static readonly int[] EpisodesOneTwo = { 1, 2 };
+    internal static readonly int[] UnorderedEpisodesWithDuplicate = { 3, 1, 2, 2 };
+
+    internal static readonly string[] KodikSupplementTranslationNames =
+    {
+        "Dream Cast",
+        "AnimeVost",
+        "AniLibria"
+    };
 }

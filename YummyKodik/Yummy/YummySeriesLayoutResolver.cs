@@ -11,13 +11,16 @@ namespace YummyKodik.Yummy
     /// </summary>
     public static class YummySeriesLayoutResolver
     {
+        private static readonly TimeSpan RegexMatchTimeout = TimeSpan.FromSeconds(1);
         private static readonly Regex SeasonWithPartSuffixRegex = new(
             @"^(?<title>.+?)\s(?<season>\d+)\s*[\.\-|:]*\s*(?:part|часть)\s*(?<part>\d+)$",
-            RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
+            RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.IgnoreCase,
+            RegexMatchTimeout);
 
         private static readonly Regex TrailingSeasonSuffixRegex = new(
             @"^(?<title>.+?)\s(?<season>\d+)$",
-            RegexOptions.Compiled | RegexOptions.CultureInvariant);
+            RegexOptions.Compiled | RegexOptions.CultureInvariant,
+            RegexMatchTimeout);
 
         public static int ResolveSeasonNumber(
             YummyAnimeResponse? anime,

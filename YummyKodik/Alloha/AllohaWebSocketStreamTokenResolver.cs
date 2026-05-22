@@ -163,7 +163,7 @@ internal sealed class AllohaWebSocketStreamTokenResolver
                 return null;
             }
 
-            ms.Write(buffer, 0, result.Count);
+            await ms.WriteAsync(buffer.AsMemory(0, result.Count), cancellationToken).ConfigureAwait(false);
             if (result.EndOfMessage)
             {
                 return Encoding.UTF8.GetString(ms.ToArray());

@@ -12,6 +12,8 @@ namespace YummyKodik.Kodik;
 
 public static class KodikTokenResolver
 {
+    private static readonly TimeSpan RegexMatchTimeout = TimeSpan.FromSeconds(1);
+
     public const string OnlineModUrl =
         "https://raw.githubusercontent.com/nb557/plugins/refs/heads/main/online_mod.js";
 
@@ -22,15 +24,12 @@ public static class KodikTokenResolver
         HttpClient httpClient,
         CancellationToken cancellationToken = default)
     {
-        if (httpClient == null)
-        {
-            throw new ArgumentNullException(nameof(httpClient));
-        }
+        ArgumentNullException.ThrowIfNull(httpClient);
 
         try
         {
             var payload = await GetSecretPayloadAsync(httpClient, cancellationToken).ConfigureAwait(false);
-            var token = DecodeSecret(payload.Numbers, payload.Password);
+            var token = DecodeSecret(payload.Numbers, payload.DecodeKey);
             if (!string.IsNullOrWhiteSpace(token))
             {
                 return token.Trim();
@@ -47,11 +46,12 @@ public static class KodikTokenResolver
             throw new KodikTokenException($"Failed to download fallback Kodik script. HTTP {(int)scriptResponse.StatusCode}.");
         }
 
-        var scriptBody = await scriptResponse.Content.ReadAsStringAsync().ConfigureAwait(false);
+        var scriptBody = await scriptResponse.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
         var match = Regex.Match(
             scriptBody,
             @"token=(?<t>[^&""'\s]+)",
-            RegexOptions.CultureInvariant);
+            RegexOptions.CultureInvariant,
+            RegexMatchTimeout);
 
         if (!match.Success)
         {
@@ -69,14 +69,14 @@ public static class KodikTokenResolver
 
     private sealed class SecretPayload
     {
-        public SecretPayload(int[] numbers, string password)
+        public SecretPayload(int[] numbers, string decodeKey)
         {
             Numbers = numbers;
-            Password = password;
+            DecodeKey = decodeKey;
         }
 
         public int[] Numbers { get; }
-        public string Password { get; }
+        public string DecodeKey { get; }
     }
 
     private static async Task<SecretPayload> GetSecretPayloadAsync(
@@ -89,7 +89,7 @@ public static class KodikTokenResolver
             throw new KodikTokenException($"Failed to download online_mod.js. HTTP {(int)response.StatusCode}.");
         }
 
-        var body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+        var body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
         if (string.IsNullOrWhiteSpace(body))
         {
             throw new KodikTokenException("online_mod.js is empty.");
@@ -121,15 +121,17 @@ public static class KodikTokenResolver
         payload = null!;
 
         var regex = new Regex(
-            @"(?:(?:var|let|const)\s+token\s*=|token\s*=)\s*(?:Utils\.)?decodeSecret\(\s*\[(?<list>[0-9,\s]+)\]\s*(?:,\s*(?<pwd>atob\('(?<b64>[^']+)'\)|""(?<plain1>[^""]+)""|'(?<plain2>[^']+)'))?\s*\)",
-            RegexOptions.Singleline | RegexOptions.CultureInvariant);
+            @"(?:(?:var|let|const)\s+token\s*=|token\s*=)\s*(?:Utils\.)?decodeSecret\(\s*\[(?<list>[0-9,\s]+)\]\s*(?:,\s*(?:atob\('(?<b64>[^']+)'\)|""(?<plain1>[^""]+)""|'(?<plain2>[^']+)'))?\s*\)",
+            RegexOptions.Singleline | RegexOptions.CultureInvariant,
+            RegexMatchTimeout);
 
         var match = regex.Match(text);
         if (!match.Success)
         {
             regex = new Regex(
-                @"(?:Utils\.)?decodeSecret\(\s*\[(?<list>[0-9,\s]+)\]\s*(?:,\s*(?<pwd>atob\('(?<b64>[^']+)'\)|""(?<plain1>[^""]+)""|'(?<plain2>[^']+)'))?\s*\)",
-                RegexOptions.Singleline | RegexOptions.CultureInvariant);
+                @"(?:Utils\.)?decodeSecret\(\s*\[(?<list>[0-9,\s]+)\]\s*(?:,\s*(?:atob\('(?<b64>[^']+)'\)|""(?<plain1>[^""]+)""|'(?<plain2>[^']+)'))?\s*\)",
+                RegexOptions.Singleline | RegexOptions.CultureInvariant,
+                RegexMatchTimeout);
 
             match = regex.Match(text);
             if (!match.Success)
@@ -139,7 +141,7 @@ public static class KodikTokenResolver
         }
 
         var listStr = match.Groups["list"].Value;
-        var numbers = Regex.Matches(listStr, @"\d+")
+        var numbers = Regex.Matches(listStr, @"\d+", RegexOptions.CultureInvariant, RegexMatchTimeout)
             .Cast<Match>()
             .Select(x => int.Parse(x.Value, CultureInfo.InvariantCulture))
             .ToArray();
@@ -149,14 +151,14 @@ public static class KodikTokenResolver
             return false;
         }
 
-        var password = "kodik";
+        var decodeKey = "kodik";
         var b64 = match.Groups["b64"]?.Value;
         if (!string.IsNullOrWhiteSpace(b64))
         {
             var decoded = DecodeAtob(b64);
             if (!string.IsNullOrWhiteSpace(decoded))
             {
-                password = decoded;
+                decodeKey = decoded;
             }
         }
         else
@@ -166,11 +168,11 @@ public static class KodikTokenResolver
             var plain = !string.IsNullOrWhiteSpace(plain1) ? plain1 : plain2;
             if (!string.IsNullOrWhiteSpace(plain))
             {
-                password = plain.Trim();
+                decodeKey = plain.Trim();
             }
         }
 
-        payload = new SecretPayload(numbers, password);
+        payload = new SecretPayload(numbers, decodeKey);
         return true;
     }
 
@@ -199,29 +201,29 @@ public static class KodikTokenResolver
         }
     }
 
-    private static string DecodeSecret(IReadOnlyList<int> numbers, string password)
+    private static string DecodeSecret(int[] numbers, string decodeKey)
     {
-        if (numbers == null || numbers.Count == 0)
+        if (numbers == null || numbers.Length == 0)
         {
             return string.Empty;
         }
 
-        password ??= string.Empty;
-        if (password.Length == 0)
+        decodeKey ??= string.Empty;
+        if (decodeKey.Length == 0)
         {
             return string.Empty;
         }
 
-        var hash = Salt("123456789" + password);
+        var hash = Salt("123456789" + decodeKey);
         var hashBuilder = new StringBuilder(hash);
-        while (hashBuilder.Length < numbers.Count)
+        while (hashBuilder.Length < numbers.Length)
         {
             hashBuilder.Append(hash);
         }
 
         var expandedHash = hashBuilder.ToString();
-        var result = new StringBuilder(numbers.Count);
-        for (var i = 0; i < numbers.Count; i++)
+        var result = new StringBuilder(numbers.Length);
+        for (var i = 0; i < numbers.Length; i++)
         {
             result.Append((char)(numbers[i] ^ expandedHash[i]));
         }
