@@ -5,6 +5,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using YummyKodik.Logging;
 
 namespace YummyKodik.Web;
 
@@ -15,7 +16,7 @@ public sealed class JellyfinWebSeriesTranslationBootstrapHostedService : IHosted
     public JellyfinWebSeriesTranslationBootstrapHostedService(
         ILogger<JellyfinWebSeriesTranslationBootstrapHostedService> logger)
     {
-        _logger = logger;
+        _logger = new YummyKodikLogger<JellyfinWebSeriesTranslationBootstrapHostedService>(logger);
     }
 
     public Task StartAsync(CancellationToken cancellationToken)

@@ -16,6 +16,7 @@ using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.IO;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using YummyKodik.Logging;
 
 namespace YummyKodik.Versioning;
 
@@ -62,7 +63,7 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
     {
         _libraryManager = libraryManager;
         _fileSystem = fileSystem;
-        _logger = logger;
+        _logger = new YummyKodikLogger<YummyKodikEpisodeVersionsMergeHostedService>(logger);
     }
 
     public Task StartAsync(CancellationToken cancellationToken)

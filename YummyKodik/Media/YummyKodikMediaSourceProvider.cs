@@ -16,6 +16,7 @@ using MediaBrowser.Model.MediaInfo;
 using Microsoft.Extensions.Logging;
 using YummyKodik.Configuration;
 using YummyKodik.Kodik;
+using YummyKodik.Logging;
 using YummyKodik.Util;
 using YummyKodik.Yummy;
 
@@ -39,7 +40,7 @@ public sealed class YummyKodikMediaSourceProvider : IMediaSourceProvider
         ILogger<YummyKodikMediaSourceProvider> logger,
         IHttpClientFactory httpClientFactory)
     {
-        _logger = logger;
+        _logger = new YummyKodikLogger<YummyKodikMediaSourceProvider>(logger);
         _httpClientFactory = httpClientFactory;
     }
 

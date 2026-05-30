@@ -3,11 +3,13 @@ using System.Net.Http;
 using System.Reflection;
 using System.Text;
 using System.Text.Json;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using YummyKodik.Cvh;
 using YummyKodik.Alloha;
 using YummyKodik.Configuration;
 using YummyKodik.Kodik;
+using YummyKodik.Logging;
 using YummyKodik.Shikimori;
 using YummyKodik.Tasks;
 using YummyKodik.Util;
@@ -107,6 +109,7 @@ var tests = new (string Name, Action Run)[]
     ("ResolveEpisodeTranslationFileBaseName_ReusesExistingEquivalentArtifactName", ResolveEpisodeTranslationFileBaseName_ReusesExistingEquivalentArtifactName),
     ("KeepLatestEpisodePerResolvedLink_DropsEarlierEpisodesWhenKodikReusesSameVideo", KeepLatestEpisodePerResolvedLink_DropsEarlierEpisodesWhenKodikReusesSameVideo),
     ("CleanupUnexpectedEpisodeArtifacts_RemovesStaleFilesBeyondExpectedCoverage", CleanupUnexpectedEpisodeArtifacts_RemovesStaleFilesBeyondExpectedCoverage),
+    ("RefreshFileWriter_ReplacesReadOnlyExistingArtifact", RefreshFileWriter_ReplacesReadOnlyExistingArtifact),
     ("RefreshState_AllowsSingleFileSkipWhenFingerprintAndFilesMatch", RefreshState_AllowsSingleFileSkipWhenFingerprintAndFilesMatch),
     ("RefreshState_InvalidatesSkipWhenInputsChange", RefreshState_InvalidatesSkipWhenInputsChange),
     ("RefreshState_ExtraEpisodeArtifactsDisableSkip", RefreshState_ExtraEpisodeArtifactsDisableSkip),
@@ -140,6 +143,10 @@ var tests = new (string Name, Action Run)[]
     ("YummyKodikStreamUri_ParsesAllohaRequest", YummyKodikStreamUri_ParsesAllohaRequest),
     ("YummyKodikStreamUri_BuildsAllohaRequestWithEmbeddedSource", YummyKodikStreamUri_BuildsAllohaRequestWithEmbeddedSource),
     ("YummyKodikStreamUri_TrimsTrailingSlashFromProviderBaseUrl", YummyKodikStreamUri_TrimsTrailingSlashFromProviderBaseUrl),
+    ("YummyKodikLogFilter_DefaultsToWarning", YummyKodikLogFilter_DefaultsToWarning),
+    ("YummyKodikLogFilter_UsesConfiguredMinimumLevel", YummyKodikLogFilter_UsesConfiguredMinimumLevel),
+    ("YummyKodikLogFilter_CategoryRuleSuppressesPluginInformationLogs", YummyKodikLogFilter_CategoryRuleSuppressesPluginInformationLogs),
+    ("YummyKodikLogger_SuppressesInformationBeforeInnerLogger", YummyKodikLogger_SuppressesInformationBeforeInnerLogger),
     ("JellyfinWebIndexPatcher_InsertsManagedBootstrapBeforeHeadClose", JellyfinWebIndexPatcher_InsertsManagedBootstrapBeforeHeadClose),
     ("JellyfinWebIndexPatcher_ReplacesExistingManagedBootstrap", JellyfinWebIndexPatcher_ReplacesExistingManagedBootstrap),
     ("JellyfinWebIndexPatcher_DoesNotDuplicateBootstrap", JellyfinWebIndexPatcher_DoesNotDuplicateBootstrap)
@@ -2606,6 +2613,39 @@ static void CleanupUnexpectedEpisodeArtifacts_RemovesStaleFilesBeyondExpectedCov
     }
 }
 
+static void RefreshFileWriter_ReplacesReadOnlyExistingArtifact()
+{
+    var tempRoot = Path.Combine(Path.GetTempPath(), "YummyKodikTests", Guid.NewGuid().ToString("N"));
+    var seasonDir = Path.Combine(tempRoot, "Season 01");
+    var strmPath = Path.Combine(seasonDir, "S01E01.strm");
+
+    try
+    {
+        Directory.CreateDirectory(seasonDir);
+        File.WriteAllText(strmPath, "old" + Environment.NewLine);
+        File.SetAttributes(strmPath, File.GetAttributes(strmPath) | FileAttributes.ReadOnly);
+
+        InvokeRefreshFileWriterWriteTextAtomically(strmPath, "new" + Environment.NewLine);
+
+        AssertEqual("new" + Environment.NewLine, File.ReadAllText(strmPath), "Read-only generated artifacts should still be atomically replaced.");
+        AssertTrue(
+            (File.GetAttributes(strmPath) & FileAttributes.ReadOnly) != 0,
+            "Replacing a read-only artifact should restore the original read-only attribute.");
+        AssertFalse(
+            Directory.EnumerateFiles(seasonDir, "*.tmp.*", SearchOption.TopDirectoryOnly).Any(),
+            "Atomic replacement should not leave temp files behind.");
+    }
+    finally
+    {
+        if (File.Exists(strmPath))
+        {
+            File.SetAttributes(strmPath, FileAttributes.Normal);
+        }
+
+        TryDeleteDirectory(tempRoot);
+    }
+}
+
 static void RefreshState_AllowsSingleFileSkipWhenFingerprintAndFilesMatch()
 {
     var tempRoot = Path.Combine(Path.GetTempPath(), "YummyKodikTests", Guid.NewGuid().ToString("N"));
@@ -4210,6 +4250,129 @@ static void YummyKodikStreamUri_TrimsTrailingSlashFromProviderBaseUrl()
     AssertFalse(alloha.Contains("8099//YummyKodik", StringComparison.Ordinal), "Alloha url should trim a trailing base-url slash.");
 }
 
+static void YummyKodikLogFilter_DefaultsToWarning()
+{
+    var defaultCfg = new PluginConfiguration();
+    AssertFalse(YummyKodikLogFilter.ShouldLog(LogLevel.Information, defaultCfg), "Default plugin logging should suppress informational logs.");
+    AssertTrue(YummyKodikLogFilter.ShouldLog(LogLevel.Warning, defaultCfg), "Default plugin logging should keep warnings.");
+    AssertTrue(YummyKodikLogFilter.ShouldLog(LogLevel.Error, defaultCfg), "Default plugin logging should keep errors.");
+
+    var blankCfg = new PluginConfiguration
+    {
+        MinimumLogLevel = string.Empty
+    };
+    AssertFalse(YummyKodikLogFilter.ShouldLog(LogLevel.Information, blankCfg), "Blank log level should fall back to Warning.");
+
+    AssertTrue(
+        YummyKodikLogFilter.ShouldLog("provider", "Microsoft.Hosting", LogLevel.Information),
+        "Non-YummyKodik categories should pass through the plugin filter.");
+}
+
+static void YummyKodikLogFilter_UsesConfiguredMinimumLevel()
+{
+    var cfg = new PluginConfiguration
+    {
+        MinimumLogLevel = "Information"
+    };
+    AssertTrue(YummyKodikLogFilter.ShouldLog(LogLevel.Information, cfg), "Information level should allow informational diagnostics.");
+    AssertFalse(YummyKodikLogFilter.ShouldLog(LogLevel.Debug, cfg), "Information level should still suppress Debug logs.");
+
+    cfg.MinimumLogLevel = "debug";
+    AssertTrue(YummyKodikLogFilter.ShouldLog(LogLevel.Debug, cfg), "Configured log level parsing should be case-insensitive.");
+    AssertFalse(YummyKodikLogFilter.ShouldLog(LogLevel.Trace, cfg), "Debug level should suppress Trace logs.");
+
+    cfg.MinimumLogLevel = "Error";
+    AssertFalse(YummyKodikLogFilter.ShouldLog(LogLevel.Warning, cfg), "Error level should suppress warnings.");
+    AssertTrue(YummyKodikLogFilter.ShouldLog(LogLevel.Error, cfg), "Error level should keep errors.");
+    AssertTrue(YummyKodikLogFilter.ShouldLog(LogLevel.Critical, cfg), "Error level should keep critical logs.");
+
+    cfg.MinimumLogLevel = "None";
+    AssertFalse(YummyKodikLogFilter.ShouldLog(LogLevel.Critical, cfg), "None should suppress all plugin logs.");
+
+    cfg.MinimumLogLevel = "unexpected";
+    AssertFalse(YummyKodikLogFilter.ShouldLog(LogLevel.Information, cfg), "Unknown log level should fall back to Warning.");
+    AssertTrue(YummyKodikLogFilter.ShouldLog(LogLevel.Warning, cfg), "Unknown log level fallback should keep warnings.");
+
+    cfg.MinimumLogLevel = "Information";
+    YummyKodikLogFilter.ConfigurationProvider = () => cfg;
+    try
+    {
+        AssertTrue(
+            YummyKodikLogFilter.ShouldLog("provider", "YummyKodik.Tasks.Refresh.RefreshTitleService", LogLevel.Information),
+            "YummyKodik category filtering should use the current plugin configuration provider.");
+        AssertFalse(
+            YummyKodikLogFilter.ShouldLog("provider", "YummyKodik.Tasks.Refresh.RefreshTitleService", LogLevel.Debug),
+            "YummyKodik category filtering should suppress logs below the configured provider level.");
+    }
+    finally
+    {
+        YummyKodikLogFilter.ConfigurationProvider = static () => null;
+    }
+}
+
+static void YummyKodikLogFilter_CategoryRuleSuppressesPluginInformationLogs()
+{
+    var cfg = new PluginConfiguration();
+    YummyKodikLogFilter.ConfigurationProvider = () => cfg;
+    var provider = new CaptureLoggerProvider();
+
+    try
+    {
+        using var factory = LoggerFactory.Create(builder =>
+        {
+            builder.SetMinimumLevel(LogLevel.Trace);
+            builder.AddProvider(provider);
+            builder.AddFilter("YummyKodik", YummyKodikLogFilter.ShouldLogPluginCategory);
+        });
+
+        var pluginLogger = factory.CreateLogger("YummyKodik.Plugin");
+        pluginLogger.LogInformation("suppressed");
+        pluginLogger.LogWarning("kept");
+
+        var otherLogger = factory.CreateLogger("Microsoft.Hosting");
+        otherLogger.LogInformation("other");
+
+        AssertFalse(provider.Events.Any(x => x.Category == "YummyKodik.Plugin" && x.Level == LogLevel.Information), "Category rule should suppress YummyKodik information logs.");
+        AssertTrue(provider.Events.Any(x => x.Category == "YummyKodik.Plugin" && x.Level == LogLevel.Warning), "Category rule should keep YummyKodik warnings.");
+        AssertTrue(provider.Events.Any(x => x.Category == "Microsoft.Hosting" && x.Level == LogLevel.Information), "Category rule should not suppress other categories.");
+    }
+    finally
+    {
+        YummyKodikLogFilter.ConfigurationProvider = static () => null;
+    }
+}
+
+static void YummyKodikLogger_SuppressesInformationBeforeInnerLogger()
+{
+    var cfg = new PluginConfiguration();
+    YummyKodikLogFilter.ConfigurationProvider = () => cfg;
+    var provider = new CaptureLoggerProvider();
+
+    try
+    {
+        using var factory = LoggerFactory.Create(builder =>
+        {
+            builder.SetMinimumLevel(LogLevel.Trace);
+            builder.AddProvider(provider);
+        });
+
+        var wrapped = new YummyKodikLogger(factory.CreateLogger("YummyKodik.Plugin"), "YummyKodik.Plugin");
+        wrapped.LogInformation("suppressed");
+        wrapped.LogWarning("kept");
+
+        AssertFalse(provider.Events.Any(x => x.Category == "YummyKodik.Plugin" && x.Level == LogLevel.Information), "Wrapped plugin logger should suppress Information before it reaches Jellyfin.");
+        AssertTrue(provider.Events.Any(x => x.Category == "YummyKodik.Plugin" && x.Level == LogLevel.Warning), "Wrapped plugin logger should keep Warning logs.");
+
+        cfg.MinimumLogLevel = "Information";
+        wrapped.LogInformation("enabled");
+        AssertTrue(provider.Events.Any(x => x.Category == "YummyKodik.Plugin" && x.Level == LogLevel.Information), "Lowering the plugin level to Information should re-enable informational logs.");
+    }
+    finally
+    {
+        YummyKodikLogFilter.ConfigurationProvider = static () => null;
+    }
+}
+
 static void JellyfinWebIndexPatcher_InsertsManagedBootstrapBeforeHeadClose()
 {
     const string html = "<!doctype html>\r\n<html><head><title>Test</title></head><body></body></html>";
@@ -4526,6 +4689,18 @@ static Task<T> InvokeRefreshTaskStaticTaskResult<T>(string methodName, params ob
     return (Task<T>)method!.Invoke(null, args)!;
 }
 
+static void InvokeRefreshFileWriterWriteTextAtomically(string path, string content)
+{
+    var writerType = typeof(RefreshStateManager).Assembly.GetType("YummyKodik.Tasks.Refresh.RefreshFileWriter");
+    AssertTrue(writerType is not null, "RefreshFileWriter should exist for atomic writer regression coverage.");
+
+    var method = writerType!.GetMethod("WriteTextAtomicallyAsync", BindingFlags.Static | BindingFlags.Public);
+    AssertTrue(method is not null, "WriteTextAtomicallyAsync should be reachable for atomic writer regression coverage.");
+
+    var task = (Task)method!.Invoke(null, new object?[] { path, content, null, "strm", CancellationToken.None })!;
+    task.GetAwaiter().GetResult();
+}
+
 static void UpdateMax(ref int target, int value)
 {
     while (true)
@@ -4650,6 +4825,88 @@ sealed class AsyncDelegatingTestHandler : HttpMessageHandler
         return _handler(request, cancellationToken);
     }
 }
+
+sealed class CaptureLoggerProvider : ILoggerProvider
+{
+    private readonly object _gate = new();
+    private readonly List<LogEvent> _events = new();
+
+    public IReadOnlyList<LogEvent> Events
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _events.ToArray();
+            }
+        }
+    }
+
+    public ILogger CreateLogger(string categoryName)
+    {
+        return new CaptureLogger(categoryName, Add);
+    }
+
+    public void Dispose()
+    {
+    }
+
+    private void Add(LogEvent logEvent)
+    {
+        lock (_gate)
+        {
+            _events.Add(logEvent);
+        }
+    }
+}
+
+sealed class CaptureLogger : ILogger
+{
+    private readonly string _categoryName;
+    private readonly Action<LogEvent> _add;
+
+    public CaptureLogger(string categoryName, Action<LogEvent> add)
+    {
+        _categoryName = categoryName;
+        _add = add;
+    }
+
+    public IDisposable BeginScope<TState>(TState state)
+        where TState : notnull
+    {
+        return NullScope.Instance;
+    }
+
+    public bool IsEnabled(LogLevel logLevel)
+    {
+        return true;
+    }
+
+    public void Log<TState>(
+        LogLevel logLevel,
+        EventId eventId,
+        TState state,
+        Exception? exception,
+        Func<TState, Exception?, string> formatter)
+    {
+        _add(new LogEvent(_categoryName, logLevel, formatter(state, exception)));
+    }
+}
+
+sealed class NullScope : IDisposable
+{
+    public static readonly NullScope Instance = new();
+
+    private NullScope()
+    {
+    }
+
+    public void Dispose()
+    {
+    }
+}
+
+sealed record LogEvent(string Category, LogLevel Level, string Message);
 
 sealed class RecordingProgress : IProgress<double>
 {

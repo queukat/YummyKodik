@@ -8,6 +8,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using Microsoft.Extensions.Logging;
+using YummyKodik.Logging;
 using YummyKodik.Util;
 using YummyKodik.Yummy;
 
@@ -48,7 +49,7 @@ public sealed class AllohaPlaybackService
     private readonly Func<AllohaStreamTokenRequest, CancellationToken, Task<string?>> _resolveStreamTokenAsync;
 
     public AllohaPlaybackService(ILogger<AllohaPlaybackService> logger)
-        : this(logger, CreateDefaultHttpClient(), CreateDefaultStreamTokenResolver(logger))
+        : this(logger, CreateDefaultHttpClient(), CreateDefaultStreamTokenResolver(new YummyKodikLogger<AllohaPlaybackService>(logger)))
     {
     }
 
@@ -62,7 +63,9 @@ public sealed class AllohaPlaybackService
         HttpClient httpClient,
         Func<AllohaStreamTokenRequest, CancellationToken, Task<string?>> resolveStreamTokenAsync)
     {
-        _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+        ArgumentNullException.ThrowIfNull(logger);
+
+        _logger = new YummyKodikLogger<AllohaPlaybackService>(logger);
         _httpClient = httpClient ?? throw new ArgumentNullException(nameof(httpClient));
         _resolveStreamTokenAsync = resolveStreamTokenAsync ?? throw new ArgumentNullException(nameof(resolveStreamTokenAsync));
     }

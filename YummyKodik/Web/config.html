@@ -110,6 +110,23 @@
                         <input id="preferredQuality" is="emby-input" type="number" min="1" step="1" placeholder="720" />
                     </div>
 
+                    <div class="selectContainer" style="max-width:320px">
+                        <label for="minimumLogLevel">Minimum plugin log level</label>
+                        <select id="minimumLogLevel" is="emby-select">
+                            <option value="Trace">Trace</option>
+                            <option value="Debug">Debug</option>
+                            <option value="Information">Information</option>
+                            <option value="Warning">Warning</option>
+                            <option value="Error">Error</option>
+                            <option value="Critical">Critical</option>
+                            <option value="None">None</option>
+                        </select>
+                        <div class="fieldDescription">
+                            По умолчанию <code>Warning</code>, чтобы скрыть обычные информационные refresh/playback сообщения.
+                            Для диагностики выбери <code>Information</code> или ниже.
+                        </div>
+                    </div>
+
                     <div class="inputContainer">
                         <label>
                             <input id="enableHttpDebugLogging" type="checkbox" />
@@ -227,6 +244,7 @@
                 OutputRootPath: "D:\\video\\YummyKodik",
                 ServerBaseUrl: "",
                 PreferredQuality: 720,
+                MinimumLogLevel: "Warning",
                 RefreshIntervalMinutes: 360,
                 UseUserListSubscription: false,
                 YummyUserId: 219413,
@@ -257,6 +275,7 @@
                     $("preferredTranslationFilter").value = cfg.PreferredTranslationFilter || "";
                     $("createStrmPerVoiceTranslation").checked = !!cfg.CreateStrmPerVoiceTranslation;
                     $("preferredQuality").value = cfg.PreferredQuality || DEFAULTS.PreferredQuality;
+                    $("minimumLogLevel").value = cfg.MinimumLogLevel || DEFAULTS.MinimumLogLevel;
 
                     $("enableHttpDebugLogging").checked = !!cfg.EnableHttpDebugLogging;
                     $("enablePerformanceDebugLogging").checked = !!cfg.EnablePerformanceDebugLogging;
@@ -302,6 +321,7 @@
                     cfg.CreateStrmPerVoiceTranslation = !!$("createStrmPerVoiceTranslation").checked;
 
                     cfg.PreferredQuality = parseInt($("preferredQuality").value, 10) || DEFAULTS.PreferredQuality;
+                    cfg.MinimumLogLevel = $("minimumLogLevel").value || DEFAULTS.MinimumLogLevel;
 
                     cfg.EnableHttpDebugLogging = !!$("enableHttpDebugLogging").checked;
                     cfg.EnablePerformanceDebugLogging = !!$("enablePerformanceDebugLogging").checked;

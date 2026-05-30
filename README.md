@@ -104,7 +104,7 @@ Download `YummyKodik_<version>.zip` from GitHub Releases and extract the files d
 Windows service or tray install:
 
 ```powershell
-$version = "1.1.1.0"
+$version = "1.1.2.0"
 $plugins = "$env:ProgramData\Jellyfin\Server\plugins"
 New-Item -ItemType Directory -Force "$plugins\YummyKodik_$version"
 Expand-Archive ".\YummyKodik_$version.zip" "$plugins\YummyKodik_$version" -Force
@@ -113,7 +113,7 @@ Expand-Archive ".\YummyKodik_$version.zip" "$plugins\YummyKodik_$version" -Force
 Windows portable install:
 
 ```powershell
-$version = "1.1.1.0"
+$version = "1.1.2.0"
 $plugins = "$env:LOCALAPPDATA\jellyfin\plugins"
 New-Item -ItemType Directory -Force "$plugins\YummyKodik_$version"
 Expand-Archive ".\YummyKodik_$version.zip" "$plugins\YummyKodik_$version" -Force
@@ -122,7 +122,7 @@ Expand-Archive ".\YummyKodik_$version.zip" "$plugins\YummyKodik_$version" -Force
 Docker install by copying an already extracted package:
 
 ```powershell
-$version = "1.1.1.0"
+$version = "1.1.2.0"
 docker exec jellyfin mkdir -p /config/plugins/YummyKodik_$version
 docker cp .\artifacts\package\. jellyfin:/config/plugins/YummyKodik_$version/
 docker restart jellyfin
@@ -131,7 +131,7 @@ docker restart jellyfin
 Docker install from a zip inside the container:
 
 ```bash
-version=1.1.1.0
+version=1.1.2.0
 mkdir -p "/config/plugins/YummyKodik_$version"
 unzip "YummyKodik_$version.zip" -d "/config/plugins/YummyKodik_$version"
 ```
@@ -159,6 +159,7 @@ Main settings:
 - `Preferred translation filter`: preferred voice tokens separated by `|`, for example `anilibria|aniliberty|shiza`.
 - `Create separate STRM for each voice translation`: changes library layout from one file per episode to one file per voice.
 - `Preferred quality`: target quality, usually `720` or `1080`; providers may return the nearest available stream.
+- `Minimum plugin log level`: defaults to `Warning`; set to `Information`, `Debug`, or `Trace` only when diagnosing noisy refresh/playback behavior.
 - `Yummy slugs`: one Yummy slug per line for manual mode.
 
 Optional settings:
@@ -278,13 +279,13 @@ dotnet run --project .\YummyKodik.Tests\YummyKodik.Tests.csproj -c Release
 Create a local release ZIP on Windows:
 
 ```powershell
-.\scripts\package.ps1 -Version 1.1.1.0
+.\scripts\package.ps1 -Version 1.1.2.0
 ```
 
 Create a local release ZIP on Linux/macOS:
 
 ```bash
-bash ./scripts/package.sh 1.1.1.0
+bash ./scripts/package.sh 1.1.2.0
 ```
 
 This produces:
@@ -299,15 +300,15 @@ The release workflow runs on version tags and publishes the ZIP, MD5 checksum, G
 Recommended tag format follows the existing release convention:
 
 ```bash
-git tag 1.1.1.0
-git push origin 1.1.1.0
+git tag 1.1.2.0
+git push origin 1.1.2.0
 ```
 
 Tags with a leading `v` also work because the workflow normalizes versions.
 
 ## Docker Smoke Test
 
-The `1.1.1.0` package was smoke-tested against `jellyfin/jellyfin:10.11.0` with a single configured slug:
+The package was smoke-tested against `jellyfin/jellyfin:10.11.0` with a single configured slug:
 
 ```text
 fermerskaya-zhizn-v-inom-mire-2

@@ -7,7 +7,9 @@ using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Plugins;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using YummyKodik.Alloha;
+using YummyKodik.Logging;
 using YummyKodik.Media;
 using YummyKodik.Tasks;
 using YummyKodik.Util;
@@ -20,6 +22,11 @@ public sealed class PluginServiceRegistrator : IPluginServiceRegistrator
 {
     public void RegisterServices(IServiceCollection serviceCollection, IServerApplicationHost applicationHost)
     {
+        serviceCollection.AddLogging(builder =>
+        {
+            builder.AddFilter("YummyKodik", YummyKodikLogFilter.ShouldLogPluginCategory);
+        });
+
         // Named HttpClient for Kodik-related requests (api, player html, token sources).
         serviceCollection
             .AddHttpClient(HttpClientNames.Kodik, client =>

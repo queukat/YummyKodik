@@ -60,6 +60,12 @@ namespace YummyKodik.Configuration
         public int PreferredQuality { get; set; } = 720;
 
         /// <summary>
+        /// Minimum YummyKodik log level. Supported values match Microsoft.Extensions.Logging.LogLevel.
+        /// Defaults to Warning to avoid noisy informational refresh/playback logs.
+        /// </summary>
+        public string MinimumLogLevel { get; set; } = "Warning";
+
+        /// <summary>
         /// Enables verbose HTTP request/response logging for Kodik client.
         /// When enabled, logs include method, URL (sanitized), optional form payload (sanitized),
         /// and response body snippet (may be large/noisy).

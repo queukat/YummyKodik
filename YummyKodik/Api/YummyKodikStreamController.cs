@@ -19,6 +19,7 @@ using YummyKodik.Alloha;
 using YummyKodik.Cvh;
 using YummyKodik.Configuration;
 using YummyKodik.Kodik;
+using YummyKodik.Logging;
 using YummyKodik.Util;
 using YummyKodik.Yummy;
 
@@ -182,7 +183,7 @@ namespace YummyKodik.Api
             ILibraryManager libraryManager,
             AllohaPlaybackService allohaPlaybackService)
         {
-            _logger = logger;
+            _logger = new YummyKodikLogger<YummyKodikStreamController>(logger);
             _httpClientFactory = httpClientFactory;
             _authorizationContext = authorizationContext;
             _libraryManager = libraryManager;

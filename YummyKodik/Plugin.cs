@@ -8,6 +8,7 @@ using MediaBrowser.Model.Plugins;
 using MediaBrowser.Model.Serialization;
 using Microsoft.Extensions.Logging;
 using YummyKodik.Configuration;
+using YummyKodik.Logging;
 
 namespace YummyKodik
 {
@@ -31,7 +32,8 @@ namespace YummyKodik
             : base(applicationPaths, xmlSerializer)
         {
             Instance = this;
-            Logger = logger;
+            YummyKodikLogFilter.ConfigurationProvider = () => Configuration;
+            Logger = new YummyKodikLogger<Plugin>(logger);
             TryEnsureLocalPluginImageManifest();
         }
 

@@ -17,6 +17,7 @@ using Microsoft.Extensions.Logging;
 using YummyKodik.Alloha;
 using YummyKodik.Configuration;
 using YummyKodik.Kodik;
+using YummyKodik.Logging;
 using YummyKodik.Util;
 using YummyKodik.Yummy;
 
@@ -38,7 +39,7 @@ public sealed class YummyKodikMediaSegmentProvider : IMediaSegmentProvider
     {
         _libraryManager = libraryManager;
         _httpClientFactory = httpClientFactory;
-        _logger = logger;
+        _logger = new YummyKodikLogger<YummyKodikMediaSegmentProvider>(logger);
     }
 
     public string Name => "YummyKodik skip timings";
