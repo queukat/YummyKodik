@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using YummyKodik.Util;
 
 namespace YummyKodik.Kodik;
 
@@ -140,18 +141,38 @@ internal static class KodikPlaybackSelector
         }
 
         var translation = FindById(translations, translationId);
-        if (translation == null)
+        if (translation != null)
+        {
+            if (!CoversEpisode(translation, episode))
+            {
+                reasonPrefix += "saved-beyond-max+";
+                return false;
+            }
+
+            selection = (translationId, true, reasonPrefix + "saved");
+            return true;
+        }
+
+        var savedVoiceNameKey = TranslationNameKeyNormalizer.Normalize(savedTranslationId);
+        if (savedVoiceNameKey.Length == 0)
         {
             return false;
         }
 
-        if (!CoversEpisode(translation, episode))
+        var savedVoiceMatch = translations.FirstOrDefault(t =>
+            !string.IsNullOrWhiteSpace(t.Id) &&
+            CoversEpisode(t, episode) &&
+            string.Equals(
+                TranslationNameKeyNormalizer.Normalize(t.Name),
+                savedVoiceNameKey,
+                StringComparison.Ordinal));
+        var savedVoiceTranslationId = NormalizeTranslationId(savedVoiceMatch?.Id);
+        if (savedVoiceTranslationId.Length == 0)
         {
-            reasonPrefix += "saved-beyond-max+";
             return false;
         }
 
-        selection = (translationId, true, reasonPrefix + "saved");
+        selection = (savedVoiceTranslationId, true, reasonPrefix + "saved-name");
         return true;
     }
 

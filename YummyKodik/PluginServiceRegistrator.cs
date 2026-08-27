@@ -124,15 +124,22 @@ public sealed class PluginServiceRegistrator : IPluginServiceRegistrator
                     DecompressionMethods.Brotli
             });
 
+        serviceCollection.AddSingleton<IInternalJellyfinUrlProvider>(_ => new InternalJellyfinUrlProvider(applicationHost));
         serviceCollection.AddSingleton<IMediaSourceProvider, YummyKodikMediaSourceProvider>();
         serviceCollection.AddSingleton<MediaBrowser.Controller.MediaSegments.IMediaSegmentProvider, YummyKodikMediaSegmentProvider>();
-        serviceCollection.AddSingleton<MediaBrowser.Model.Tasks.IScheduledTask, RefreshYummyKodikLibraryTask>();
         serviceCollection.AddSingleton<AllohaPlaybackService>();
 
         // Inject the series translation widget into Jellyfin Web once on startup.
         serviceCollection.AddHostedService<JellyfinWebSeriesTranslationBootstrapHostedService>();
 
         // Auto-merge STRM "versions" for duplicate episodes (translations) based on library events.
-        serviceCollection.AddHostedService<YummyKodikEpisodeVersionsMergeHostedService>();
+        serviceCollection.AddSingleton<YummyKodikEpisodeVersionsMergeHostedService>();
+        serviceCollection.AddSingleton<IHostedService>(sp => sp.GetRequiredService<YummyKodikEpisodeVersionsMergeHostedService>());
+        serviceCollection.AddSingleton<YummyKodikPostRefreshMergeBarrier>();
+        serviceCollection.AddSingleton<MediaBrowser.Model.Tasks.IScheduledTask, RefreshYummyKodikLibraryTask>();
+
+        // Warm Jellyfin media segments for newly scanned YummyKodik STRM episodes instead of
+        // waiting for the next global "Detect and Analyze Media Segments" scheduled task.
+        serviceCollection.AddHostedService<YummyKodikMediaSegmentWarmupHostedService>();
     }
 }

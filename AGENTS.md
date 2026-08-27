@@ -9,7 +9,7 @@ YummyKodik is a Jellyfin plugin targeting .NET 9 and Jellyfin 10.11. It generate
 - Plugin project: `C:\Users\User\RiderProjects\YummyKodik\YummyKodik\YummyKodik.csproj`
 - Regression test project: `C:\Users\User\RiderProjects\YummyKodik\YummyKodik.Tests\YummyKodik.Tests.csproj`
 - Jellyfin Windows service name: `Jellyfin`
-- Local Jellyfin plugin test folder: `C:\ProgramData\Jellyfin\Server\plugins\YummyKodik_1.0.0.0`
+- Local Jellyfin plugin test folder: `C:\ProgramData\Jellyfin\Server\plugins\YummyKodik_1.1.2.0`
 - Preferred local publish staging folder: `C:\Users\User\RiderProjects\YummyKodik\publish\YummyKodik_1.0.0.0`
 - Do not create or keep deployment backup files (`*.bak-*`, backup zip copies, or backup build folders). If rollback is needed, rebuild or use git.
 
@@ -19,13 +19,25 @@ By default, when an agent investigates or uses important project/runtime paths, 
 - `AGENTS.md`, `docs\YUMMYKODIK_CONTEXT.md`, `docs\GLOSSARY.md`: required agent context before coding.
 - `YummyKodik\Tasks\RefreshYummyKodikLibraryTask.cs`: scheduled task orchestrator.
 - `YummyKodik\Tasks\Refresh\`: extracted refresh services and models.
-- `YummyKodik\Tasks\RefreshStateManager.cs`: refresh state schema and safe-skip checks.
+- `YummyKodik\Tasks\Refresh\RefreshPerformanceMetrics.cs`, `YummyKodik\Tasks\Refresh\RefreshRunMetrics.cs`: opt-in per-title and run-level refresh summaries, including phase durations, skip reasons, Kodik HTTP/cache counts, and file proof/change counts.
+- `YummyKodik\Tasks\RefreshStateManager.cs`, `YummyKodik\Tasks\Refresh\RefreshStateService.cs`: refresh state schema, quality-aware fingerprints, and layered safe skip; per-voice runs normally fetch current Kodik metadata, while a preferred quality above Kodik's known 720p ceiling may skip that lookup for up to 24 hours when prior validation and managed files remain proven.
+- `YummyKodik\Tasks\Refresh\StaleReleaseCleanupService.cs`: opt-in, state-proven cleanup for releases removed from a successfully fetched Yummy user list; manual slugs and unproven filesystem content must be retained.
 - `YummyKodik\Logging\YummyKodikLogFilter.cs`, `YummyKodik\Logging\YummyKodikLogger.cs`: plugin log-level gate and wrapper loggers for `YummyKodik.*` categories.
 - `YummyKodik\Configuration\PluginConfiguration.cs`, `YummyKodik\Web\config.html`: plugin settings model and Jellyfin settings page.
 - `YummyKodik\PluginServiceRegistrator.cs`: DI, named HTTP clients, hosted services, and logging filter registration.
+- `YummyKodik\Media\InternalJellyfinUrlProvider.cs`: process-local Jellyfin gateway origin used by generated STRM files and runtime media sources; client-facing network addresses are intentionally not configurable.
+- `YummyKodik\Media\YummyKodikMediaSourceProvider.cs`, `YummyKodik\Media\MediaRunTimePolicy.cs`: playback resolves an arbitrary linked child back to the merged primary before creating media sources; missing/short runtimes are backfilled conservatively, while an exact selected-provider runtime may correct only that primary item and its NFO when the mismatch exceeds two seconds.
+- `YummyKodik\Util\NfoBuilder.cs`, `YummyKodik\Tasks\Refresh\EpisodeArtifactWriter.cs`, `YummyKodik\Tasks\Refresh\EpisodeRuntimeBackfillService.cs`, `YummyKodik\Yummy\YummyEpisodeRuntimeResolver.cs`, `YummyKodik\Tasks\Refresh\KodikSupplementService.cs`: generated episode NFOs carry minute and exact-second runtimes before playback; missing voice runtimes inherit a sibling episode version, Yummy runtimes use cross-provider metadata fallback, and missing Kodik runtimes are probed once and then reused from NFO.
+- `YummyKodik\Alloha\AllohaPlaybackService.cs`, `YummyKodik\Alloha\AllohaWebSocketStreamTokenResolver.cs`, `YummyKodik\Alloha\AllohaHeadlessStreamTokenResolver.cs`: Alloha browserless playback, master manifest download, dynamic `Accepts-Controls` token resolution, proxy resource refresh, and session-scoped two-minute segment prefetch.
+- `YummyKodik\Kodik\KodikPlaybackService.cs`: session-scoped Kodik HLS proxy, bounded resource cache, and conservative retries for transport errors, request timeouts, HTTP 408, and 5xx responses.
+- `YummyKodik\Media\YummyKodikMediaSegmentProvider.cs`: Jellyfin skip-timing provider; Yummy video catalog is cached with stale fallback/backoff so temporary Yummy outages do not warning-spam.
+- `YummyKodik\Versioning\YummyKodikPostRefreshMergeBarrier.cs`: post-refresh Jellyfin readiness barrier; waits for changed STRM episode items to settle, then runs one authoritative versions merge while event-driven merge passes are batch-suppressed.
+- `YummyKodik\Api\YummyKodikStreamController.cs`, `YummyKodik\Web\seriesTranslation.js`, `YummyKodik\Web\JellyfinWebSeriesTranslationBootstrapHostedService.cs`, `YummyKodik\Versioning\YummyKodikEpisodeVersionsMergeHostedService.cs`: the widget voice catalog is the normalized union of managed-version and provider voices; injection targets only the active visible Jellyfin details page, uses per-build/static and per-request/API cache keys, and retries a managed partial catalog four times with bounded backoff; an explicit selection must become the series-wide primary so Jellyfin Next/autoplay advances by episode in that voice.
+- `.yummykodik.refresh-state.json`: generated refresh state now also stores per-STRM media segments copied from the best available OP/ED timings for the episode, so Jellyfin segment generation can read local timings before hitting Yummy.
 - `YummyKodik.Tests\Program.cs`: console-style regression runner.
-- `C:\ProgramData\Jellyfin\Server\plugins\YummyKodik_1.0.0.0`: manual Jellyfin plugin deployment target for local testing.
+- `C:\ProgramData\Jellyfin\Server\plugins\YummyKodik_1.1.2.0`: manual Jellyfin plugin deployment target for local testing; `YummyKodik_1.0.0.0` under `plugins` is a file on this machine, not the active plugin folder.
 - `publish\YummyKodik_1.0.0.0`: local publish staging folder used before copying into Jellyfin.
+- `scripts\Deploy-LocalJellyfinPlugin.ps1`: standard self-elevating local deployment script; stops Jellyfin, replaces only the four runtime files from staging, hash-verifies them, and starts the service without creating backups.
 
 ## Hard constraints
 - Do not add new UI settings and do not change `PluginConfiguration` unless the task explicitly says so.
@@ -76,7 +88,10 @@ Do not overwrite `AllohaApiToken.txt` or `meta.json` during local replacement. `
 - Only one refresh run should perform work at a time. A second run should log and exit quickly.
 - Parallel refresh workers may process different titles, but file operations for the same `seriesRoot` must be serialized.
 - State-based skip is allowed only when the generated local files can be proven to match the current inputs.
-- Per-voice mode must not pre-skip Kodik lookup because new translation files may appear even when episode count is unchanged.
+- Per-voice mode must not pre-skip Kodik lookup at 720p or below because new translation files may appear without episode-count changes. Above Kodik's known 720p ceiling, a verified unchanged state may defer the metadata lookup only until the 24-hour deep-validation interval expires.
+- Per-voice mode may skip deep Kodik link validation only after a current catalog lookup matches the stored canonical signature, managed hashes and cleanup scope match, and the last complete deep validation is less than 24 hours old. An incomplete link pass must not refresh that timestamp.
+- Preferred quality is part of the refresh fingerprint but is never a provider-availability filter; keep a stream/voice and fall back to the best available lower resolution.
+- Deep Kodik link validation should cover only episode/voice pairs still missing after Yummy-backed generation; equivalent Alloha/CVH voices remain preferred and Kodik-only coverage remains eligible.
 - Single-file pre-Kodik skip is safe only when the state proves all currently expected episodes are already represented and all managed files still exist and match the state.
 - A state file in a series root must support multiple seasons; do not overwrite season 1 state when refreshing season 2.
 

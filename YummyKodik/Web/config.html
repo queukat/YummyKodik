@@ -78,15 +78,6 @@
                     </div>
 
                     <div class="inputContainer">
-                        <label for="serverBaseUrl">Jellyfin server base URL</label>
-                        <input id="serverBaseUrl" is="emby-input" type="text" autocomplete="off" placeholder="https://jellyfin.example.com или http://192.168.1.10:8096" />
-                        <div class="fieldDescription">
-                            Внешний адрес Jellyfin, который должен быть доступен клиенту во время воспроизведения.
-                            Не указывай <code>127.0.0.1</code>, если смотришь не с самого сервера.
-                        </div>
-                    </div>
-
-                    <div class="inputContainer">
                         <label for="preferredTranslationFilter">Preferred translation filter</label>
                         <input id="preferredTranslationFilter" is="emby-input" type="text" autocomplete="off" placeholder="AniLibria | SHIZA | Субтитры" />
                         <div class="fieldDescription">
@@ -167,6 +158,17 @@
                         </div>
                     </div>
 
+                    <div class="inputContainer">
+                        <label>
+                            <input id="deleteReleasesNotInYummyList" type="checkbox" />
+                            Удалять релизы, отсутствующие в списке Yummy
+                        </label>
+                        <div class="fieldDescription">
+                            Удаляет подтверждённые state-файлом сезоны или сериалы, которых нет в успешно полученном списке пользователя Yummy.
+                            Ручные Slugs и каталоги с неизвестными либо изменёнными файлами сохраняются; при ошибке API ничего не удаляется.
+                        </div>
+                    </div>
+
                     <div class="inputContainer" style="max-width:320px">
                         <label for="yummyUserId">Yummy user ID</label>
                         <input id="yummyUserId" is="emby-input" type="number" min="1" step="1" placeholder="219413" />
@@ -242,11 +244,11 @@
                 YummyApiBaseUrl: "https://api.yani.tv",
                 AllohaApiBaseUrl: "https://api.alloha.tv",
                 OutputRootPath: "D:\\video\\YummyKodik",
-                ServerBaseUrl: "",
                 PreferredQuality: 720,
                 MinimumLogLevel: "Warning",
                 RefreshIntervalMinutes: 360,
                 UseUserListSubscription: false,
+                DeleteReleasesNotInYummyList: false,
                 YummyUserId: 219413,
                 YummyUserListId: 0,
                 CreateStrmPerVoiceTranslation: false,
@@ -271,7 +273,6 @@
                     $("allohaApiToken").value = cfg.AllohaApiToken || "";
                     $("allohaApiBaseUrl").value = cfg.AllohaApiBaseUrl || DEFAULTS.AllohaApiBaseUrl;
                     $("outputRootPath").value = cfg.OutputRootPath || DEFAULTS.OutputRootPath;
-                    $("serverBaseUrl").value = cfg.ServerBaseUrl || DEFAULTS.ServerBaseUrl;
                     $("preferredTranslationFilter").value = cfg.PreferredTranslationFilter || "";
                     $("createStrmPerVoiceTranslation").checked = !!cfg.CreateStrmPerVoiceTranslation;
                     $("preferredQuality").value = cfg.PreferredQuality || DEFAULTS.PreferredQuality;
@@ -284,6 +285,7 @@
                     $("slugs").value = (cfg.Slugs || []).join("\n");
 
                     $("useUserListSubscription").checked = !!cfg.UseUserListSubscription;
+                    $("deleteReleasesNotInYummyList").checked = !!cfg.DeleteReleasesNotInYummyList;
                     $("yummyUserId").value = cfg.YummyUserId || DEFAULTS.YummyUserId;
                     $("yummyUserListId").value = (cfg.YummyUserListId ?? DEFAULTS.YummyUserListId);
 
@@ -316,7 +318,6 @@
                     const out = ($("outputRootPath").value || "").trim();
                     cfg.OutputRootPath = out || DEFAULTS.OutputRootPath;
 
-                    cfg.ServerBaseUrl = ($("serverBaseUrl").value || "").trim();
                     cfg.PreferredTranslationFilter = ($("preferredTranslationFilter").value || "").trim();
                     cfg.CreateStrmPerVoiceTranslation = !!$("createStrmPerVoiceTranslation").checked;
 
@@ -335,6 +336,7 @@
                         .filter(Boolean);
 
                     cfg.UseUserListSubscription = !!$("useUserListSubscription").checked;
+                    cfg.DeleteReleasesNotInYummyList = !!$("deleteReleasesNotInYummyList").checked;
                     cfg.YummyUserId = parseInt($("yummyUserId").value, 10) || DEFAULTS.YummyUserId;
                     cfg.YummyUserListId = parseInt($("yummyUserListId").value, 10);
                     if (isNaN(cfg.YummyUserListId)) cfg.YummyUserListId = DEFAULTS.YummyUserListId;

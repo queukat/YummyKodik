@@ -48,9 +48,8 @@ namespace YummyKodik.Configuration
         public string PreferredTranslationFilter { get; set; } = "anilibria|aniliberty";
 
         /// <summary>
-        /// External Jellyfin server base URL used inside generated STRM files and runtime media sources.
-        /// Example: "https://jellyfin.example.com" or "http://192.168.1.10:8096".
-        /// Must be reachable by the playback client.
+        /// Legacy serialized setting retained for configuration compatibility.
+        /// Playback now uses Jellyfin's process-local gateway URL and ignores this value.
         /// </summary>
         public string ServerBaseUrl { get; set; } = string.Empty;
 
@@ -99,6 +98,12 @@ namespace YummyKodik.Configuration
 
         // User list subscription
         public bool UseUserListSubscription { get; set; } = false;
+
+        /// <summary>
+        /// When the Yummy user list is fetched successfully, removes state-proven plugin-generated
+        /// seasons or series that are no longer present in that list. Manually configured slugs are kept.
+        /// </summary>
+        public bool DeleteReleasesNotInYummyList { get; set; } = false;
 
         public int YummyUserId { get; set; } = 219413;
 

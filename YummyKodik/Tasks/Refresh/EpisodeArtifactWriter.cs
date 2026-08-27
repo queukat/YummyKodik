@@ -6,11 +6,28 @@ namespace YummyKodik.Tasks.Refresh;
 
 internal sealed class EpisodeArtifactWriter
 {
+    public Task WriteEpisodeArtifactsAsync(
+        EpisodeArtifactWriteContext context,
+        string fileBaseName,
+        string url,
+        int episodeNumber,
+        CancellationToken cancellationToken)
+    {
+        return WriteEpisodeArtifactsAsync(
+            context,
+            fileBaseName,
+            url,
+            episodeNumber,
+            durationSeconds: null,
+            cancellationToken);
+    }
+
     public async Task WriteEpisodeArtifactsAsync(
         EpisodeArtifactWriteContext context,
         string fileBaseName,
         string url,
         int episodeNumber,
+        int? durationSeconds,
         CancellationToken cancellationToken)
     {
         await WriteEpisodeArtifactsAsync(
@@ -22,12 +39,13 @@ internal sealed class EpisodeArtifactWriter
                 context.SeasonNumber,
                 context.Title,
                 context.Description,
+                durationSeconds,
                 context.Perf,
                 cancellationToken)
             .ConfigureAwait(false);
     }
 
-    public async Task WriteEpisodeArtifactsAsync(
+    public Task WriteEpisodeArtifactsAsync(
         ILogger logger,
         string seasonDir,
         string fileBaseName,
@@ -39,15 +57,51 @@ internal sealed class EpisodeArtifactWriter
         RefreshPerformanceMetrics? perf,
         CancellationToken cancellationToken)
     {
+        return WriteEpisodeArtifactsAsync(
+            logger,
+            seasonDir,
+            fileBaseName,
+            url,
+            episodeNumber,
+            seasonNumber,
+            title,
+            description,
+            durationSeconds: null,
+            perf,
+            cancellationToken);
+    }
+
+    public async Task WriteEpisodeArtifactsAsync(
+        ILogger logger,
+        string seasonDir,
+        string fileBaseName,
+        string url,
+        int episodeNumber,
+        int seasonNumber,
+        string title,
+        string? description,
+        int? durationSeconds,
+        RefreshPerformanceMetrics? perf,
+        CancellationToken cancellationToken)
+    {
         var strmPath = Path.Combine(seasonDir, fileBaseName + RefreshConstants.StrmExtension);
         var nfoPath = Path.Combine(seasonDir, fileBaseName + RefreshConstants.NfoExtension);
 
         await RefreshFileWriter.WriteTextAtomicallyAsync(strmPath, url + Environment.NewLine, perf, "strm", cancellationToken).ConfigureAwait(false);
-        await EnsureEpisodeNfoAsync(logger, nfoPath, episodeNumber, seasonNumber, title, description, perf, cancellationToken)
+        await EnsureEpisodeNfoAsync(
+                logger,
+                nfoPath,
+                episodeNumber,
+                seasonNumber,
+                title,
+                description,
+                durationSeconds,
+                perf,
+                cancellationToken)
             .ConfigureAwait(false);
     }
 
-    public async Task EnsureEpisodeNfoAsync(
+    public Task EnsureEpisodeNfoAsync(
         ILogger logger,
         string nfoPath,
         int episodeNumber,
@@ -57,17 +111,61 @@ internal sealed class EpisodeArtifactWriter
         RefreshPerformanceMetrics? perf,
         CancellationToken cancellationToken)
     {
+        return EnsureEpisodeNfoAsync(
+            logger,
+            nfoPath,
+            episodeNumber,
+            seasonNumber,
+            seriesTitle,
+            description,
+            durationSeconds: null,
+            perf,
+            cancellationToken);
+    }
+
+    public async Task EnsureEpisodeNfoAsync(
+        ILogger logger,
+        string nfoPath,
+        int episodeNumber,
+        int seasonNumber,
+        string seriesTitle,
+        string? description,
+        int? durationSeconds,
+        RefreshPerformanceMetrics? perf,
+        CancellationToken cancellationToken)
+    {
         var xml = NfoBuilder.BuildEpisodeNfo(
             episodeNumber,
             season: seasonNumber,
             seriesTitle: seriesTitle,
-            description: description ?? string.Empty);
+            description: description ?? string.Empty,
+            durationSeconds);
 
         if (File.Exists(nfoPath))
         {
-            if (await RefreshFileWriter.IsValidXmlFileAsync(nfoPath, cancellationToken).ConfigureAwait(false))
+            var existingXml = await File.ReadAllTextAsync(nfoPath, cancellationToken).ConfigureAwait(false);
+            if (RefreshFileWriter.IsValidXmlContent(existingXml))
             {
-                perf?.AddCount("io.nfo_unchanged");
+                if (!durationSeconds.HasValue || durationSeconds.Value <= 0)
+                {
+                    perf?.AddCount("io.nfo_unchanged");
+                    return;
+                }
+
+                var enrichedXml = NfoBuilder.EnsureEpisodeRuntime(existingXml, durationSeconds.Value);
+                if (string.Equals(existingXml, enrichedXml, StringComparison.Ordinal))
+                {
+                    perf?.AddCount("io.nfo_unchanged");
+                    return;
+                }
+
+                await RefreshFileWriter.WriteTextAtomicallyAsync(
+                        nfoPath,
+                        enrichedXml,
+                        perf,
+                        "nfo",
+                        cancellationToken)
+                    .ConfigureAwait(false);
                 return;
             }
 

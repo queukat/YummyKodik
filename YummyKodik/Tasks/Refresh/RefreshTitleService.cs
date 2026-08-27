@@ -41,19 +41,47 @@ internal sealed class RefreshTitleService
     public async Task RefreshAsync(
         string key,
         string root,
+        string internalBaseUrl,
         PluginConfiguration cfg,
         RefreshClients clients,
         CancellationToken cancellationToken)
     {
-        var perf = new RefreshPerformanceMetrics(cfg.EnablePerformanceDebugLogging);
+        var perf = new RefreshPerformanceMetrics(cfg.EnablePerformanceDebugLogging, clients.RunMetrics);
         var cleanKey = RefreshPathUtilities.NormalizeKey(key);
         _logger.LogInformation("[YummyKodik] Refreshing key '{Key}'.", cleanKey);
         var summaryTitle = cleanKey;
 
         try
         {
-            var refresh = await _infoLoader.LoadAsync(_logger, cfg, clients, cleanKey, root, perf, cancellationToken)
-                .ConfigureAwait(false);
+            YummyRefreshInfo refresh;
+            try
+            {
+                refresh = await _infoLoader.LoadAsync(_logger, cfg, clients, cleanKey, root, internalBaseUrl, perf, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception ex) when (CanTryExistingLibraryFallback(ex, cancellationToken))
+            {
+                if (await TryRefreshFromExistingLibraryFallbackAsync(
+                        ex,
+                        cleanKey,
+                        root,
+                        internalBaseUrl,
+                        cfg,
+                        clients,
+                        perf,
+                        cancellationToken)
+                    .ConfigureAwait(false))
+                {
+                    return;
+                }
+
+                _logger.LogWarning(
+                    ex,
+                    "[YummyKodik] Failed to load Yummy metadata for key '{Key}' and no usable local fallback snapshot was found.",
+                    cleanKey);
+                return;
+            }
+
             summaryTitle = refresh.TitleInfo.Title;
 
             var refreshStateInput = _stateService.BuildSeasonInput(cfg, refresh);
@@ -61,6 +89,8 @@ internal sealed class RefreshTitleService
             var seasonDir = refresh.Files.SeasonDir;
             var seasonDirPrepared = false;
             var needsKodikLookup = false;
+            var deferYummyGenerationUntilKodik = cfg.CreateStrmPerVoiceTranslation &&
+                                                 refresh.Availability.ExpectedAvailableEpisodes > 0;
 
             using (await _seriesRootLockProvider.AcquireAsync(refresh.Files.SeriesRoot, cancellationToken).ConfigureAwait(false))
             {
@@ -73,50 +103,28 @@ internal sealed class RefreshTitleService
                     return;
                 }
 
-                if (refresh.Availability.YummySupportedEpisodes.Length > 0)
-                {
-                    if (string.IsNullOrEmpty(refresh.Files.BaseUrl))
-                    {
-                        _logger.LogWarning(
-                            "[YummyKodik] ServerBaseUrl is empty, skipping Yummy-backed STRM generation for '{Title}'.",
-                            refresh.TitleInfo.Title);
-                        return;
-                    }
-
-                    seasonDir = _seasonFilePreparer.PrepareForEpisodeGeneration(
+                if (await _stateService.TrySkipPerVoiceKodikLookupAsync(
                         _logger,
                         refresh,
-                        seasonDir,
-                        cfg.CreateStrmPerVoiceTranslation,
-                        state,
-                        perf);
+                        refreshStateInput,
+                        perf,
+                        cancellationToken)
+                    .ConfigureAwait(false))
+                {
+                    return;
+                }
+
+                if (!deferYummyGenerationUntilKodik && refresh.Availability.YummySupportedEpisodes.Length > 0)
+                {
+                    seasonDir = await GenerateYummyArtifactsAsync(
+                            refresh,
+                            state,
+                            seasonDir,
+                            cfg,
+                            perf,
+                            cancellationToken)
+                        .ConfigureAwait(false);
                     seasonDirPrepared = true;
-
-                    using (perf.Measure("stage.generate.yummy.files"))
-                    {
-                        await _yummyEpisodeGenerator.GeneratePreferredProviderEpisodeFilesAsync(
-                                new YummyEpisodeGenerationContext(
-                                    _logger,
-                                    refresh,
-                                    state,
-                                    seasonDir,
-                                    cfg.CreateStrmPerVoiceTranslation,
-                                    cfg.PreferredTranslationFilter,
-                                    perf),
-                                refresh.Availability.YummySupportedEpisodes,
-                                cancellationToken)
-                            .ConfigureAwait(false);
-                    }
-
-                    state.GeneratedEpisodeNumbers.UnionWith(refresh.Availability.YummySupportedEpisodes);
-
-                    _logger.LogInformation(
-                        "[YummyKodik] Generated mixed Yummy-backed episode files for '{Title}'. episodes={EpisodeCount} allohaEpisodes={AllohaEpisodes} cvhEpisodes={CvhEpisodes} availableEpisodes={AvailableEpisodes}",
-                        refresh.TitleInfo.Title,
-                        refresh.Availability.YummySupportedEpisodes.Length,
-                        refresh.Availability.AllohaSupportedEpisodes.Length,
-                        refresh.Availability.CvhSupportedEpisodes.Length,
-                        refresh.Availability.ExpectedAvailableEpisodes);
                 }
 
                 var needsKodikEpisodeSupplement = YummyEpisodeAvailability.NeedsKodikSupplement(
@@ -149,14 +157,42 @@ internal sealed class RefreshTitleService
             }
 
             var kodikClients = await clients.KodikClients.Value.ConfigureAwait(false);
+            var kodikCatalogSignature = RefreshStateService.BuildKodikCatalogSignature(kodikLookup);
 
             using (await _seriesRootLockProvider.AcquireAsync(refresh.Files.SeriesRoot, cancellationToken).ConfigureAwait(false))
             {
                 Directory.CreateDirectory(refresh.Files.SeriesRoot);
 
-                var kodikAvailableEpisodes = YummyEpisodeAvailability.ResolveKodikAvailableEpisodeCount(
+                var episodeCoverage = YummyEpisodeAvailability.ResolveProviderCoverage(
                     kodikLookup.Info.SeriesCount,
                     refresh.Availability.ExpectedAvailableEpisodes);
+                var kodikAvailableEpisodes = episodeCoverage.KodikAvailableEpisodes;
+
+                if (await _stateService.TrySkipPerVoiceDeepRefreshAsync(
+                        _logger,
+                        refresh,
+                        refreshStateInput,
+                        kodikCatalogSignature,
+                        perf,
+                        cancellationToken)
+                    .ConfigureAwait(false))
+                {
+                    return;
+                }
+
+                if (deferYummyGenerationUntilKodik && refresh.Availability.YummySupportedEpisodes.Length > 0)
+                {
+                    seasonDir = await GenerateYummyArtifactsAsync(
+                            refresh,
+                            state,
+                            seasonDir,
+                            cfg,
+                            perf,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                    seasonDirPrepared = true;
+                }
+
                 if (_kodikSupplementService.CompleteIfKodikHasNoEpisodes(_logger, refresh, state, kodikAvailableEpisodes))
                 {
                     await _stateService.WriteAsync(_logger, refresh, refreshStateInput, state, perf, cancellationToken).ConfigureAwait(false);
@@ -164,12 +200,6 @@ internal sealed class RefreshTitleService
                 }
 
                 _kodikSupplementService.LogKodikZeroSeriesCountIfNeeded(_logger, refresh, kodikLookup.Info, kodikAvailableEpisodes);
-
-                if (string.IsNullOrEmpty(refresh.Files.BaseUrl))
-                {
-                    _logger.LogWarning("[YummyKodik] ServerBaseUrl is empty, skipping refresh for '{Title}'.", refresh.TitleInfo.Title);
-                    return;
-                }
 
                 if (!seasonDirPrepared)
                 {
@@ -192,7 +222,7 @@ internal sealed class RefreshTitleService
 
                 if (kodikEpisodesToProcess.Length == 0)
                 {
-                    CleanupExpectedEpisodeArtifacts(refresh, state, seasonDir, kodikAvailableEpisodes, perf);
+                    CleanupExpectedEpisodeArtifacts(refresh, state, seasonDir, episodeCoverage.OverallAvailableEpisodes, perf);
                     await _stateService.WriteAsync(_logger, refresh, refreshStateInput, state, perf, cancellationToken).ConfigureAwait(false);
 
                     _logger.LogInformation(
@@ -220,8 +250,30 @@ internal sealed class RefreshTitleService
                         .ConfigureAwait(false);
                 }
 
-                CleanupExpectedEpisodeArtifacts(refresh, state, seasonDir, kodikAvailableEpisodes, perf);
-                await _stateService.WriteAsync(_logger, refresh, refreshStateInput, state, perf, cancellationToken).ConfigureAwait(false);
+                CleanupExpectedEpisodeArtifacts(refresh, state, seasonDir, episodeCoverage.OverallAvailableEpisodes, perf);
+                var kodikValidation = kodikGeneration.DeepValidationCompleted
+                    ? new RefreshStateKodikValidation
+                    {
+                        CatalogSignature = kodikCatalogSignature,
+                        DeepValidatedAtUtc = DateTimeOffset.UtcNow
+                    }
+                    : null;
+                await _stateService.WriteAsync(
+                        _logger,
+                        refresh,
+                        refreshStateInput,
+                        state,
+                        kodikValidation,
+                        perf,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+
+                if (!kodikGeneration.DeepValidationCompleted)
+                {
+                    _logger.LogWarning(
+                        "[YummyKodik] Kodik deep validation was incomplete for '{Title}'. Generated files were kept, but the next refresh will retry validation.",
+                        refresh.TitleInfo.Title);
+                }
 
                 if (missingEpisodes.Length == 0 && kodikGeneration.FilesWritten == 0)
                 {
@@ -244,6 +296,150 @@ internal sealed class RefreshTitleService
         {
             perf.LogSummary(_logger, summaryTitle, cleanKey);
         }
+    }
+
+    private async Task<string> GenerateYummyArtifactsAsync(
+        YummyRefreshInfo refresh,
+        EpisodeGenerationState state,
+        string seasonDir,
+        PluginConfiguration cfg,
+        RefreshPerformanceMetrics perf,
+        CancellationToken cancellationToken)
+    {
+        seasonDir = _seasonFilePreparer.PrepareForEpisodeGeneration(
+            _logger,
+            refresh,
+            seasonDir,
+            cfg.CreateStrmPerVoiceTranslation,
+            state,
+            perf);
+
+        using (perf.Measure("stage.generate.yummy.files"))
+        {
+            await _yummyEpisodeGenerator.GeneratePreferredProviderEpisodeFilesAsync(
+                    new YummyEpisodeGenerationContext(
+                        _logger,
+                        refresh,
+                        state,
+                        seasonDir,
+                        cfg.CreateStrmPerVoiceTranslation,
+                        cfg.PreferredTranslationFilter,
+                        perf),
+                    refresh.Availability.YummySupportedEpisodes,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        state.GeneratedEpisodeNumbers.UnionWith(refresh.Availability.YummySupportedEpisodes);
+
+        _logger.LogInformation(
+            "[YummyKodik] Generated mixed Yummy-backed episode files for '{Title}'. episodes={EpisodeCount} allohaEpisodes={AllohaEpisodes} cvhEpisodes={CvhEpisodes} availableEpisodes={AvailableEpisodes}",
+            refresh.TitleInfo.Title,
+            refresh.Availability.YummySupportedEpisodes.Length,
+            refresh.Availability.AllohaSupportedEpisodes.Length,
+            refresh.Availability.CvhSupportedEpisodes.Length,
+            refresh.Availability.ExpectedAvailableEpisodes);
+
+        return seasonDir;
+    }
+
+    private async Task<bool> TryRefreshFromExistingLibraryFallbackAsync(
+        Exception originalError,
+        string cleanKey,
+        string root,
+        string internalBaseUrl,
+        PluginConfiguration cfg,
+        RefreshClients clients,
+        RefreshPerformanceMetrics perf,
+        CancellationToken cancellationToken)
+    {
+        var fallbackLoader = new ExistingLibraryFallbackRefreshInfoLoader();
+        var refresh = fallbackLoader.TryLoad(_logger, cleanKey, root, internalBaseUrl);
+        if (refresh == null)
+        {
+            return false;
+        }
+
+        var kodikLookup = await _kodikSupplementService
+            .TryResolveKodikInfoAsync(_logger, refresh, cleanKey, clients, perf, cancellationToken)
+            .ConfigureAwait(false);
+        if (kodikLookup == null)
+        {
+            return true;
+        }
+
+        var kodikClients = await clients.KodikClients.Value.ConfigureAwait(false);
+
+        using (await _seriesRootLockProvider.AcquireAsync(refresh.Files.SeriesRoot, cancellationToken).ConfigureAwait(false))
+        {
+            Directory.CreateDirectory(refresh.Files.SeriesRoot);
+            Directory.CreateDirectory(refresh.Files.SeasonDir);
+
+            var state = ExistingLibraryFallbackRefreshInfoLoader.BuildExistingEpisodeState(
+                refresh.Files.SeasonDir,
+                refresh.TitleInfo.SeasonNumber);
+            var existingMaxEpisode = state.GeneratedEpisodeNumbers.Count > 0
+                ? state.GeneratedEpisodeNumbers.Max()
+                : 0;
+            var kodikAvailableEpisodes = Math.Max(
+                kodikLookup.Info.SeriesCount,
+                existingMaxEpisode);
+
+            if (_kodikSupplementService.CompleteIfKodikHasNoEpisodes(_logger, refresh, state, kodikAvailableEpisodes))
+            {
+                return true;
+            }
+
+            var missingEpisodes = Enumerable.Range(1, kodikAvailableEpisodes)
+                .Where(ep => !state.GeneratedEpisodeNumbers.Contains(ep))
+                .ToArray();
+            var kodikEpisodesToProcess = _kodikSupplementService.ResolveEpisodesToProcess(
+                cfg.CreateStrmPerVoiceTranslation,
+                kodikAvailableEpisodes,
+                missingEpisodes);
+
+            if (kodikEpisodesToProcess.Length == 0)
+            {
+                _logger.LogInformation(
+                    "[YummyKodik] Provider-only fallback refresh found no missing episodes for '{Title}'. Existing local files were kept.",
+                    refresh.TitleInfo.Title);
+                return true;
+            }
+
+            EpisodeArtifactGenerationResult kodikGeneration;
+            using (perf.Measure("stage.generate.kodik.fallback.files"))
+            {
+                kodikGeneration = await _kodikSupplementService.GenerateEpisodeFilesAsync(
+                        kodikEpisodesToProcess,
+                        new KodikEpisodeGenerationContext(
+                            _logger,
+                            refresh,
+                            kodikLookup,
+                            kodikClients.Kodik,
+                            state,
+                            refresh.Files.SeasonDir,
+                            cfg.CreateStrmPerVoiceTranslation,
+                            perf),
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+
+            _logger.LogWarning(
+                originalError,
+                "[YummyKodik] Provider-only fallback refresh completed for '{Title}'. Kodik seriesCount={SeriesCount}, newOrUpdatedEpisodes={Episodes}, filesWritten={Files}. Existing Yummy-backed files were not cleaned while Yummy is unavailable.",
+                refresh.TitleInfo.Title,
+                kodikLookup.Info.SeriesCount,
+                kodikGeneration.EpisodesWritten,
+                kodikGeneration.FilesWritten);
+        }
+
+        return true;
+    }
+
+    private static bool CanTryExistingLibraryFallback(Exception ex, CancellationToken cancellationToken)
+    {
+        return !cancellationToken.IsCancellationRequested &&
+               ex is not OperationCanceledException;
     }
 
     private void CompleteWithoutKodikSupplement(

@@ -10,7 +10,8 @@ internal sealed record RefreshClients(
     YummyClient Yummy,
     ShikimoriGraphQlClient Shikimori,
     HttpClient YummyHttp,
-    Lazy<Task<RefreshKodikClients>> KodikClients);
+    Lazy<Task<RefreshKodikClients>> KodikClients,
+    RefreshRunMetrics RunMetrics);
 
 internal sealed record RefreshKodikClients(
     KodikClient Kodik,
@@ -51,6 +52,9 @@ internal sealed class EpisodeGenerationState
     public Dictionary<int, HashSet<string>> ExpectedEpisodeTranslationKeys { get; } = new();
 
     public Dictionary<int, Dictionary<string, string>> ExistingEpisodeTranslationFileBaseNames { get; set; } = new();
+
+    public Dictionary<string, RefreshStateMediaSegmentEntry> MediaSegmentEntriesByFileBaseName { get; } =
+        new(StringComparer.OrdinalIgnoreCase);
 }
 
 internal sealed record KodikLookupResult(
@@ -85,7 +89,10 @@ internal sealed record EpisodeArtifactWriteContext(
     string? Description,
     RefreshPerformanceMetrics? Perf);
 
-internal readonly record struct EpisodeArtifactGenerationResult(int EpisodesWritten, int FilesWritten);
+internal readonly record struct EpisodeArtifactGenerationResult(
+    int EpisodesWritten,
+    int FilesWritten,
+    bool DeepValidationCompleted);
 
 internal enum TextWriteOutcome
 {

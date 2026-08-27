@@ -34,12 +34,19 @@
     }
 
     async function apiGetTranslations(seriesId) {
-        const url = ApiClient.getUrl("YummyKodik/getTranslations", { seriesId });
+        const url = ApiClient.getUrl("YummyKodik/getTranslations", {
+            seriesId,
+            ykRequest: Date.now().toString()
+        });
         return requestJson(url);
     }
 
     async function apiSetTranslation(seriesId, trId) {
-        const url = ApiClient.getUrl("YummyKodik/setTranslation", { seriesId, tr: trId });
+        const url = ApiClient.getUrl("YummyKodik/setTranslation", {
+            seriesId,
+            tr: trId,
+            ykRequest: Date.now().toString()
+        });
         return requestJson(url);
     }
 
@@ -65,16 +72,26 @@
 
     function normalizeTranslations(trs) {
         const list = Array.isArray(trs) ? trs : [];
-        const voices = list.filter(t => String(t.type || "").toLowerCase() === "voice");
+        const readValue = (item, camelName, pascalName) => {
+            if (!item) {
+                return "";
+            }
+
+            const value = item[camelName] !== undefined && item[camelName] !== null
+                ? item[camelName]
+                : item[pascalName];
+            return String(value === undefined || value === null ? "" : value).trim();
+        };
+        const voices = list.filter(t => readValue(t, "type", "Type").toLowerCase() === "voice");
         return (voices.length > 0 ? voices : list)
             .map(t => {
-                const id = String(t.id || "").trim();
+                const id = readValue(t, "id", "Id");
                 if (!id || id === "0") {
                     return null;
                 }
 
-                const name = String(t.name || "").trim() || ("Translation " + id);
-                const type = String(t.type || "").trim();
+                const name = readValue(t, "name", "Name") || ("Translation " + id);
+                const type = readValue(t, "type", "Type");
                 return {
                     id,
                     label: type && type.toLowerCase() !== "voice" ? (name + " [" + type + "]") : name
@@ -84,7 +101,16 @@
     }
 
     function hasVisibleTranslations(data) {
-        return normalizeTranslations(data && data.translations).length > 0
+        return normalizeTranslations(data && data.translations).length > 0;
+    }
+
+    function isManagedPartialResponse(data) {
+        const reason = String(data && data.reason || "").trim().toLowerCase();
+        if (reason === "not-managed") {
+            return false;
+        }
+
+        return !!String(data && data.seriesKey || "").trim()
             || !!String(data && data.savedTranslationId || "").trim()
             || !!String(data && data.chosenTranslationId || "").trim();
     }
@@ -117,6 +143,11 @@
 
         async function reload() {
             const data = await apiGetTranslations(model.seriesId);
+            if (!hasVisibleTranslations(data)) {
+                scheduleCatalogRetry(model.seriesId);
+                return;
+            }
+
             render(data);
         }
 
@@ -162,9 +193,15 @@
                 button.style.fontWeight = item.active ? "600" : "400";
                 button.style.textDecoration = item.active ? "underline" : "none";
                 button.style.textUnderlineOffset = item.active ? "0.15em" : "";
-                button.textContent = item.label;
+                button.style.backgroundColor = item.active ? "rgba(0, 164, 220, 0.24)" : "transparent";
+                button.style.borderRadius = "0.3em";
+                button.style.padding = "0.1em 0.3em";
+                button.textContent = item.active ? ("✓ " + item.label) : item.label;
                 button.title = item.title;
                 button.setAttribute("aria-pressed", item.active ? "true" : "false");
+                if (item.active) {
+                    button.setAttribute("aria-current", "true");
+                }
                 button.addEventListener("click", () => saveTranslation(item.id));
 
                 content.appendChild(button);
@@ -183,7 +220,19 @@
     }
 
     function findInjectHost() {
-        const detailsGroup = document.querySelector(".itemDetailsGroup");
+        const candidates = Array.from(document.querySelectorAll(".itemDetailsGroup"));
+        const detailsGroup = candidates.find(candidate => {
+            if (!candidate || !candidate.isConnected) {
+                return false;
+            }
+
+            const page = candidate.closest(".page");
+            if (page && (page.classList.contains("hide") || page.getAttribute("aria-hidden") === "true")) {
+                return false;
+            }
+
+            return candidate.getClientRects().length > 0;
+        });
         if (!detailsGroup) {
             return null;
         }
@@ -207,11 +256,29 @@
     let lastSeriesId = "";
     let injectRequestId = 0;
     let pendingSeriesId = "";
+    let retrySeriesId = "";
+    let retryCount = 0;
+
+    function scheduleCatalogRetry(seriesId) {
+        if (retrySeriesId !== seriesId) {
+            retrySeriesId = seriesId;
+            retryCount = 0;
+        }
+
+        if (retryCount >= 4) {
+            return;
+        }
+
+        retryCount++;
+        scheduleInject(Math.min(1000 * Math.pow(2, retryCount - 1), 8000));
+    }
 
     async function injectIfNeeded() {
         if (!isDetailsPage()) {
             lastSeriesId = "";
             pendingSeriesId = "";
+            retrySeriesId = "";
+            retryCount = 0;
             injectRequestId++;
             removeWidget();
             return;
@@ -220,6 +287,8 @@
         const seriesId = parseItemIdFromHash();
         if (!seriesId) {
             pendingSeriesId = "";
+            retrySeriesId = "";
+            retryCount = 0;
             injectRequestId++;
             removeWidget();
             return;
@@ -231,14 +300,12 @@
             return;
         }
 
-        const existingWidgets = document.querySelectorAll(".ykTranslationGroup");
-        if (seriesId === lastSeriesId && existingWidgets.length === 1) {
+        const currentWidget = Array.from(host.container.children)
+            .find(node => node.classList && node.classList.contains("ykTranslationGroup"));
+        if (seriesId === lastSeriesId && currentWidget) {
             return;
         }
 
-        removeWidget();
-
-        lastSeriesId = seriesId;
         pendingSeriesId = seriesId;
         const requestId = ++injectRequestId;
 
@@ -249,21 +316,42 @@
             }
 
             if (!hasVisibleTranslations(data)) {
+                lastSeriesId = "";
+                pendingSeriesId = "";
+                removeWidget();
+                if (isManagedPartialResponse(data)) {
+                    scheduleCatalogRetry(seriesId);
+                } else {
+                    retrySeriesId = "";
+                    retryCount = 0;
+                }
+                return;
+            }
+
+            retrySeriesId = "";
+            retryCount = 0;
+            const currentHost = findInjectHost();
+            if (!currentHost) {
+                pendingSeriesId = "";
+                scheduleInject(250);
                 return;
             }
 
             removeWidget();
             const widget = buildWidget({ seriesId }, data);
 
-            if (host.before && host.before.parentElement === host.container) {
-                host.container.insertBefore(widget, host.before);
+            if (currentHost.before && currentHost.before.parentElement === currentHost.container) {
+                currentHost.container.insertBefore(widget, currentHost.before);
             } else {
-                host.container.appendChild(widget);
+                currentHost.container.appendChild(widget);
             }
+            lastSeriesId = seriesId;
             pendingSeriesId = "";
         } catch (e) {
             if (requestId === injectRequestId) {
+                lastSeriesId = "";
                 pendingSeriesId = "";
+                scheduleInject(1500);
             }
             console.debug("[YummyKodik] no translations widget for this item:", e);
         }

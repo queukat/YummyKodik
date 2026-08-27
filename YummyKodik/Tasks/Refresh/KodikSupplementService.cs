@@ -1,12 +1,15 @@
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using YummyKodik.Kodik;
+using YummyKodik.Util;
 using YummyKodik.Yummy;
 
 namespace YummyKodik.Tasks.Refresh;
 
 internal sealed class KodikSupplementService
 {
+    private const int RuntimeProbeQuality = 720;
+
     private readonly EpisodeArtifactWriter _artifactWriter;
 
     public KodikSupplementService(EpisodeArtifactWriter artifactWriter)
@@ -182,7 +185,8 @@ internal sealed class KodikSupplementService
         List<KodikTranslation> fileTranslations = createStrmPerVoiceTranslation
             ? PickTranslationsForFileMode(info.Translations)
             : new List<KodikTranslation>();
-        var resolvedTranslationEpisodes = fileTranslations.Count > 0
+        var runtimeTranslations = PickTranslationsForFileMode(info.Translations);
+        var translationResolution = fileTranslations.Count > 0
             ? await ResolveDistinctKodikTranslationEpisodesAsync(
                     logger,
                     kodik,
@@ -190,14 +194,40 @@ internal sealed class KodikSupplementService
                     id,
                     fileTranslations,
                     orderedEpisodes,
+                    expectedEpisodeTranslationKeys,
                     perf,
                     cancellationToken)
                 .ConfigureAwait(false)
-            : new Dictionary<string, HashSet<int>>(StringComparer.Ordinal);
+            : new KodikTranslationEpisodeResolution(
+                new Dictionary<string, HashSet<int>>(StringComparer.Ordinal),
+                new Dictionary<string, Dictionary<int, KodikLinkInfo>>(StringComparer.Ordinal),
+                true);
+        var resolvedTranslationEpisodes = translationResolution.EpisodesByTranslationId;
 
         foreach (var ep in orderedEpisodes)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            var durationSeconds = await TryReadExistingDurationSecondsAsync(
+                    seasonDir,
+                    seasonNumber,
+                    ep,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            if (!durationSeconds.HasValue)
+            {
+                durationSeconds = await ResolveKodikDurationSecondsAsync(
+                        logger,
+                        kodik,
+                        idType,
+                        id,
+                        runtimeTranslations,
+                        resolvedTranslationEpisodes,
+                        translationResolution.LinksByTranslationId,
+                        ep,
+                        perf,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
 
             var baseName = RefreshPathUtilities.BuildEpisodeBaseName(seasonNumber, ep);
 
@@ -208,7 +238,18 @@ internal sealed class KodikSupplementService
             if (!createStrmPerVoiceTranslation)
             {
                 var url = streamBase + "&format=hls";
-                await _artifactWriter.WriteEpisodeArtifactsAsync(logger, seasonDir, baseName, url, ep, seasonNumber, title, anime.Description, perf, cancellationToken)
+                await _artifactWriter.WriteEpisodeArtifactsAsync(
+                        logger,
+                        seasonDir,
+                        baseName,
+                        url,
+                        ep,
+                        seasonNumber,
+                        title,
+                        anime.Description,
+                        durationSeconds,
+                        perf,
+                        cancellationToken)
                     .ConfigureAwait(false);
                 EpisodeArtifactMaintenance.TrackExpectedEpisodeArtifact(expectedEpisodeFileBaseNames, ep, baseName);
                 writtenEpisodes.Add(ep);
@@ -225,7 +266,18 @@ internal sealed class KodikSupplementService
 
                 var url = streamBase + "&format=hls";
                 var fileBaseName = baseName + " - Auto";
-                await _artifactWriter.WriteEpisodeArtifactsAsync(logger, seasonDir, fileBaseName, url, ep, seasonNumber, title, anime.Description, perf, cancellationToken)
+                await _artifactWriter.WriteEpisodeArtifactsAsync(
+                        logger,
+                        seasonDir,
+                        fileBaseName,
+                        url,
+                        ep,
+                        seasonNumber,
+                        title,
+                        anime.Description,
+                        durationSeconds,
+                        perf,
+                        cancellationToken)
                     .ConfigureAwait(false);
                 EpisodeArtifactMaintenance.TrackExpectedEpisodeArtifact(expectedEpisodeFileBaseNames, ep, fileBaseName);
                 EpisodeArtifactMaintenance.TrackExpectedEpisodeTranslation(expectedEpisodeTranslationKeys, ep, "Auto");
@@ -281,7 +333,16 @@ internal sealed class KodikSupplementService
                 var url = streamBase + $"&tr={Uri.EscapeDataString(trId)}&format=hls";
 
                 await RefreshFileWriter.WriteTextAtomicallyAsync(strmPath, url + Environment.NewLine, perf, "strm", cancellationToken).ConfigureAwait(false);
-                await _artifactWriter.EnsureEpisodeNfoAsync(logger, nfoPath, ep, seasonNumber, title, anime.Description, perf, cancellationToken)
+                await _artifactWriter.EnsureEpisodeNfoAsync(
+                        logger,
+                        nfoPath,
+                        ep,
+                        seasonNumber,
+                        title,
+                        anime.Description,
+                        durationSeconds,
+                        perf,
+                        cancellationToken)
                     .ConfigureAwait(false);
                 EpisodeArtifactMaintenance.TrackExpectedEpisodeArtifact(expectedEpisodeFileBaseNames, ep, fileBaseName);
                 EpisodeArtifactMaintenance.TrackExpectedEpisodeTranslation(expectedEpisodeTranslationKeys, ep, suffix);
@@ -290,24 +351,139 @@ internal sealed class KodikSupplementService
             }
         }
 
-        return new EpisodeArtifactGenerationResult(writtenEpisodes.Count, filesWritten);
+        return new EpisodeArtifactGenerationResult(
+            writtenEpisodes.Count,
+            filesWritten,
+            translationResolution.Completed);
     }
 
-    private static async Task<Dictionary<string, HashSet<int>>> ResolveDistinctKodikTranslationEpisodesAsync(
+    private static async Task<int?> TryReadExistingDurationSecondsAsync(
+        string seasonDir,
+        int seasonNumber,
+        int episode,
+        CancellationToken cancellationToken)
+    {
+        if (!Directory.Exists(seasonDir))
+        {
+            return null;
+        }
+
+        var episodeBaseName = RefreshPathUtilities.BuildEpisodeBaseName(seasonNumber, episode);
+        foreach (var nfoPath in Directory.EnumerateFiles(
+                     seasonDir,
+                     episodeBaseName + "*" + RefreshConstants.NfoExtension,
+                     SearchOption.TopDirectoryOnly))
+        {
+            var fileBaseName = Path.GetFileNameWithoutExtension(nfoPath);
+            if (!string.Equals(fileBaseName, episodeBaseName, StringComparison.OrdinalIgnoreCase) &&
+                !fileBaseName.StartsWith(episodeBaseName + " - ", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var xml = await File.ReadAllTextAsync(nfoPath, cancellationToken).ConfigureAwait(false);
+            if (NfoBuilder.TryGetEpisodeRuntimeSeconds(xml, out var durationSeconds))
+            {
+                return durationSeconds;
+            }
+        }
+
+        return null;
+    }
+
+    internal static async Task<int?> ResolveKodikDurationSecondsAsync(
+        ILogger logger,
+        KodikClient kodik,
+        KodikIdType idType,
+        string id,
+        IReadOnlyList<KodikTranslation> translations,
+        IReadOnlyDictionary<string, HashSet<int>> resolvedTranslationEpisodes,
+        IReadOnlyDictionary<string, Dictionary<int, KodikLinkInfo>> resolvedLinksByTranslationId,
+        int episode,
+        RefreshPerformanceMetrics? perf,
+        CancellationToken cancellationToken)
+    {
+        var translation = translations.FirstOrDefault(candidate =>
+        {
+            var translationId = (candidate.Id ?? string.Empty).Trim();
+            return translationId.Length > 0 &&
+                   !string.Equals(translationId, "0", StringComparison.Ordinal) &&
+                   candidate.CoversEpisode(episode) &&
+                   (!resolvedTranslationEpisodes.TryGetValue(translationId, out var playableEpisodes) ||
+                    playableEpisodes.Contains(episode));
+        });
+        var translationId = (translation?.Id ?? string.Empty).Trim();
+        if (translationId.Length == 0)
+        {
+            return null;
+        }
+
+        try
+        {
+            perf?.AddCount("kodik.runtime_probes");
+            TimeSpan? runtime;
+            using (perf?.Measure("stage.kodik.runtime") ?? default)
+            {
+                if (resolvedLinksByTranslationId.TryGetValue(translationId, out var linksByEpisode) &&
+                    linksByEpisode.TryGetValue(episode, out var resolvedLink))
+                {
+                    perf?.AddCount("kodik.runtime_link_reused");
+                    runtime = await kodik.GetHlsRuntimeAsync(resolvedLink, RuntimeProbeQuality, cancellationToken)
+                        .ConfigureAwait(false);
+                }
+                else
+                {
+                    perf?.AddCount("kodik.runtime_link_resolved");
+                    runtime = await kodik.GetEpisodeRuntimeAsync(
+                            id,
+                            idType,
+                            episode,
+                            translationId,
+                            RuntimeProbeQuality,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                }
+            }
+
+            return runtime.HasValue && runtime.Value > TimeSpan.Zero
+                ? (int)Math.Round(runtime.Value.TotalSeconds, MidpointRounding.AwayFromZero)
+                : null;
+        }
+        catch (Exception ex) when (
+            !cancellationToken.IsCancellationRequested &&
+            ex is KodikException or HttpRequestException or TaskCanceledException or JsonException)
+        {
+            perf?.AddCount("kodik.runtime_probe_failures");
+            logger.LogDebug(
+                ex,
+                "[YummyKodik] Failed to resolve Kodik episode runtime. idType={IdType} id={Id} episode={Episode} translationId={TranslationId}",
+                idType,
+                id,
+                episode,
+                translationId);
+            return null;
+        }
+    }
+
+    private static async Task<KodikTranslationEpisodeResolution> ResolveDistinctKodikTranslationEpisodesAsync(
         ILogger logger,
         KodikClient kodik,
         KodikIdType idType,
         string id,
         List<KodikTranslation> translations,
         int[] episodes,
+        IDictionary<int, HashSet<string>> expectedEpisodeTranslationKeys,
         RefreshPerformanceMetrics? perf,
         CancellationToken cancellationToken)
     {
         var result = new Dictionary<string, HashSet<int>>(StringComparer.Ordinal);
+        var links = new Dictionary<string, Dictionary<int, KodikLinkInfo>>(StringComparer.Ordinal);
         if (translations.Count == 0 || episodes.Length == 0)
         {
-            return result;
+            return new KodikTranslationEpisodeResolution(result, links, true);
         }
+
+        var completed = true;
 
         foreach (var tr in translations)
         {
@@ -319,11 +495,10 @@ internal sealed class KodikSupplementService
                 continue;
             }
 
-            var candidateEpisodes = episodes
-                .Where(ep => tr.CoversEpisode(ep))
-                .Distinct()
-                .OrderBy(ep => ep)
-                .ToArray();
+            var candidateEpisodes = ResolveEpisodesNeedingKodikTranslation(
+                tr,
+                episodes,
+                expectedEpisodeTranslationKeys);
 
             if (candidateEpisodes.Length == 0)
             {
@@ -337,6 +512,7 @@ internal sealed class KodikSupplementService
             }
 
             var resolvedBasePaths = new Dictionary<int, string>();
+            var resolvedLinks = new Dictionary<int, KodikLinkInfo>();
             foreach (var episode in candidateEpisodes)
             {
                 try
@@ -353,10 +529,12 @@ internal sealed class KodikSupplementService
                     if (basePath.Length > 0)
                     {
                         resolvedBasePaths[episode] = basePath;
+                        resolvedLinks[episode] = link;
                     }
                 }
                 catch (Exception ex) when (ex is KodikException or HttpRequestException or TaskCanceledException or JsonException)
                 {
+                    completed = false;
                     perf?.AddCount("kodik.translation_link_failures");
                     logger.LogDebug(
                         ex,
@@ -381,10 +559,52 @@ internal sealed class KodikSupplementService
             }
 
             result[trId] = distinctEpisodes;
+            foreach (var removedEpisode in resolvedLinks.Keys.Where(ep => !distinctEpisodes.Contains(ep)).ToArray())
+            {
+                resolvedLinks.Remove(removedEpisode);
+            }
+
+            if (resolvedLinks.Count > 0)
+            {
+                links[trId] = resolvedLinks;
+            }
         }
 
-        return result;
+        return new KodikTranslationEpisodeResolution(result, links, completed);
     }
+
+    internal static int[] ResolveEpisodesNeedingKodikTranslation(
+        KodikTranslation translation,
+        IEnumerable<int> episodes,
+        IDictionary<int, HashSet<string>> expectedEpisodeTranslationKeys)
+    {
+        ArgumentNullException.ThrowIfNull(translation);
+        ArgumentNullException.ThrowIfNull(episodes);
+        ArgumentNullException.ThrowIfNull(expectedEpisodeTranslationKeys);
+
+        var translationId = (translation.Id ?? string.Empty).Trim();
+        var suffix = RefreshPathUtilities.SafeFilename(BuildTranslationFileSuffix(translation));
+        if (string.IsNullOrWhiteSpace(suffix))
+        {
+            suffix = "Translation_" + translationId;
+        }
+
+        return episodes
+            .Where(episode =>
+                translation.CoversEpisode(episode) &&
+                !EpisodeArtifactMaintenance.HasExpectedEpisodeTranslation(
+                    expectedEpisodeTranslationKeys,
+                    episode,
+                    suffix))
+            .Distinct()
+            .OrderBy(episode => episode)
+            .ToArray();
+    }
+
+    private sealed record KodikTranslationEpisodeResolution(
+        Dictionary<string, HashSet<int>> EpisodesByTranslationId,
+        Dictionary<string, Dictionary<int, KodikLinkInfo>> LinksByTranslationId,
+        bool Completed);
 
     private static List<KodikTranslation> PickTranslationsForFileMode(IReadOnlyList<KodikTranslation> translations)
     {

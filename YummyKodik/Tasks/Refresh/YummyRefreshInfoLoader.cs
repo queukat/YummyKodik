@@ -22,6 +22,7 @@ internal sealed class YummyRefreshInfoLoader
         RefreshClients clients,
         string cleanKey,
         string root,
+        string internalBaseUrl,
         RefreshPerformanceMetrics perf,
         CancellationToken cancellationToken)
     {
@@ -34,7 +35,7 @@ internal sealed class YummyRefreshInfoLoader
         var titleInfo = await ResolveYummyAnimeTitleInfoAsync(logger, anime, cleanKey, clients.Shikimori, perf, cancellationToken)
             .ConfigureAwait(false);
         var videoCatalog = await LoadYummyVideoCatalogAsync(logger, cfg, titleInfo, perf, cancellationToken).ConfigureAwait(false);
-        var files = BuildSeriesFileInfo(logger, root, titleInfo, cfg);
+        var files = BuildSeriesFileInfo(logger, root, titleInfo, internalBaseUrl);
         var availability = BuildEpisodeAvailabilityInfo(titleInfo.Anime, videoCatalog);
 
         return new YummyRefreshInfo(titleInfo, videoCatalog, files, availability);
@@ -132,7 +133,7 @@ internal sealed class YummyRefreshInfoLoader
         ILogger logger,
         string root,
         YummyAnimeTitleInfo titleInfo,
-        PluginConfiguration cfg)
+        string internalBaseUrl)
     {
         var folderName = RefreshPathUtilities.BuildSeriesFolderName(titleInfo.Title, titleInfo.Anime);
         var safeFolderName = RefreshPathUtilities.SafeFilename(folderName);
@@ -143,7 +144,7 @@ internal sealed class YummyRefreshInfoLoader
 
         var seasonDirName = $"Season {titleInfo.SeasonNumber:00}";
         var seasonDir = Path.Combine(seriesRoot, seasonDirName);
-        var baseUrl = (cfg.ServerBaseUrl ?? string.Empty).Trim().TrimEnd('/');
+        var baseUrl = (internalBaseUrl ?? string.Empty).Trim().TrimEnd('/');
         return new SeriesFileInfo(seriesRoot, seasonDir, baseUrl);
     }
 

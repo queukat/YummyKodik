@@ -8,10 +8,12 @@ internal sealed class RefreshPerformanceMetrics
     private readonly Stopwatch _total = Stopwatch.StartNew();
     private readonly Dictionary<string, long> _durationsMs = new(StringComparer.Ordinal);
     private readonly Dictionary<string, int> _counts = new(StringComparer.Ordinal);
+    private readonly RefreshRunMetrics? _runMetrics;
 
-    public RefreshPerformanceMetrics(bool enabled)
+    public RefreshPerformanceMetrics(bool enabled, RefreshRunMetrics? runMetrics = null)
     {
         Enabled = enabled;
+        _runMetrics = runMetrics;
     }
 
     public bool Enabled { get; }
@@ -29,6 +31,7 @@ internal sealed class RefreshPerformanceMetrics
         }
 
         var elapsedMs = Math.Max(0L, (long)Math.Round(elapsed.TotalMilliseconds));
+        _runMetrics?.AddDuration(key, elapsed);
         if (_durationsMs.TryGetValue(key, out var current))
         {
             _durationsMs[key] = current + elapsedMs;
@@ -44,6 +47,8 @@ internal sealed class RefreshPerformanceMetrics
         {
             return;
         }
+
+        _runMetrics?.AddCount(key, delta);
 
         if (_counts.TryGetValue(key, out var current))
         {
@@ -77,7 +82,7 @@ internal sealed class RefreshPerformanceMetrics
                     .OrderBy(x => x.Key, StringComparer.Ordinal)
                     .Select(x => $"{x.Key}={x.Value}"));
 
-        logger.LogInformation(
+        logger.LogWarning(
             "[YummyKodik][perf] Refresh '{Title}' (key='{Key}') took {ElapsedMs}ms. stages: {Stages}. counts: {Counts}",
             title,
             key,

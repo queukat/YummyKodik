@@ -18,6 +18,7 @@ using YummyKodik.Alloha;
 using YummyKodik.Configuration;
 using YummyKodik.Kodik;
 using YummyKodik.Logging;
+using YummyKodik.Tasks;
 using YummyKodik.Util;
 using YummyKodik.Yummy;
 
@@ -25,8 +26,16 @@ namespace YummyKodik.Media;
 
 public sealed class YummyKodikMediaSegmentProvider : IMediaSegmentProvider
 {
+    public const string ProviderName = "YummyKodik skip timings";
+
     private static readonly ConcurrentDictionary<string, SegmentCacheEntry> SegmentCache = new(StringComparer.OrdinalIgnoreCase);
     private static readonly TimeSpan SegmentCacheTtl = TimeSpan.FromHours(6);
+    private static readonly ConcurrentDictionary<string, VideoCatalogCacheEntry> VideoCatalogCache = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly ConcurrentDictionary<string, DateTime> VideoCatalogRetryAfterUtc = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly TimeSpan VideoCatalogCacheTtl = TimeSpan.FromMinutes(30);
+    private static readonly TimeSpan VideoCatalogStaleTtl = TimeSpan.FromHours(24);
+    private static readonly TimeSpan VideoCatalogFailureBackoff = TimeSpan.FromMinutes(5);
+    private static readonly TimeSpan VideoCatalogLoadTimeout = TimeSpan.FromSeconds(10);
 
     private readonly ILibraryManager _libraryManager;
     private readonly IHttpClientFactory _httpClientFactory;
@@ -42,7 +51,7 @@ public sealed class YummyKodikMediaSegmentProvider : IMediaSegmentProvider
         _logger = new YummyKodikLogger<YummyKodikMediaSegmentProvider>(logger);
     }
 
-    public string Name => "YummyKodik skip timings";
+    public string Name => ProviderName;
 
     public ValueTask<bool> Supports(BaseItem item)
     {
@@ -68,7 +77,7 @@ public sealed class YummyKodikMediaSegmentProvider : IMediaSegmentProvider
             YummyKodikStreamUri.TryParseRequest(cvhUri, out var streamRequest) &&
             streamRequest.Provider == YummyStreamProviderKind.Cvh)
         {
-            var cvhSegments = await GetCvhMediaSegmentsAsync(streamRequest, request.ItemId, cancellationToken).ConfigureAwait(false);
+            var cvhSegments = await GetCvhMediaSegmentsAsync(streamRequest, item, request.ItemId, cancellationToken).ConfigureAwait(false);
             return FilterExistingSegments(request, cvhSegments);
         }
 
@@ -78,6 +87,7 @@ public sealed class YummyKodikMediaSegmentProvider : IMediaSegmentProvider
         {
             var allohaSegments = await GetProviderMediaSegmentsAsync(
                     streamRequest,
+                    item,
                     request.ItemId,
                     YummyVideoProviderKind.Alloha,
                     cancellationToken)
@@ -119,7 +129,7 @@ public sealed class YummyKodikMediaSegmentProvider : IMediaSegmentProvider
             }
 
             var cacheKey = BuildCacheKey(idType, id, episode, translationId);
-            if (TryGetCachedSegments(cacheKey, out var cached))
+            if (TryGetCachedSegments(cacheKey, request.ItemId, out var cached))
             {
                 return FilterExistingSegments(request, cached);
             }
@@ -180,11 +190,13 @@ public sealed class YummyKodikMediaSegmentProvider : IMediaSegmentProvider
 
     private async Task<IReadOnlyList<MediaSegmentDto>> GetCvhMediaSegmentsAsync(
         YummyStreamRequest streamRequest,
+        BaseItem item,
         Guid itemId,
         CancellationToken cancellationToken)
     {
         return await GetProviderMediaSegmentsAsync(
                 streamRequest,
+                item,
                 itemId,
                 YummyVideoProviderKind.Cvh,
                 cancellationToken)
@@ -193,6 +205,7 @@ public sealed class YummyKodikMediaSegmentProvider : IMediaSegmentProvider
 
     private async Task<IReadOnlyList<MediaSegmentDto>> GetProviderMediaSegmentsAsync(
         YummyStreamRequest streamRequest,
+        BaseItem item,
         Guid itemId,
         YummyVideoProviderKind provider,
         CancellationToken cancellationToken)
@@ -207,14 +220,27 @@ public sealed class YummyKodikMediaSegmentProvider : IMediaSegmentProvider
         var voiceName = (streamRequest.VoiceName ?? string.Empty).Trim();
         var cacheKey = BuildProviderCacheKey(provider, streamRequest.AnimeId, episode, voiceName);
 
-        if (TryGetCachedSegments(cacheKey, out var cached))
+        if (TryGetCachedSegments(cacheKey, itemId, out var cached))
         {
             return cached;
         }
 
+        var localSegments = await TryGetRefreshStateMediaSegmentsAsync(item, itemId, cancellationToken).ConfigureAwait(false);
+        if (localSegments.Count > 0)
+        {
+            SegmentCache[cacheKey] = new SegmentCacheEntry
+            {
+                ExpiresAtUtc = DateTime.UtcNow.Add(SegmentCacheTtl),
+                Segments = localSegments
+            };
+
+            return localSegments;
+        }
+
         try
         {
-            var catalog = await LoadYummyVideoCatalogAsync(cfg, streamRequest.AnimeId.ToString(), cancellationToken).ConfigureAwait(false);
+            var catalogResult = await LoadYummyVideoCatalogAsync(cfg, streamRequest.AnimeId.ToString(), cancellationToken).ConfigureAwait(false);
+            var catalog = catalogResult.Catalog;
             if (string.IsNullOrWhiteSpace(voiceName))
             {
                 voiceName = catalog.PickPreferredVoiceName(
@@ -242,11 +268,14 @@ public sealed class YummyKodikMediaSegmentProvider : IMediaSegmentProvider
             }
 
             var segments = BuildSegments(itemId, skipEntry?.Skips);
-            SegmentCache[cacheKey] = new SegmentCacheEntry
+            if (segments.Count > 0 || catalogResult.AllowEmptySegmentCache)
             {
-                ExpiresAtUtc = DateTime.UtcNow.Add(SegmentCacheTtl),
-                Segments = segments
-            };
+                SegmentCache[cacheKey] = new SegmentCacheEntry
+                {
+                    ExpiresAtUtc = DateTime.UtcNow.Add(SegmentCacheTtl),
+                    Segments = segments
+                };
+            }
 
             return segments;
         }
@@ -276,7 +305,7 @@ public sealed class YummyKodikMediaSegmentProvider : IMediaSegmentProvider
         }
 
         var cacheKey = BuildYummyFallbackCacheKey(animeId, episode, preferredVoiceName, providerOrder);
-        if (TryGetCachedSegments(cacheKey, out var cached))
+        if (TryGetCachedSegments(cacheKey, itemId, out var cached))
         {
             return cached;
         }
@@ -284,8 +313,9 @@ public sealed class YummyKodikMediaSegmentProvider : IMediaSegmentProvider
         try
         {
             var cfg = Plugin.Instance.Configuration;
-            var catalog = await LoadYummyVideoCatalogAsync(cfg, animeId.ToString(CultureInfo.InvariantCulture), cancellationToken)
+            var catalogResult = await LoadYummyVideoCatalogAsync(cfg, animeId.ToString(CultureInfo.InvariantCulture), cancellationToken)
                 .ConfigureAwait(false);
+            var catalog = catalogResult.Catalog;
 
             var skipEntry = catalog.FindPreferredEntryWithSkipsAcrossProviders(episode, preferredVoiceName, providerOrder);
             var segments = BuildSegments(itemId, skipEntry?.Skips);
@@ -300,11 +330,14 @@ public sealed class YummyKodikMediaSegmentProvider : IMediaSegmentProvider
                     skipEntry.DisplayVoiceName);
             }
 
-            SegmentCache[cacheKey] = new SegmentCacheEntry
+            if (segments.Count > 0 || catalogResult.AllowEmptySegmentCache)
             {
-                ExpiresAtUtc = DateTime.UtcNow.Add(SegmentCacheTtl),
-                Segments = segments
-            };
+                SegmentCache[cacheKey] = new SegmentCacheEntry
+                {
+                    ExpiresAtUtc = DateTime.UtcNow.Add(SegmentCacheTtl),
+                    Segments = segments
+                };
+            }
 
             return segments;
         }
@@ -478,6 +511,68 @@ public sealed class YummyKodikMediaSegmentProvider : IMediaSegmentProvider
         return result;
     }
 
+    private static async Task<IReadOnlyList<MediaSegmentDto>> TryGetRefreshStateMediaSegmentsAsync(
+        BaseItem item,
+        Guid itemId,
+        CancellationToken cancellationToken)
+    {
+        if (item == null || string.IsNullOrWhiteSpace(item.Path))
+        {
+            return Array.Empty<MediaSegmentDto>();
+        }
+
+        var entry = await RefreshStateManager
+            .TryReadMediaSegmentEntryForPathAsync(item.Path, cancellationToken)
+            .ConfigureAwait(false);
+        if (entry?.Segments == null || entry.Segments.Length == 0)
+        {
+            return Array.Empty<MediaSegmentDto>();
+        }
+
+        var result = new List<MediaSegmentDto>(entry.Segments.Length);
+        foreach (var segment in entry.Segments)
+        {
+            if (segment.EndTicks <= segment.StartTicks || segment.StartTicks < 0)
+            {
+                continue;
+            }
+
+            if (!TryParseMediaSegmentType(segment.Type, out var type))
+            {
+                continue;
+            }
+
+            result.Add(new MediaSegmentDto
+            {
+                Id = Guid.NewGuid(),
+                ItemId = itemId,
+                Type = type,
+                StartTicks = segment.StartTicks,
+                EndTicks = segment.EndTicks
+            });
+        }
+
+        return result;
+    }
+
+    private static bool TryParseMediaSegmentType(string? value, out MediaSegmentType type)
+    {
+        if (string.Equals(value, "Intro", StringComparison.OrdinalIgnoreCase))
+        {
+            type = MediaSegmentType.Intro;
+            return true;
+        }
+
+        if (string.Equals(value, "Outro", StringComparison.OrdinalIgnoreCase))
+        {
+            type = MediaSegmentType.Outro;
+            return true;
+        }
+
+        type = default;
+        return false;
+    }
+
     private static IReadOnlyList<MediaSegmentDto> FilterExistingSegments(
         MediaSegmentGenerationRequest request,
         IReadOnlyList<MediaSegmentDto> segments)
@@ -525,16 +620,17 @@ public sealed class YummyKodikMediaSegmentProvider : IMediaSegmentProvider
         return $"yummy-fallback:{animeId}:ep:{episode}:voice:{(voiceName ?? string.Empty).Trim().ToLowerInvariant()}:providers:{providers}";
     }
 
-    private static bool TryGetCachedSegments(string cacheKey, out IReadOnlyList<MediaSegmentDto> segments)
+    private static bool TryGetCachedSegments(string cacheKey, Guid itemId, out IReadOnlyList<MediaSegmentDto> segments)
     {
         segments = Array.Empty<MediaSegmentDto>();
 
         if (!SegmentCache.TryGetValue(cacheKey, out var cached) || cached.ExpiresAtUtc <= DateTime.UtcNow)
         {
+            SegmentCache.TryRemove(cacheKey, out _);
             return false;
         }
 
-        segments = cached.Segments;
+        segments = YummyKodikMediaSegmentCache.CloneSegmentsForItem(cached.Segments, itemId);
         return true;
     }
 
@@ -557,7 +653,7 @@ public sealed class YummyKodikMediaSegmentProvider : IMediaSegmentProvider
         return !string.IsNullOrEmpty(uri);
     }
 
-    private async Task<YummyVideoCatalog> LoadYummyVideoCatalogAsync(
+    private async Task<VideoCatalogLoadResult> LoadYummyVideoCatalogAsync(
         PluginConfiguration cfg,
         string animeKey,
         CancellationToken cancellationToken)
@@ -567,17 +663,145 @@ public sealed class YummyKodikMediaSegmentProvider : IMediaSegmentProvider
             throw new InvalidOperationException("YummyClientId is not configured.");
         }
 
-        var http = _httpClientFactory.CreateClient(HttpClientNames.Yummy);
-        var yummy = new YummyClient(http, cfg.YummyClientId, cfg.YummyApiBaseUrl);
-        yummy.SetAccessToken(cfg.YummyAccessToken);
+        var cacheKey = BuildVideoCatalogCacheKey(cfg, animeKey);
+        var now = DateTime.UtcNow;
+        if (TryGetCachedVideoCatalog(cacheKey, now, allowStale: false, out var cached))
+        {
+            return new VideoCatalogLoadResult(cached, allowEmptySegmentCache: true);
+        }
 
-        var anime = await yummy.GetAnimeAsync(animeKey, includeVideos: true, cancellationToken).ConfigureAwait(false);
-        var allohaApiHttp = _httpClientFactory.CreateClient(HttpClientNames.AllohaApi);
-        var allohaApiEntries = await AllohaApiCatalogLoader
-            .LoadEntriesAsync(cfg, anime, allohaApiHttp, _logger, cancellationToken)
-            .ConfigureAwait(false);
+        if (TryGetVideoCatalogRetryAfter(cacheKey, now, out var retryAfterUtc))
+        {
+            if (TryGetCachedVideoCatalog(cacheKey, now, allowStale: true, out var stale))
+            {
+                _logger.LogDebug(
+                    "Using stale Yummy video catalog for media segments during retry backoff. animeKey={AnimeKey} retryAfterUtc={RetryAfterUtc}",
+                    animeKey,
+                    retryAfterUtc);
 
-        return YummyVideoCatalog.Create(anime, allohaApiEntries);
+                return new VideoCatalogLoadResult(stale, allowEmptySegmentCache: false);
+            }
+
+            _logger.LogDebug(
+                "Skipping Yummy video catalog load for media segments during retry backoff. animeKey={AnimeKey} retryAfterUtc={RetryAfterUtc}",
+                animeKey,
+                retryAfterUtc);
+
+            return new VideoCatalogLoadResult(YummyVideoCatalog.Create(null), allowEmptySegmentCache: false);
+        }
+
+        try
+        {
+            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeoutCts.CancelAfter(VideoCatalogLoadTimeout);
+
+            var http = _httpClientFactory.CreateClient(HttpClientNames.Yummy);
+            var yummy = new YummyClient(http, cfg.YummyClientId, cfg.YummyApiBaseUrl);
+            yummy.SetAccessToken(cfg.YummyAccessToken);
+
+            var anime = await yummy.GetAnimeAsync(animeKey, includeVideos: true, timeoutCts.Token).ConfigureAwait(false);
+            var allohaApiHttp = _httpClientFactory.CreateClient(HttpClientNames.AllohaApi);
+            var allohaApiEntries = await AllohaApiCatalogLoader
+                .LoadEntriesAsync(cfg, anime, allohaApiHttp, _logger, timeoutCts.Token)
+                .ConfigureAwait(false);
+
+            var catalog = YummyVideoCatalog.Create(anime, allohaApiEntries);
+            now = DateTime.UtcNow;
+            VideoCatalogCache[cacheKey] = new VideoCatalogCacheEntry
+            {
+                ExpiresAtUtc = now.Add(VideoCatalogCacheTtl),
+                StaleUntilUtc = now.Add(VideoCatalogStaleTtl),
+                Catalog = catalog
+            };
+            VideoCatalogRetryAfterUtc.TryRemove(cacheKey, out _);
+
+            return new VideoCatalogLoadResult(catalog, allowEmptySegmentCache: true);
+        }
+        catch (Exception ex) when (!cancellationToken.IsCancellationRequested && IsTransientVideoCatalogLoadException(ex))
+        {
+            now = DateTime.UtcNow;
+            retryAfterUtc = now.Add(VideoCatalogFailureBackoff);
+            VideoCatalogRetryAfterUtc[cacheKey] = retryAfterUtc;
+
+            if (TryGetCachedVideoCatalog(cacheKey, now, allowStale: true, out var stale))
+            {
+                _logger.LogDebug(
+                    ex,
+                    "Using stale Yummy video catalog for media segments after transient load failure. animeKey={AnimeKey} retryAfterUtc={RetryAfterUtc}",
+                    animeKey,
+                    retryAfterUtc);
+
+                return new VideoCatalogLoadResult(stale, allowEmptySegmentCache: false);
+            }
+
+            _logger.LogDebug(
+                ex,
+                "Failed to load Yummy video catalog for media segments; returning empty catalog until retry. animeKey={AnimeKey} retryAfterUtc={RetryAfterUtc}",
+                animeKey,
+                retryAfterUtc);
+
+            return new VideoCatalogLoadResult(YummyVideoCatalog.Create(null), allowEmptySegmentCache: false);
+        }
+    }
+
+    private static string BuildVideoCatalogCacheKey(PluginConfiguration cfg, string animeKey)
+    {
+        var apiBase = (cfg.YummyApiBaseUrl ?? string.Empty).Trim().TrimEnd('/').ToLowerInvariant();
+        var clientId = (cfg.YummyClientId ?? string.Empty).Trim().ToLowerInvariant();
+        var key = (animeKey ?? string.Empty).Trim().ToLowerInvariant();
+        return $"{apiBase}|{clientId}|{key}";
+    }
+
+    private static bool TryGetCachedVideoCatalog(
+        string cacheKey,
+        DateTime now,
+        bool allowStale,
+        out YummyVideoCatalog catalog)
+    {
+        catalog = null!;
+
+        if (!VideoCatalogCache.TryGetValue(cacheKey, out var cached))
+        {
+            return false;
+        }
+
+        if (cached.ExpiresAtUtc > now || (allowStale && cached.StaleUntilUtc > now))
+        {
+            catalog = cached.Catalog;
+            return true;
+        }
+
+        if (cached.StaleUntilUtc <= now)
+        {
+            VideoCatalogCache.TryRemove(cacheKey, out _);
+        }
+
+        return false;
+    }
+
+    private static bool TryGetVideoCatalogRetryAfter(string cacheKey, DateTime now, out DateTime retryAfterUtc)
+    {
+        retryAfterUtc = default;
+
+        if (!VideoCatalogRetryAfterUtc.TryGetValue(cacheKey, out var cachedRetryAfterUtc))
+        {
+            return false;
+        }
+
+        if (cachedRetryAfterUtc <= now)
+        {
+            VideoCatalogRetryAfterUtc.TryRemove(cacheKey, out _);
+            return false;
+        }
+
+        retryAfterUtc = cachedRetryAfterUtc;
+        return true;
+    }
+
+    private static bool IsTransientVideoCatalogLoadException(Exception ex)
+    {
+        return ex is HttpRequestException or TaskCanceledException or TimeoutException ||
+               (ex.InnerException != null && IsTransientVideoCatalogLoadException(ex.InnerException));
     }
 
     private static bool TryParseLogicalUri(
@@ -790,5 +1014,51 @@ public sealed class YummyKodikMediaSegmentProvider : IMediaSegmentProvider
         public DateTime ExpiresAtUtc { get; set; }
 
         public IReadOnlyList<MediaSegmentDto> Segments { get; set; } = Array.Empty<MediaSegmentDto>();
+    }
+
+    private sealed class VideoCatalogCacheEntry
+    {
+        public DateTime ExpiresAtUtc { get; set; }
+
+        public DateTime StaleUntilUtc { get; set; }
+
+        public YummyVideoCatalog Catalog { get; set; } = null!;
+    }
+
+    private readonly struct VideoCatalogLoadResult
+    {
+        public VideoCatalogLoadResult(YummyVideoCatalog catalog, bool allowEmptySegmentCache)
+        {
+            Catalog = catalog;
+            AllowEmptySegmentCache = allowEmptySegmentCache;
+        }
+
+        public YummyVideoCatalog Catalog { get; }
+
+        public bool AllowEmptySegmentCache { get; }
+    }
+}
+
+internal static class YummyKodikMediaSegmentCache
+{
+    public static IReadOnlyList<MediaSegmentDto> CloneSegmentsForItem(
+        IReadOnlyList<MediaSegmentDto> segments,
+        Guid itemId)
+    {
+        if (segments.Count == 0)
+        {
+            return Array.Empty<MediaSegmentDto>();
+        }
+
+        return segments
+            .Select(segment => new MediaSegmentDto
+            {
+                Id = Guid.NewGuid(),
+                ItemId = itemId,
+                Type = segment.Type,
+                StartTicks = segment.StartTicks,
+                EndTicks = segment.EndTicks
+            })
+            .ToArray();
     }
 }

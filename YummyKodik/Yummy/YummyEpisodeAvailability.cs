@@ -88,16 +88,26 @@ namespace YummyKodik.Yummy
                 .ToArray();
         }
 
-        public static int ResolveKodikAvailableEpisodeCount(int kodikSeriesCount, int expectedAvailableEpisodes)
+        public static (int KodikAvailableEpisodes, int OverallAvailableEpisodes) ResolveProviderCoverage(
+            int kodikSeriesCount,
+            int expectedAvailableEpisodes)
         {
+            var normalizedExpectedEpisodes = Math.Max(0, expectedAvailableEpisodes);
+            int kodikAvailableEpisodes;
             if (kodikSeriesCount > 0)
             {
-                return expectedAvailableEpisodes > 0
-                    ? Math.Min(kodikSeriesCount, expectedAvailableEpisodes)
+                kodikAvailableEpisodes = normalizedExpectedEpisodes > 0
+                    ? Math.Min(kodikSeriesCount, normalizedExpectedEpisodes)
                     : kodikSeriesCount;
             }
+            else
+            {
+                kodikAvailableEpisodes = normalizedExpectedEpisodes;
+            }
 
-            return Math.Max(0, expectedAvailableEpisodes);
+            return (
+                Math.Max(0, kodikAvailableEpisodes),
+                Math.Max(normalizedExpectedEpisodes, kodikAvailableEpisodes));
         }
 
         private static IEnumerable<int> NormalizeEpisodeNumbers(IEnumerable<int?>? episodeNumbers)

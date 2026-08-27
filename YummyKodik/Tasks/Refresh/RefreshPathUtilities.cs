@@ -125,9 +125,6 @@ internal static class RefreshPathUtilities
 
     public static string NormalizeKey(string? s)
     {
-        var v = (s ?? string.Empty).Trim();
-        v = v.Trim().Trim('"', '\'', '“', '”');
-        v = v.Trim('/');
-        return v;
+        return YummyClient.ExtractSlugOrId(s ?? string.Empty);
     }
 }

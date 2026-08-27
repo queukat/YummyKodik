@@ -116,34 +116,26 @@ jobs:
           cat > release-notes.md <<'MARKDOWN'
           ## What changed
 
-          - Made library refresh faster while keeping external API pressure conservative. Refresh workers can process different titles in parallel, but the default limit remains 2.
-          - Added a single-run gate so a second refresh exits quickly instead of doing duplicate work.
-          - Added per-series filesystem locks so season folder migration, cleanup, STRM/NFO writes, and state writes are serialized for the same series root.
-          - Split the refresh flow into smaller services for title loading, metadata writing, episode generation, Kodik supplementing, state checks, and cleanup.
-          - Added refresh state files for safe single-file skips. State is multi-season, written atomically, and never stores raw provider tokens, cookies, bearer tokens, or secret-bearing URLs.
-          - Added strict skip validation. The plugin now checks fingerprints, covered episodes, managed file hashes, missing files, and stale episode-shaped artifacts before skipping a title.
-          - Kept per-voice mode conservative. It still runs full provider lookup so new voice translation files can appear even when episode counts do not change.
-          - Made corrupt, missing, stale, or ambiguous refresh state fall back to a full refresh instead of failing or skipping too aggressively.
-          - Improved stale artifact cleanup for generated episode STRM/NFO files, including zero-episode and future-episode cases.
-          - Improved legacy season folder and episode filename migration under the series-root lock.
-          - Fixed atomic text writes so existing read-only generated STRM/NFO files can be replaced during refresh.
-          - Made Shikimori layout caching safe for concurrent refresh workers.
-          - Made shared Kodik token and lookup paths safer under parallel refresh and runtime playback.
-          - Delayed Kodik client initialization until a title actually needs Kodik supplement data.
-          - Added refresh performance diagnostics for slow-stage and file-operation troubleshooting.
-          - Added a configurable Minimum plugin log level. The default is Warning, so normal refresh and playback no longer spam Jellyfin with informational YummyKodik logs.
-          - Fixed a logging startup regression by avoiding global ILogger replacement and filtering only YummyKodik loggers.
-          - Improved Alloha/CVH/Kodik fallback handling, voice matching, playlist proxy recovery, and token refresh behavior used by runtime playback.
-          - Added regression coverage for refresh state skips, stale artifacts, parallelism, run gate behavior, thread-safe Shikimori cache, atomic file replacement, and plugin log filtering.
+          - Added a complete series voice selector that includes translations available through Jellyfin versions and all supported providers, including Kodik-only coverage.
+          - A selected voice now stays active across episodes: Jellyfin `Next` and autoplay advance in that voice wherever it is available. `Auto` restores normal automatic selection.
+          - Improved playback recovery for Alloha, CVH, and Kodik streams, including temporary provider failures, expired stream resources, stalls, and quality fallback.
+          - Added more accurate episode runtimes and earlier intro/outro skip availability when provider metadata is available.
+          - Made repeated library refreshes substantially faster when titles and generated files are unchanged, while still rechecking provider coverage when needed.
+          - Improved mixed-provider libraries where one provider has only part of a season or a translation is available from a different provider.
+          - Added an optional safe cleanup setting for plugin-managed releases removed from a successfully fetched Yummy user list. It is disabled by default.
+
+          ## Compatibility
+
+          - Requires Jellyfin 10.11.x and .NET 9, unchanged from the previous release.
+          - Existing plugin configuration remains compatible. The old Jellyfin server base URL value is retained for compatibility but is no longer used or shown; generated streams now use Jellyfin's local gateway automatically.
+          - Voice selection is series-wide because Jellyfin stores the primary episode version globally. Different users cannot keep independent simultaneous voice locks for the same series.
 
           ## After updating
 
-          - Restart Jellyfin after the plugin update.
-          - Open YummyKodik settings and verify Output root path and Jellyfin server base URL.
-          - Leave Minimum plugin log level at Warning for quiet normal operation, or lower it to Information/Debug/Trace only while diagnosing an issue.
-          - In Docker, use container paths such as /media/yummykodik, not Windows host paths.
-          - Run Scheduled Tasks -> YummyKodik library refresh after changing slugs, user-list settings, ServerBaseUrl, or per-voice STRM mode.
-          - Scan the Jellyfin library that points at the generated folder.
+          - Replace or install the plugin files, then restart Jellyfin.
+          - Run `Scheduled Tasks -> YummyKodik library refresh` once. The first refresh can take longer because generated metadata and refresh state are upgraded.
+          - Scan the Jellyfin library that points at the generated folder after that refresh.
+          - Use `Auto` in the series voice selector before making a one-off choice through Jellyfin's native version selector.
           MARKDOWN
 
           {

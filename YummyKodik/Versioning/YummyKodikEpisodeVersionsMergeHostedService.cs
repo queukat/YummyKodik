@@ -16,7 +16,10 @@ using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.IO;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using YummyKodik.Configuration;
+using YummyKodik.Kodik;
 using YummyKodik.Logging;
+using YummyKodik.Util;
 
 namespace YummyKodik.Versioning;
 
@@ -49,6 +52,10 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
 
     private volatile bool _mergeRequested;
     private volatile bool _stopping;
+    private volatile string _pendingMergeReason = "Unknown";
+
+    private int _activeRefreshBatches;
+    private int _authoritativeRefreshMergeCompleted;
 
     private bool _wasScanRunning;
 
@@ -103,6 +110,73 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
         _scanPollTimer = null;
 
         return Task.CompletedTask;
+    }
+
+    public void RequestTranslationPreferenceMerge()
+    {
+        RequestMerge(TimeSpan.FromSeconds(1), "TranslationPreferenceChanged");
+    }
+
+    /// <summary>
+    /// Suppresses event-driven merge passes while the managed refresh task is still writing files.
+    /// The returned scope must remain active until the post-refresh readiness barrier and final
+    /// merge have completed.
+    /// </summary>
+    public async Task<IDisposable> BeginRefreshBatchAsync(CancellationToken cancellationToken)
+    {
+        if (Interlocked.Increment(ref _activeRefreshBatches) == 1)
+        {
+            Interlocked.Exchange(ref _authoritativeRefreshMergeCompleted, 0);
+        }
+        try
+        {
+            _mergeDebounceTimer?.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
+        }
+        catch (ObjectDisposedException)
+        {
+            // Service shutdown won the race.
+        }
+
+        try
+        {
+            // Drain a worker that passed admission before this batch became active. Workers that
+            // acquire the lock after this point re-check _activeRefreshBatches and leave without
+            // touching Jellyfin repository links.
+            await _mergeLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+            _mergeLock.Release();
+        }
+        catch
+        {
+            EndRefreshBatch();
+            throw;
+        }
+
+        return new RefreshBatchScope(this);
+    }
+
+    /// <summary>
+    /// Runs the single authoritative merge pass after a managed refresh readiness barrier.
+    /// </summary>
+    public async Task MergeAfterRefreshAsync(CancellationToken cancellationToken)
+    {
+        await _mergeLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (_stopping)
+            {
+                return;
+            }
+
+            _mergeRequested = false;
+            await MergeAllEligibleEpisodesAsync("PostRefresh").ConfigureAwait(false);
+            _mergeRequested = false;
+            Interlocked.Exchange(ref _authoritativeRefreshMergeCompleted, 1);
+        }
+        finally
+        {
+            _mergeLock.Release();
+        }
     }
 
     public void Dispose()
@@ -206,11 +280,17 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
         }
 
         _mergeRequested = true;
+        _pendingMergeReason = reason;
+
+        if (Volatile.Read(ref _activeRefreshBatches) > 0)
+        {
+            return;
+        }
 
         if (_mergeDebounceTimer == null)
         {
             _mergeDebounceTimer = new Timer(
-                _ => MergeWorkerAsync(reason).ConfigureAwait(false),
+                _ => MergeWorkerAsync(_pendingMergeReason).ConfigureAwait(false),
                 null,
                 delay,
                 Timeout.InfiniteTimeSpan);
@@ -237,6 +317,12 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
 
         try
         {
+            if (Volatile.Read(ref _activeRefreshBatches) > 0)
+            {
+                _mergeRequested = true;
+                return;
+            }
+
             if (!_mergeRequested)
             {
                 return;
@@ -256,7 +342,9 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
         }
 
         // If something arrived while we were working, schedule another quick pass.
-        if (_mergeRequested && !_stopping)
+        if (_mergeRequested &&
+            !_stopping &&
+            Volatile.Read(ref _activeRefreshBatches) == 0)
         {
             _mergeDebounceTimer?.Change(TimeSpan.FromSeconds(3), Timeout.InfiniteTimeSpan);
         }
@@ -292,6 +380,7 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
         .Where(ep => IsUnderRoot(root, ep.Path))
         .Where(ep => ep.IndexNumber.HasValue && ep.IndexNumber.Value > 0)
         .Where(ep => ep.Path != null && ep.Path.EndsWith(".strm", StringComparison.OrdinalIgnoreCase))
+        .Where(ep => File.Exists(ep.Path))
         .ToList();
 
         if (allEpisodes.Count == 0)
@@ -345,7 +434,7 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
                 continue;
             }
 
-            var changed = await MergeEpisodeGroupAsync(videos, preferredTokens).ConfigureAwait(false);
+            var changed = await MergeEpisodeGroupAsync(videos, cfg, preferredTokens).ConfigureAwait(false);
             if (changed)
             {
                 merged++;
@@ -359,7 +448,7 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
             reason);
     }
 
-    private static async Task<bool> MergeEpisodeGroupAsync(List<Video> items, string[] preferredTokens)
+    private static async Task<bool> MergeEpisodeGroupAsync(List<Video> items, PluginConfiguration cfg, string[] preferredTokens)
     {
         var list = BuildMergeCandidates(items);
         if (list.Count < 2)
@@ -367,7 +456,7 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
             return false;
         }
 
-        var primary = PickPrimaryByPreferredFilter(list, preferredTokens);
+        var primary = PickPrimaryByPreferredFilter(list, cfg, preferredTokens);
         if (primary == null)
         {
             return false;
@@ -526,7 +615,7 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
         return changed;
     }
 
-    private static Video? PickPrimaryByPreferredFilter(List<Video> items, string[] preferredTokens)
+    private static Video? PickPrimaryByPreferredFilter(List<Video> items, PluginConfiguration cfg, string[] preferredTokens)
     {
         if (items == null || items.Count == 0)
         {
@@ -538,7 +627,12 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
             .OrderBy(v => GetFileNameNoExt(v.Path), StringComparer.OrdinalIgnoreCase)
             .ToList();
 
-        return PickPreferredTranslation(ordered, preferredTokens)
+        var savedPreferenceTokens = BuildSavedPreferenceTokensForPaths(
+            ordered.Select(v => v.Path ?? string.Empty),
+            cfg);
+
+        return PickPreferredTranslation(ordered, savedPreferenceTokens)
+               ?? PickPreferredTranslation(ordered, preferredTokens)
                ?? PickCurrentPrimary(ordered)
                ?? PickBaseNameVersion(ordered)
                ?? ordered[0];
@@ -567,14 +661,58 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
     private static Video? PickPreferredTranslation(IReadOnlyList<Video> ordered, string needleRaw)
     {
         var needleSafe = NormalizeTokenForFilename(needleRaw);
-        return ordered.FirstOrDefault(v => FileNameMatchesPreferredToken(v.Path, needleRaw, needleSafe));
+        return ordered.FirstOrDefault(v => PathMatchesPreferredToken(v.Path, needleRaw, needleSafe));
     }
 
-    private static bool FileNameMatchesPreferredToken(string? path, string needleRaw, string needleSafe)
+    private static bool PathMatchesPreferredToken(string? path, string? needleRaw, string? needleSafe)
+    {
+        if (FileNameMatchesPreferredToken(path, needleRaw, needleSafe))
+        {
+            return true;
+        }
+
+        if (!TryReadStrmRequest(path, out var request, out var query))
+        {
+            return false;
+        }
+
+        if (query.TryGetValue("tr", out var tr) &&
+            string.Equals((tr ?? string.Empty).Trim(), (needleRaw ?? string.Empty).Trim(), StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        return TextMatchesPreferredToken(request.VoiceName, needleRaw, needleSafe);
+    }
+
+    private static bool FileNameMatchesPreferredToken(string? path, string? needleRaw, string? needleSafe)
     {
         var fileName = GetFileNameNoExt(path);
-        return fileName.Contains(needleRaw, StringComparison.OrdinalIgnoreCase)
-               || (needleSafe.Length > 0 && fileName.Contains(needleSafe, StringComparison.OrdinalIgnoreCase));
+        return TextMatchesPreferredToken(fileName, needleRaw, needleSafe);
+    }
+
+    private static bool TextMatchesPreferredToken(string? value, string? needleRaw, string? needleSafe)
+    {
+        var text = (value ?? string.Empty).Trim();
+        var needle = (needleRaw ?? string.Empty).Trim();
+        if (text.Length == 0 || needle.Length == 0)
+        {
+            return false;
+        }
+
+        if (text.Contains(needle, StringComparison.OrdinalIgnoreCase) ||
+            (!string.IsNullOrEmpty(needleSafe) && text.Contains(needleSafe, StringComparison.OrdinalIgnoreCase)))
+        {
+            return true;
+        }
+
+        var textKey = TranslationNameKeyNormalizer.Normalize(text);
+        var needleKey = TranslationNameKeyNormalizer.Normalize(needle);
+        return textKey.Length > 0 &&
+               needleKey.Length > 0 &&
+               (string.Equals(textKey, needleKey, StringComparison.Ordinal) ||
+                textKey.Contains(needleKey, StringComparison.Ordinal) ||
+                needleKey.Contains(textKey, StringComparison.Ordinal));
     }
 
     private static Video? PickCurrentPrimary(IEnumerable<Video> ordered)
@@ -607,6 +745,157 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
         }
 
         return s.Trim();
+    }
+
+    private static string[] BuildSavedPreferenceTokensForPaths(IEnumerable<string> paths, PluginConfiguration cfg)
+    {
+        var seriesKeys = BuildSeriesPreferenceKeysForPaths(paths);
+        if (seriesKeys.Count == 0)
+        {
+            return Array.Empty<string>();
+        }
+
+        var tokens = new List<string>();
+        var seenTokens = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var token in EnumerateSavedPreferenceTokens(cfg, seriesKeys))
+        {
+            if (!string.IsNullOrWhiteSpace(token) && seenTokens.Add(token.Trim()))
+            {
+                tokens.Add(token.Trim());
+            }
+        }
+
+        return tokens.ToArray();
+    }
+
+    private static HashSet<string> BuildSeriesPreferenceKeysForPaths(IEnumerable<string> paths)
+    {
+        var keys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var path in paths)
+        {
+            if (!TryReadStrmRequest(path, out var request, out _))
+            {
+                continue;
+            }
+
+            foreach (var key in BuildSeriesPreferenceKeys(request))
+            {
+                if (!string.IsNullOrWhiteSpace(key))
+                {
+                    keys.Add(key.Trim().ToLowerInvariant());
+                }
+            }
+        }
+
+        return keys;
+    }
+
+    private static IEnumerable<string> BuildSeriesPreferenceKeys(YummyStreamRequest request)
+    {
+        switch (request.Provider)
+        {
+            case YummyStreamProviderKind.Alloha:
+            case YummyStreamProviderKind.Cvh:
+                if (request.AnimeId > 0)
+                {
+                    yield return $"yummy:{request.AnimeId}";
+                    yield return $"alloha:{request.AnimeId}";
+                    yield return $"cvh:{request.AnimeId}";
+                }
+                break;
+            case YummyStreamProviderKind.Kodik:
+                if (!string.IsNullOrWhiteSpace(request.KodikId))
+                {
+                    yield return KodikPlaybackSelector.BuildSeriesKey(request.KodikIdType, request.KodikId);
+                }
+                break;
+        }
+    }
+
+    private static IEnumerable<string> EnumerateSavedPreferenceTokens(
+        PluginConfiguration cfg,
+        ISet<string> seriesKeys)
+    {
+        // A merged episode can contain STRMs identified by different provider keys, for example
+        // both cvh:{animeId} and shikimori:{id}. There is no timestamp in the persisted
+        // preference schema, but its list order is stable and new preference records are
+        // appended. Treat the last applicable record as the current choice, rather than
+        // allowing an older provider-specific value to win merely because it appears first.
+        // User preferences still take precedence over the legacy global list.
+        foreach (var pref in (cfg.UserSeriesPreferredTranslations ?? new List<UserSeriesTranslationPreference>()).AsEnumerable().Reverse())
+        {
+            var key = NormalizePreferenceKey(pref?.SeriesKey);
+            if (key.Length > 0 && seriesKeys.Contains(key))
+            {
+                var token = (pref?.TranslationId ?? string.Empty).Trim();
+                if (token.Length > 0)
+                {
+                    yield return token;
+                }
+            }
+        }
+
+        foreach (var pref in (cfg.SeriesPreferredTranslations ?? new List<SeriesTranslationPreference>()).AsEnumerable().Reverse())
+        {
+            var key = NormalizePreferenceKey(pref?.SeriesKey);
+            if (key.Length > 0 && seriesKeys.Contains(key))
+            {
+                var token = (pref?.TranslationId ?? string.Empty).Trim();
+                if (token.Length > 0)
+                {
+                    yield return token;
+                }
+            }
+        }
+    }
+
+    private static string NormalizePreferenceKey(string? key)
+    {
+        return (key ?? string.Empty).Trim().ToLowerInvariant();
+    }
+
+    private static bool TryReadStrmRequest(
+        string? path,
+        out YummyStreamRequest request,
+        out IReadOnlyDictionary<string, string> query)
+    {
+        request = new YummyStreamRequest();
+        query = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        if (string.IsNullOrWhiteSpace(path) ||
+            !path.EndsWith(".strm", StringComparison.OrdinalIgnoreCase) ||
+            !File.Exists(path))
+        {
+            return false;
+        }
+
+        try
+        {
+            var line = File.ReadLines(path)
+                .Select(x => (x ?? string.Empty).Trim())
+                .FirstOrDefault(x => x.Length > 0);
+
+            if (string.IsNullOrWhiteSpace(line) ||
+                !YummyKodikStreamUri.TryParseRequest(line, out request))
+            {
+                return false;
+            }
+
+            if (Uri.TryCreate(line, UriKind.Absolute, out var uri))
+            {
+                query = YummyKodikStreamUri.ParseQueryToDictionary(uri.Query);
+            }
+
+            return true;
+        }
+        catch
+        {
+            request = new YummyStreamRequest();
+            query = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            return false;
+        }
     }
 
     private static string GetFileNameNoExt(string? path)
@@ -814,6 +1103,49 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
         {
             _scanCompletedEvent = null;
             _scanCompletedHandler = null;
+        }
+    }
+
+    private void EndRefreshBatch()
+    {
+        var remaining = Interlocked.Decrement(ref _activeRefreshBatches);
+        if (remaining < 0)
+        {
+            Interlocked.Exchange(ref _activeRefreshBatches, 0);
+            return;
+        }
+
+        if (remaining != 0)
+        {
+            return;
+        }
+
+        if (Interlocked.Exchange(ref _authoritativeRefreshMergeCompleted, 0) == 1)
+        {
+            // The post-refresh pass intentionally absorbs ItemAdded/ScanCompleted requests that
+            // arrived while the managed batch was settling or merging.
+            _mergeRequested = false;
+            return;
+        }
+
+        if (_mergeRequested && !_stopping)
+        {
+            RequestMerge(TimeSpan.FromSeconds(3), "RefreshBatchReleased");
+        }
+    }
+
+    private sealed class RefreshBatchScope : IDisposable
+    {
+        private YummyKodikEpisodeVersionsMergeHostedService? _owner;
+
+        public RefreshBatchScope(YummyKodikEpisodeVersionsMergeHostedService owner)
+        {
+            _owner = owner;
+        }
+
+        public void Dispose()
+        {
+            Interlocked.Exchange(ref _owner, null)?.EndRefreshBatch();
         }
     }
 

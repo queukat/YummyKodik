@@ -81,7 +81,7 @@ internal static class RefreshFileWriter
                 TryClearReadOnly(path, originalAttributes.Value);
             }
 
-            for (var attempt = 0;; attempt++)
+            for (var attempt = 0; ; attempt++)
             {
                 cancellationToken.ThrowIfCancellationRequested();
 

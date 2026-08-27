@@ -11,4 +11,16 @@
 - **Yummy-backed providers**: Alloha and CVH entries present in Yummy metadata or Alloha API enrichment.
 - **Kodik supplement**: Kodik lookup/generation used when Yummy-backed providers do not cover expected episodes or translations.
 - **Fingerprint**: stable SHA-256 digest of inputs that affect generated paths, URLs, expected episode files, cleanup decisions, and relevant config.
+- **Kodik catalog signature**: canonical SHA-256 digest of the selected Kodik identity, episode count, translations, and reported per-translation coverage; it detects catalog changes without resolving every episode link.
+- **Per-voice deep validation**: expensive Kodik pass that resolves translation/episode links and deduplicates reused videos; unchanged verified state may skip it for up to 24 hours after the current catalog lookup.
+- **High-quality Kodik fast path**: when preferred quality is above Kodik's known 720p ceiling, unchanged verified per-voice state may skip even the Kodik metadata lookup for up to 24 hours; Kodik remains a lower-quality fallback and is periodically rechecked.
+- **Preferred quality**: desired playback resolution included in the refresh fingerprint; it is not an availability requirement, so providers may fall back to their best lower resolution without hiding a stream or voice.
 - **Generation contract version**: code-level integer bumped when generated artifact semantics change in a way that should invalidate old state.
+- **Playback gateway**: Jellyfin's process-local API origin used in generated STRMs; it is reachable by the Jellyfin process/encoder and is distinct from client-facing network URLs.
+- **Post-refresh readiness barrier**: bounded wait for Jellyfin to materialize changed artifacts and forget deleted ones before the single authoritative versions merge.
+- **Runtime backfill**: conservative propagation of a known episode duration to missing or implausible sibling NFO or Jellyfin item runtime; it never replaces plausible metadata.
+- **Authoritative playback runtime**: exact duration resolved from the selected provider during playback; it may correct the effective primary item and its NFO when materially different, but is never copied across voice versions.
+- **Stale release cleanup**: opt-in deletion limited to plugin-managed releases absent from a successfully fetched complete Yummy user list; manual, unknown, changed, or unproven content is retained.
+- **Voice catalog**: canonical, normalized union of voices represented by managed episode versions and provider catalog data for a series.
+- **Primary version**: the Jellyfin episode item presented in the normal season sequence; linked alternates are other voices of the same episode.
+- **Voice-selection contract**: an explicit widget choice is mirrored across the series' provider keys, becomes the library-wide primary request, and overrides an arbitrary linked-child `voice`/`tr` at the gateway on every episode; `Auto` releases that lock for normal/native selection.

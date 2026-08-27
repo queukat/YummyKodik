@@ -21,6 +21,7 @@ using YummyKodik.Configuration;
 using YummyKodik.Kodik;
 using YummyKodik.Logging;
 using YummyKodik.Util;
+using YummyKodik.Versioning;
 using YummyKodik.Yummy;
 
 namespace YummyKodik.Api
@@ -33,15 +34,25 @@ namespace YummyKodik.Api
         private readonly IAuthorizationContext _authorizationContext;
         private readonly ILibraryManager _libraryManager;
         private readonly AllohaPlaybackService _allohaPlaybackService;
+        private readonly YummyKodikEpisodeVersionsMergeHostedService _episodeVersionsMergeService;
 
-        private static readonly YummyVideoProviderKind[] AllohaFallbackProviderOrder =
+        private enum GatewayFallbackProviderKind
         {
-            YummyVideoProviderKind.Cvh
+            Alloha,
+            Cvh,
+            Kodik
+        }
+
+        private static readonly GatewayFallbackProviderKind[] AllohaFallbackProviderOrder =
+        {
+            GatewayFallbackProviderKind.Kodik,
+            GatewayFallbackProviderKind.Cvh
         };
 
-        private static readonly YummyVideoProviderKind[] CvhFallbackProviderOrder =
+        private static readonly GatewayFallbackProviderKind[] CvhFallbackProviderOrder =
         {
-            YummyVideoProviderKind.Alloha
+            GatewayFallbackProviderKind.Alloha,
+            GatewayFallbackProviderKind.Kodik
         };
 
         private static readonly YummyVideoProviderKind[] YummyVoiceProviderOrder =
@@ -170,24 +181,41 @@ namespace YummyKodik.Api
             bool AllowProviderSpecified,
             CancellationToken CancellationToken);
 
+        private sealed record ManagedSeriesStream(
+            YummyStreamRequest Request,
+            string VoiceName,
+            string KodikTranslationId);
+
+        private sealed record TranslationOption(string Id, string Name, string Type);
+
         private readonly record struct KodikFallbackLinkAttempt(
             KodikClient Client,
             KodikLinkInfo? Link,
             Exception? Error,
             KodikStreamSelection Selection);
 
+        private sealed class SeriesNotManagedByYummyKodikException : Exception
+        {
+            public SeriesNotManagedByYummyKodikException(string message)
+                : base(message)
+            {
+            }
+        }
+
         public YummyKodikStreamController(
             ILogger<YummyKodikStreamController> logger,
             IHttpClientFactory httpClientFactory,
             IAuthorizationContext authorizationContext,
             ILibraryManager libraryManager,
-            AllohaPlaybackService allohaPlaybackService)
+            AllohaPlaybackService allohaPlaybackService,
+            YummyKodikEpisodeVersionsMergeHostedService episodeVersionsMergeService)
         {
             _logger = new YummyKodikLogger<YummyKodikStreamController>(logger);
             _httpClientFactory = httpClientFactory;
             _authorizationContext = authorizationContext;
             _libraryManager = libraryManager;
             _allohaPlaybackService = allohaPlaybackService;
+            _episodeVersionsMergeService = episodeVersionsMergeService;
         }
 
         [Authorize]
@@ -212,13 +240,19 @@ namespace YummyKodik.Api
                 var cfg = Plugin.Instance.Configuration;
                 var request = await ResolveSeriesFromJellyfinAsync(seriesId, cancellationToken).ConfigureAwait(false);
                 var seriesKey = BuildSeriesKey(request);
+                var managedStreams = GetManagedSeriesStreams(seriesId, cfg);
+                var managedPreferenceKeys = BuildManagedPreferenceKeys(request, managedStreams);
 
                 if (TryMapCatalogProvider(request.Provider, out var catalogProvider, out var providerId) &&
                     request.AnimeId > 0)
                 {
                     var catalog = await LoadYummyVideoCatalogAsync(cfg, request.AnimeId.ToString(), cancellationToken).ConfigureAwait(false);
                     var firstEpisode = catalog.GetFirstSupportedEpisodeNumber(catalogProvider) ?? 1;
-                    var savedVoice = GetSavedYummyVoiceName(cfg, auth.UserId, request.AnimeId, request.Provider);
+                    var savedVoice = GetSavedTranslationPreference(
+                        cfg,
+                        auth.UserId,
+                        seriesKey,
+                        managedPreferenceKeys);
                     var chosenVoice = catalog.PickPreferredVoiceName(
                         catalogProvider,
                         firstEpisode,
@@ -226,23 +260,25 @@ namespace YummyKodik.Api
                         savedVoiceName: savedVoice,
                         preferredFilter: cfg.PreferredTranslationFilter,
                         out var providerReason);
+                    var yummyTranslations = BuildTranslationOptions(
+                        catalog.GetAllVoiceNamesAcrossProviders(YummyVoiceProviderOrder),
+                        managedStreams.Select(x => x.VoiceName));
+                    var yummySavedTranslationId = ResolveWidgetTranslationId(
+                        ResolveVoiceNameForSelection(savedVoice, managedStreams),
+                        yummyTranslations);
+                    var yummyChosenTranslationId = ResolveWidgetTranslationId(
+                        ResolveVoiceNameForSelection(chosenVoice, managedStreams),
+                        yummyTranslations);
 
                     return Ok(new
                     {
                         seriesKey,
                         idType = providerId,
                         id = request.AnimeId.ToString(),
-                        savedTranslationId = savedVoice ?? string.Empty,
-                        chosenTranslationId = chosenVoice ?? string.Empty,
+                        savedTranslationId = yummySavedTranslationId,
+                        chosenTranslationId = yummyChosenTranslationId,
                         reason = providerReason,
-                        translations = catalog.GetAllVoiceNamesAcrossProviders(YummyVoiceProviderOrder)
-                            .Select(x => new
-                            {
-                                id = x,
-                                name = x,
-                                type = "voice"
-                            })
-                            .ToArray()
+                        translations = yummyTranslations
                     });
                 }
 
@@ -261,7 +297,11 @@ namespace YummyKodik.Api
                 var info = infoRes.Result;
 
                 var preferredTokens = StringTokenParser.ParseTokens(cfg.PreferredTranslationFilter);
-                var savedTrId = cfg.GetUserSeriesPreferredTranslationId(auth.UserId, seriesKey);
+                var savedTrId = GetSavedTranslationPreference(
+                    cfg,
+                    auth.UserId,
+                    seriesKey,
+                    managedPreferenceKeys);
 
                 // GetTranslations has no episode, pick "episode 1" as a stable default for coverage checks.
                 var (chosenTrId, _, reason) = KodikPlaybackSelector.PickTranslationForPlayback(
@@ -276,26 +316,42 @@ namespace YummyKodik.Api
                     chosenTrId = "0";
                 }
 
+                var catalogTranslations = GetKodikVoiceNames(info.Translations);
+                var translations = BuildTranslationOptions(
+                    catalogTranslations,
+                    managedStreams.Select(x => x.VoiceName));
+                var savedTranslationId = ResolveWidgetTranslationId(
+                    ResolveKodikSelectionVoiceName(savedTrId, info.Translations, managedStreams),
+                    translations);
+                var chosenTranslationId = ResolveWidgetTranslationId(
+                    ResolveKodikSelectionVoiceName(chosenTrId, info.Translations, managedStreams),
+                    translations);
+
                 return Ok(new
                 {
                     seriesKey,
                     idType = request.KodikIdType.ToString().ToLowerInvariant(),
                     id = request.KodikId,
-                    savedTranslationId = savedTrId ?? string.Empty,
-                    chosenTranslationId = chosenTrId,
+                    savedTranslationId,
+                    chosenTranslationId,
                     reason,
-                    translations = info.Translations.Select(t => new
-                    {
-                        id = (t.Id ?? string.Empty).Trim(),
-                        name = (t.Name ?? string.Empty).Trim(),
-                        type = (t.Type ?? string.Empty).Trim()
-                    }).ToArray()
+                    translations
                 });
             }
             catch (KodikTokenException ex)
             {
                 _logger.LogWarning(ex, "GetTranslations failed due to Kodik token. seriesId={SeriesId}", seriesId);
                 return StatusCode(503, "Kodik token is missing or invalid. Configure KodikToken in plugin settings.");
+            }
+            catch (SeriesNotManagedByYummyKodikException ex)
+            {
+                _logger.LogDebug(ex, "GetTranslations skipped for non-YummyKodik series. seriesId={SeriesId}", seriesId);
+                return Ok(BuildEmptyTranslationsResponse("not-managed"));
+            }
+            catch (ArgumentException ex)
+            {
+                _logger.LogDebug(ex, "GetTranslations skipped for invalid series id. seriesId={SeriesId}", seriesId);
+                return BadRequest("seriesId is not a valid GUID");
             }
             catch (Exception ex)
             {
@@ -328,22 +384,21 @@ namespace YummyKodik.Api
                 var request = await ResolveSeriesFromJellyfinAsync(seriesId, cancellationToken).ConfigureAwait(false);
                 var seriesKey = BuildSeriesKey(request);
                 var tid = (tr ?? string.Empty).Trim();
+                var managedStreams = GetManagedSeriesStreams(seriesId, cfg);
+                var managedPreferenceKeys = BuildManagedPreferenceKeys(request, managedStreams);
+                var selectedVoiceName = ResolveVoiceNameForSelection(tid, managedStreams);
 
                 bool changed;
                 lock (PrefsLock)
                 {
-                    if (IsYummyProviderRequest(request))
-                    {
-                        changed = SetYummyVoicePreference(cfg, auth.UserId, request.AnimeId, request.Provider, tid);
-                    }
-                    else
-                    {
-                        var translationId = string.IsNullOrWhiteSpace(tid) ? null : tid;
-                        changed = cfg.SetUserSeriesPreferredTranslationId(auth.UserId, seriesKey, translationId);
-                    }
+                    changed = SetLibraryWideTranslationPreference(
+                        cfg,
+                        managedPreferenceKeys,
+                        selectedVoiceName);
                     if (changed)
                     {
                         Plugin.Instance.SaveConfiguration();
+                        _episodeVersionsMergeService.RequestTranslationPreferenceMerge();
                     }
                 }
 
@@ -351,8 +406,18 @@ namespace YummyKodik.Api
                 {
                     changed,
                     seriesKey,
-                    translationId = tid
+                    translationId = selectedVoiceName
                 });
+            }
+            catch (SeriesNotManagedByYummyKodikException ex)
+            {
+                _logger.LogDebug(ex, "SetTranslation skipped for non-YummyKodik series. seriesId={SeriesId} tr={Tr}", seriesId, tr);
+                return NotFound("Series is not managed by YummyKodik");
+            }
+            catch (ArgumentException ex)
+            {
+                _logger.LogDebug(ex, "SetTranslation skipped for invalid series id. seriesId={SeriesId} tr={Tr}", seriesId, tr);
+                return BadRequest("seriesId is not a valid GUID");
             }
             catch (Exception ex)
             {
@@ -493,7 +558,15 @@ namespace YummyKodik.Api
 
         private async Task<IActionResult> ResolveAllohaStreamRequestAsync(AllohaStreamRequest request)
         {
-            var requestedVoice = request.VoiceName ?? request.TranslationId;
+            var explicitVoice = request.VoiceName ?? request.TranslationId;
+            var savedVoice = TryGetPositiveAnimeId(request.AnimeId, out var savedVoiceAnimeId)
+                ? GetSavedYummyVoiceName(
+                    request.Cfg,
+                    request.UserId,
+                    savedVoiceAnimeId,
+                    YummyStreamProviderKind.Alloha)
+                : null;
+            var requestedVoice = PickGatewayVoice(explicitVoice, savedVoice);
 
             try
             {
@@ -524,13 +597,26 @@ namespace YummyKodik.Api
             catch (Exception ex) when (CanTryYummyProviderFallback(request.AnimeId, ex))
             {
                 var resolvedAnimeId = request.AnimeId.GetValueOrDefault();
-                _logger.LogWarning(
-                    ex,
-                    "Alloha stream attempt failed, trying fallback providers. user={UserId} animeId={AnimeId} ep={Ep} requestedVoice={RequestedVoice}",
-                    request.UserId,
-                    resolvedAnimeId,
-                    request.Episode,
-                    requestedVoice);
+                if (!string.IsNullOrWhiteSpace(savedVoice))
+                {
+                    _logger.LogDebug(
+                        ex,
+                        "Alloha source does not carry the locked widget voice; routing through the gateway fallback. user={UserId} animeId={AnimeId} ep={Ep} requestedVoice={RequestedVoice}",
+                        request.UserId,
+                        resolvedAnimeId,
+                        request.Episode,
+                        requestedVoice);
+                }
+                else
+                {
+                    _logger.LogWarning(
+                        ex,
+                        "Alloha stream attempt failed, trying fallback providers. user={UserId} animeId={AnimeId} ep={Ep} requestedVoice={RequestedVoice}",
+                        request.UserId,
+                        resolvedAnimeId,
+                        request.Episode,
+                        requestedVoice);
+                }
 
                 return await ResolveYummyFallbackStreamAsync(
                         request.Cfg,
@@ -598,16 +684,6 @@ namespace YummyKodik.Api
                     directSource,
                     directSession);
 
-                if (!string.IsNullOrWhiteSpace(request.RequestedVoice))
-                {
-                    TrySaveYummyVoicePreference(
-                        request.Cfg,
-                        request.UserId,
-                        request.AnimeId,
-                        YummyStreamProviderKind.Alloha,
-                        request.RequestedVoice);
-                }
-
                 _logger.LogInformation(
                     "Alloha manifest prepared from embedded source: user={UserId} animeId={AnimeId} ep={Ep} requestedVoice={RequestedVoice} translationId={TranslationId}",
                     request.UserId,
@@ -674,7 +750,13 @@ namespace YummyKodik.Api
                 return BadRequest("animeId is required for CVH streams");
             }
 
-            var requestedVoice = request.VoiceName ?? request.TranslationId;
+            var explicitVoice = request.VoiceName ?? request.TranslationId;
+            var savedVoice = GetSavedYummyVoiceName(
+                request.Cfg,
+                request.UserId,
+                resolvedAnimeId,
+                YummyStreamProviderKind.Cvh);
+            var requestedVoice = PickGatewayVoice(explicitVoice, savedVoice);
             try
             {
                 var catalog = await LoadYummyVideoCatalogAsync(
@@ -697,13 +779,26 @@ namespace YummyKodik.Api
             }
             catch (Exception ex) when (IsYummyProviderFallbackException(ex))
             {
-                _logger.LogWarning(
-                    ex,
-                    "CVH stream attempt failed, trying fallback providers. user={UserId} animeId={AnimeId} ep={Ep} requestedVoice={RequestedVoice}",
-                    request.UserId,
-                    resolvedAnimeId,
-                    request.Episode,
-                    requestedVoice);
+                if (!string.IsNullOrWhiteSpace(savedVoice))
+                {
+                    _logger.LogDebug(
+                        ex,
+                        "CVH source does not carry the locked widget voice; routing through the gateway fallback. user={UserId} animeId={AnimeId} ep={Ep} requestedVoice={RequestedVoice}",
+                        request.UserId,
+                        resolvedAnimeId,
+                        request.Episode,
+                        requestedVoice);
+                }
+                else
+                {
+                    _logger.LogWarning(
+                        ex,
+                        "CVH stream attempt failed, trying fallback providers. user={UserId} animeId={AnimeId} ep={Ep} requestedVoice={RequestedVoice}",
+                        request.UserId,
+                        resolvedAnimeId,
+                        request.Episode,
+                        requestedVoice);
+                }
 
                 return await ResolveYummyFallbackStreamAsync(
                         request.Cfg,
@@ -741,9 +836,9 @@ namespace YummyKodik.Api
             kodik = infoRes.Client;
             var info = infoRes.Result;
             var seriesKey = KodikPlaybackSelector.BuildSeriesKey(idType, request.Id);
-            var explicitTr = (request.TranslationId ?? string.Empty).Trim();
             var preferredTokens = StringTokenParser.ParseTokens(request.Cfg.PreferredTranslationFilter);
             var savedTrId = request.Cfg.GetUserSeriesPreferredTranslationId(request.UserId, seriesKey);
+            var explicitTr = (request.TranslationId ?? string.Empty).Trim();
             var selection = PickKodikStreamSelection(info.Translations, preferredTokens, savedTrId, explicitTr, request.Episode);
 
             var linkAttempt = await TryResolveKodikEpisodeLinkAsync(
@@ -843,10 +938,11 @@ namespace YummyKodik.Api
             string explicitTr,
             int episode)
         {
+            var resolvedSavedTrId = ResolveKodikTranslationIdByVoiceName(translations, savedTrId, episode) ?? savedTrId;
             var (chosenTrId, waitIfMissing, reason) = KodikPlaybackSelector.PickTranslationForPlayback(
                 translations,
                 preferredTokens,
-                savedTrId,
+                resolvedSavedTrId,
                 explicitTr,
                 episode);
 
@@ -871,10 +967,11 @@ namespace YummyKodik.Api
                 return savedSelection;
             }
 
+            var resolvedSavedTrId = ResolveKodikTranslationIdByVoiceName(translations, savedTrId, episode) ?? savedTrId;
             var (chosenTrId, waitIfMissing, reason) = KodikPlaybackSelector.PickTranslationForPlayback(
                 translations,
                 preferredTokens,
-                savedTrId,
+                resolvedSavedTrId,
                 explicitTranslationId: string.Empty,
                 episode);
 
@@ -896,7 +993,7 @@ namespace YummyKodik.Api
             var translation = FindKodikTranslationByVoiceName(translations, requestedVoice, episode);
             if (translation == null || string.IsNullOrWhiteSpace(translation.Id))
             {
-                throw new InvalidOperationException("Requested Kodik fallback translation is unavailable from upstream.");
+                return false;
             }
 
             selection = new KodikStreamSelection(translation.Id.Trim(), true, "fallback-explicit-voice");
@@ -1060,19 +1157,10 @@ namespace YummyKodik.Api
         {
             var fmt = (request.Format ?? "mp4").Trim().ToLowerInvariant();
             var targetUrl = fmt == "hls"
-                ? KodikClient.BuildHlsUrl(request.Link, request.Quality)
+                ? BuildKodikProxyRedirectUrl(request.Link, request.Quality)
                 : KodikClient.BuildMp4Url(request.Link, request.Quality);
 
             SetNoStoreCacheHeader();
-
-            if (!string.IsNullOrWhiteSpace(request.ExplicitTranslationId))
-            {
-                TrySaveTranslationId(
-                    request.Cfg,
-                    request.UserId,
-                    request.SeriesKey,
-                    request.ExplicitTranslationId);
-            }
 
             _logger.LogInformation(
                 "Stream redirect: user={UserId} type={Type} id={Id} ep={Ep} tr={TrId} reason={Reason} -> {Url}",
@@ -1085,6 +1173,12 @@ namespace YummyKodik.Api
                 targetUrl);
 
             return Redirect(targetUrl);
+        }
+
+        private string BuildKodikProxyRedirectUrl(KodikLinkInfo link, int quality)
+        {
+            var session = KodikPlaybackService.CreateSession(link, quality);
+            return KodikPlaybackService.BuildManifestProxyUrl(session, BuildKodikProxyBaseUrl());
         }
 
         private static KodikLinkInfo RequireKodikFallbackLink(
@@ -1390,6 +1484,54 @@ namespace YummyKodik.Api
             }
         }
 
+        [AllowAnonymous]
+        [HttpGet("YummyKodik/kodik-proxy")]
+        [HttpGet("YummyKodik/kodik-proxy/{resourceName}")]
+        public async Task<IActionResult> KodikProxy(
+            [FromQuery] string? sessionId = null,
+            [FromQuery] string? resource = null,
+            string? resourceName = null,
+            CancellationToken cancellationToken = default)
+        {
+            var sessionKey = (sessionId ?? string.Empty).Trim();
+            if (sessionKey.Length == 0)
+            {
+                return BadRequest("sessionId is required");
+            }
+
+            if (!KodikPlaybackService.TryGetSession(sessionKey, out var session))
+            {
+                return StatusCode(410, "Kodik session expired.");
+            }
+
+            var resourceKey = (resource ?? string.Empty).Trim();
+            if (resourceKey.Length == 0)
+            {
+                return BadRequest("resource is required");
+            }
+
+            if (!KodikPlaybackService.TryResolveProxyResourceUrl(session, resourceKey, out var resourceUrl))
+            {
+                return NotFound("Kodik proxy resource was not found.");
+            }
+
+            try
+            {
+                var kodikProxy = new KodikPlaybackService(_httpClientFactory.CreateClient(HttpClientNames.Kodik), _logger);
+                var response = await kodikProxy
+                    .DownloadProxyResourceAsync(session, resourceKey, resourceUrl, BuildKodikProxyBaseUrl(), cancellationToken)
+                    .ConfigureAwait(false);
+
+                SetNoStoreCacheHeader();
+                return File(response.Content, response.ContentType);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Kodik proxy failed. sessionId={SessionId} resource={Resource}", sessionKey, resourceKey);
+                return StatusCode(502, "Upstream error");
+            }
+        }
+
         private static async Task<string> ResolveKodikTokenAsync(HttpClient http, PluginConfiguration cfg, CancellationToken ct)
         {
             var configured = (cfg.KodikToken ?? string.Empty).Trim();
@@ -1431,6 +1573,324 @@ namespace YummyKodik.Api
             }
         }
 
+        private IReadOnlyList<ManagedSeriesStream> GetManagedSeriesStreams(
+            string seriesId,
+            PluginConfiguration cfg)
+        {
+            if (!Guid.TryParse(seriesId, out var itemId) || itemId == Guid.Empty)
+            {
+                return Array.Empty<ManagedSeriesStream>();
+            }
+
+            var item = _libraryManager.GetItemById(itemId);
+            var configuredRoot = NormalizeConfiguredRoot(cfg.OutputRootPath);
+            var representativePath = item == null ? null : FindFirstStrmFileForItem(item, configuredRoot);
+            var seasonDirectory = string.IsNullOrWhiteSpace(representativePath)
+                ? null
+                : Path.GetDirectoryName(representativePath);
+            var seriesDirectory = string.IsNullOrWhiteSpace(seasonDirectory)
+                ? null
+                : Directory.GetParent(seasonDirectory)?.FullName;
+
+            if (string.IsNullOrWhiteSpace(seriesDirectory) ||
+                !IsPathWithinRoot(seriesDirectory, configuredRoot))
+            {
+                return Array.Empty<ManagedSeriesStream>();
+            }
+
+            var streams = new List<ManagedSeriesStream>();
+            foreach (var episode in _libraryManager.GetItemList(new InternalItemsQuery
+            {
+                IncludeItemTypes = new[] { BaseItemKind.Episode },
+                Recursive = true
+            })
+                     .OrderBy(x => x.IndexNumber ?? int.MaxValue)
+                     .ThenBy(x => x.Path, StringComparer.OrdinalIgnoreCase))
+            {
+                var path = (episode.Path ?? string.Empty).Trim();
+                if (!path.EndsWith(".strm", StringComparison.OrdinalIgnoreCase) ||
+                    !System.IO.File.Exists(path) ||
+                    !IsPathWithinRoot(path, seriesDirectory))
+                {
+                    continue;
+                }
+
+                if (TryReadManagedSeriesStream(path, out var stream))
+                {
+                    streams.Add(stream);
+                }
+            }
+
+            return streams;
+        }
+
+        private static bool TryReadManagedSeriesStream(string path, out ManagedSeriesStream stream)
+        {
+            stream = default!;
+            try
+            {
+                var line = System.IO.File.ReadLines(path)
+                    .Select(x => (x ?? string.Empty).Trim())
+                    .FirstOrDefault(x => x.Length > 0);
+                if (string.IsNullOrWhiteSpace(line) ||
+                    !YummyKodikStreamUri.TryParseRequest(line, out var request))
+                {
+                    return false;
+                }
+
+                var voiceName = YummyVideoCatalog.NormalizeVoiceName(request.VoiceName);
+                if (string.IsNullOrWhiteSpace(voiceName))
+                {
+                    voiceName = YummyVideoCatalog.NormalizeVoiceName(ExtractVoiceNameFromEpisodeFileName(path));
+                }
+
+                var kodikTranslationId = string.Empty;
+                if (request.Provider == YummyStreamProviderKind.Kodik &&
+                    Uri.TryCreate(line, UriKind.Absolute, out var uri))
+                {
+                    var query = YummyKodikStreamUri.ParseQueryToDictionary(uri.Query);
+                    kodikTranslationId = query.TryGetValue("tr", out var value)
+                        ? (value ?? string.Empty).Trim()
+                        : string.Empty;
+                }
+
+                stream = new ManagedSeriesStream(request, voiceName, kodikTranslationId);
+                return true;
+            }
+            catch (IOException)
+            {
+                return false;
+            }
+            catch (UnauthorizedAccessException)
+            {
+                return false;
+            }
+        }
+
+        private static IReadOnlyList<string> BuildManagedPreferenceKeys(
+            YummyStreamRequest representativeRequest,
+            IEnumerable<ManagedSeriesStream> managedStreams)
+        {
+            var keys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            AddPreferenceKeys(representativeRequest, keys);
+
+            foreach (var stream in managedStreams)
+            {
+                AddPreferenceKeys(stream.Request, keys);
+            }
+
+            return keys.ToArray();
+        }
+
+        private static void AddPreferenceKeys(YummyStreamRequest request, ISet<string> keys)
+        {
+            if (IsYummyProviderRequest(request))
+            {
+                foreach (var yummyKey in EnumerateYummyPreferenceKeys(
+                             request.AnimeId,
+                             request.Provider,
+                             includeAllLegacyProviderKeys: true))
+                {
+                    keys.Add(yummyKey);
+                }
+
+                return;
+            }
+
+            var key = BuildSeriesKey(request);
+            if (!string.IsNullOrWhiteSpace(key))
+            {
+                keys.Add(key);
+            }
+        }
+
+        private static string? GetSavedTranslationPreference(
+            PluginConfiguration cfg,
+            Guid userId,
+            string primarySeriesKey,
+            IEnumerable<string> managedPreferenceKeys)
+        {
+            var keys = new[] { primarySeriesKey }
+                .Concat(managedPreferenceKeys)
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .Distinct(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var key in keys)
+            {
+                var saved = cfg.GetUserSeriesPreferredTranslationId(userId, key);
+                if (!string.IsNullOrWhiteSpace(saved))
+                {
+                    return saved.Trim();
+                }
+            }
+
+            return null;
+        }
+
+        private static bool SetLibraryWideTranslationPreference(
+            PluginConfiguration cfg,
+            IEnumerable<string> managedPreferenceKeys,
+            string? voiceName)
+        {
+            var keys = managedPreferenceKeys
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .Select(x => x.Trim().ToLowerInvariant())
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            if (keys.Length == 0)
+            {
+                return false;
+            }
+
+            var keySet = keys.ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var changed = false;
+
+            // PrimaryVersionId is library-global. A widget selection therefore replaces stale
+            // per-user values for this managed series before mirroring one canonical default to
+            // every provider key. The merge uses that default to choose primary versions, while
+            // an explicitly requested per-voice STRM remains authoritative at the gateway.
+            cfg.UserSeriesPreferredTranslations ??= new List<UserSeriesTranslationPreference>();
+            for (var i = cfg.UserSeriesPreferredTranslations.Count - 1; i >= 0; i--)
+            {
+                var preference = cfg.UserSeriesPreferredTranslations[i];
+                var key = (preference?.SeriesKey ?? string.Empty).Trim().ToLowerInvariant();
+                if (keySet.Contains(key))
+                {
+                    cfg.UserSeriesPreferredTranslations.RemoveAt(i);
+                    changed = true;
+                }
+            }
+
+            var value = (voiceName ?? string.Empty).Trim();
+            foreach (var key in keys)
+            {
+                changed |= cfg.SetUserSeriesPreferredTranslationId(
+                    Guid.Empty,
+                    key,
+                    string.IsNullOrWhiteSpace(value) ? null : value);
+            }
+
+            return changed;
+        }
+
+        private static string PickGatewayVoice(string? explicitVoiceName, string? savedVoiceName)
+        {
+            var explicitVoice = (explicitVoiceName ?? string.Empty).Trim();
+            return explicitVoice.Length > 0
+                ? explicitVoice
+                : (savedVoiceName ?? string.Empty).Trim();
+        }
+
+        private static IReadOnlyList<TranslationOption> BuildTranslationOptions(
+            IEnumerable<string> catalogVoiceNames,
+            IEnumerable<string> managedVoiceNames)
+        {
+            var result = new List<TranslationOption>();
+            var keys = new HashSet<string>(StringComparer.Ordinal);
+
+            foreach (var rawName in catalogVoiceNames.Concat(managedVoiceNames))
+            {
+                var name = YummyVideoCatalog.NormalizeVoiceName(rawName);
+                var key = TranslationNameKeyNormalizer.Normalize(name);
+                if (string.IsNullOrWhiteSpace(name) || string.IsNullOrWhiteSpace(key) || !keys.Add(key))
+                {
+                    continue;
+                }
+
+                // The widget deliberately uses a voice name as its id. A numeric Kodik id is
+                // provider-specific and cannot select matching Yummy/CVH/Alloha file versions.
+                result.Add(new TranslationOption(name, name, "voice"));
+            }
+
+            return result;
+        }
+
+        private static IReadOnlyList<string> GetKodikVoiceNames(IReadOnlyList<KodikTranslation> translations)
+        {
+            var source = translations
+                .Where(x => string.Equals((x.Type ?? string.Empty).Trim(), "voice", StringComparison.OrdinalIgnoreCase))
+                .ToArray();
+            if (source.Length == 0)
+            {
+                source = translations.ToArray();
+            }
+
+            return source
+                .Select(x => (x.Name ?? string.Empty).Trim())
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .ToArray();
+        }
+
+        private static string ResolveWidgetTranslationId(
+            string? selection,
+            IReadOnlyList<TranslationOption> translations)
+        {
+            var value = (selection ?? string.Empty).Trim();
+            return TranslationNameKeyNormalizer.FindEquivalent(
+                       value,
+                       translations.Select(option => option.Id))
+                   ?? value;
+        }
+
+        private static string ResolveVoiceNameForSelection(
+            string? selection,
+            IEnumerable<ManagedSeriesStream> managedStreams)
+        {
+            var value = (selection ?? string.Empty).Trim();
+            if (value.Length == 0)
+            {
+                return string.Empty;
+            }
+
+            foreach (var stream in managedStreams)
+            {
+                if (!string.IsNullOrWhiteSpace(stream.VoiceName) &&
+                    (VoiceNamesEquivalent(value, stream.VoiceName) ||
+                     string.Equals(value, stream.KodikTranslationId, StringComparison.Ordinal)))
+                {
+                    return stream.VoiceName;
+                }
+            }
+
+            return YummyVideoCatalog.NormalizeVoiceName(value);
+        }
+
+        private static string ResolveKodikSelectionVoiceName(
+            string? selection,
+            IReadOnlyList<KodikTranslation> translations,
+            IEnumerable<ManagedSeriesStream> managedStreams)
+        {
+            var value = (selection ?? string.Empty).Trim();
+            if (value.Length == 0 || value == "0")
+            {
+                return string.Empty;
+            }
+
+            var translation = translations.FirstOrDefault(x =>
+                string.Equals((x.Id ?? string.Empty).Trim(), value, StringComparison.Ordinal));
+            if (!string.IsNullOrWhiteSpace(translation?.Name))
+            {
+                return ResolveVoiceNameForSelection(translation.Name, managedStreams);
+            }
+
+            return ResolveVoiceNameForSelection(value, managedStreams);
+        }
+
+        private static string? ResolveKodikTranslationIdByVoiceName(
+            IReadOnlyList<KodikTranslation> translations,
+            string? savedTranslation,
+            int episode)
+        {
+            var value = (savedTranslation ?? string.Empty).Trim();
+            if (value.Length == 0 ||
+                translations.Any(x => string.Equals((x.Id ?? string.Empty).Trim(), value, StringComparison.Ordinal)))
+            {
+                return null;
+            }
+
+            return FindKodikTranslationByVoiceName(translations, value, episode)?.Id?.Trim();
+        }
+
         private async Task<YummyStreamRequest> ResolveSeriesFromJellyfinAsync(
             string seriesId,
             CancellationToken cancellationToken)
@@ -1443,7 +1903,7 @@ namespace YummyKodik.Api
             var item = _libraryManager.GetItemById(itemGuid);
             if (item == null)
             {
-                throw new InvalidOperationException("Series item not found");
+                throw new SeriesNotManagedByYummyKodikException("Series item not found");
             }
 
             var cfg = Plugin.Instance.Configuration;
@@ -1451,17 +1911,31 @@ namespace YummyKodik.Api
             var strmFile = FindFirstStrmFileForItem(item, fullRoot);
             if (string.IsNullOrWhiteSpace(strmFile) || !System.IO.File.Exists(strmFile))
             {
-                throw new InvalidOperationException("No .strm files found for this series");
+                throw new SeriesNotManagedByYummyKodikException("No .strm files found for this series");
             }
 
             var content = (await System.IO.File.ReadAllTextAsync(strmFile, cancellationToken).ConfigureAwait(false)).Trim();
 
             if (!YummyKodikStreamUri.TryParseRequest(content, out var request))
             {
-                throw new InvalidOperationException("Failed to parse stream request from .strm content");
+                throw new SeriesNotManagedByYummyKodikException("Failed to parse stream request from .strm content");
             }
 
             return request;
+        }
+
+        private static object BuildEmptyTranslationsResponse(string reason)
+        {
+            return new
+            {
+                seriesKey = string.Empty,
+                idType = string.Empty,
+                id = string.Empty,
+                savedTranslationId = string.Empty,
+                chosenTranslationId = string.Empty,
+                reason,
+                translations = Array.Empty<object>()
+            };
         }
 
         private string? FindFirstStrmFileForItem(BaseItem item, string? fullRoot)
@@ -1487,11 +1961,11 @@ namespace YummyKodik.Api
             }
 
             var descendantMatch = _libraryManager.GetItemList(new InternalItemsQuery
-                {
-                    AncestorIds = new[] { item.Id },
-                    IncludeItemTypes = new[] { BaseItemKind.Episode },
-                    Recursive = true
-                })
+            {
+                AncestorIds = new[] { item.Id },
+                IncludeItemTypes = new[] { BaseItemKind.Episode },
+                Recursive = true
+            })
                 .Select(x => (x.Path ?? string.Empty).Trim())
                 .FirstOrDefault(path =>
                     !string.IsNullOrWhiteSpace(path) &&
@@ -1792,14 +2266,42 @@ namespace YummyKodik.Api
             return entry != null;
         }
 
-        private static YummyVideoProviderKind[] GetFallbackProviderOrder(YummyStreamProviderKind failedProvider)
+        private static GatewayFallbackProviderKind[] GetFallbackProviderOrder(YummyStreamProviderKind failedProvider)
         {
             return failedProvider switch
             {
                 YummyStreamProviderKind.Cvh => CvhFallbackProviderOrder,
                 YummyStreamProviderKind.Alloha => AllohaFallbackProviderOrder,
-                _ => Array.Empty<YummyVideoProviderKind>()
+                _ => Array.Empty<GatewayFallbackProviderKind>()
             };
+        }
+
+        private static GatewayFallbackProviderKind[] GetVoiceAwareFallbackProviderOrder(
+            YummyStreamProviderKind failedProvider,
+            YummyVideoCatalog catalog,
+            int episode,
+            string? requestedVoice)
+        {
+            var configuredOrder = GetFallbackProviderOrder(failedProvider);
+            if (catalog == null || string.IsNullOrWhiteSpace(requestedVoice))
+            {
+                return configuredOrder;
+            }
+
+            var requestedVoiceExistsInYummyCatalog = catalog
+                .GetAllVoiceNamesAcrossProviders(YummyVoiceProviderOrder)
+                .Any(x => VoiceNamesEquivalent(requestedVoice, x));
+            if (requestedVoiceExistsInYummyCatalog)
+            {
+                return configuredOrder;
+            }
+
+            // The requested/locked voice is not represented by either Yummy-backed transport.
+            // Try Kodik first instead of producing one expected failure per Yummy provider on
+            // every autoplayed episode.
+            return configuredOrder
+                .OrderBy(x => x == GatewayFallbackProviderKind.Kodik ? 0 : 1)
+                .ToArray();
         }
 
         private static bool IsYummyProviderFallbackException(Exception ex)
@@ -1958,13 +2460,19 @@ namespace YummyKodik.Api
         private string BuildAllohaProxyBaseUrl()
         {
             var pathBase = Request.PathBase.HasValue ? Request.PathBase.Value : string.Empty;
-            return $"{Request.Scheme}://{Request.Host}{pathBase}/YummyKodik/alloha-proxy";
+            return $"{pathBase}/YummyKodik/alloha-proxy";
         }
 
         private string BuildCvhProxyBaseUrl()
         {
             var pathBase = Request.PathBase.HasValue ? Request.PathBase.Value : string.Empty;
-            return $"{Request.Scheme}://{Request.Host}{pathBase}/YummyKodik/cvh-proxy";
+            return $"{pathBase}/YummyKodik/cvh-proxy";
+        }
+
+        private string BuildKodikProxyBaseUrl()
+        {
+            var pathBase = Request.PathBase.HasValue ? Request.PathBase.Value : string.Empty;
+            return $"{pathBase}/YummyKodik/kodik-proxy";
         }
 
         private static bool TryMapCatalogProvider(
@@ -2041,11 +2549,6 @@ namespace YummyKodik.Api
             if (chosenEntry?.Alloha == null)
             {
                 throw new InvalidOperationException("Alloha episode is not available for this anime.");
-            }
-
-            if (!string.IsNullOrWhiteSpace(requestedVoice))
-            {
-                TrySaveYummyVoicePreference(cfg, userId, animeId, YummyStreamProviderKind.Alloha, requestedVoice);
             }
 
             var session = await _allohaPlaybackService.CreateSessionAsync(chosenEntry.Alloha, quality, chosenVoice, cancellationToken)
@@ -2131,11 +2634,6 @@ namespace YummyKodik.Api
             if (chosenEntry?.Alloha == null)
             {
                 throw new InvalidOperationException("Alloha episode is not available for this anime.");
-            }
-
-            if (!string.IsNullOrWhiteSpace(requestedVoice))
-            {
-                TrySaveYummyVoicePreference(cfg, userId, animeId, YummyStreamProviderKind.Alloha, requestedVoice);
             }
 
             var session = await _allohaPlaybackService.CreateSessionAsync(chosenEntry.Alloha, quality, chosenVoice, cancellationToken)
@@ -2252,11 +2750,6 @@ namespace YummyKodik.Api
 
             SetNoStoreCacheHeader();
 
-            if (!string.IsNullOrWhiteSpace(requestedVoice))
-            {
-                TrySaveYummyVoicePreference(cfg, userId, animeId, YummyStreamProviderKind.Cvh, requestedVoice);
-            }
-
             _logger.LogInformation(
                 "CVH stream resolved: user={UserId} animeId={AnimeId} cvhAnimeId={CvhAnimeId} ep={Ep} requestedVoice={RequestedVoice} chosenVoice={ChosenVoice} sourceVoice={SourceVoice} resolvedVoice={ResolvedVoice} reason={Reason} format={Format} -> {Url}",
                 userId,
@@ -2305,11 +2798,40 @@ namespace YummyKodik.Api
                 .ConfigureAwait(false);
             var fallbackErrors = new List<Exception> { originalError };
 
-            foreach (var provider in GetFallbackProviderOrder(failedProvider))
+            foreach (var provider in GetVoiceAwareFallbackProviderOrder(
+                         failedProvider,
+                         catalog,
+                         episode,
+                         requestedVoice))
             {
                 try
                 {
-                    if (provider == YummyVideoProviderKind.Cvh)
+                    if (provider == GatewayFallbackProviderKind.Kodik)
+                    {
+                        var result = await ResolveKodikFallbackStreamAsync(
+                                cfg,
+                                userId,
+                                anime,
+                                episode,
+                                requestedVoice,
+                                savedYummyVoice,
+                                quality,
+                                format,
+                                cancellationToken)
+                            .ConfigureAwait(false);
+
+                        _logger.LogInformation(
+                            "Yummy provider fallback succeeded. from={FromProvider} to={ToProvider} animeId={AnimeId} ep={Ep} requestedVoice={RequestedVoice}",
+                            failedProvider,
+                            provider,
+                            animeId,
+                            episode,
+                            requestedVoice);
+
+                        return result;
+                    }
+
+                    if (provider == GatewayFallbackProviderKind.Cvh)
                     {
                         var result = await ResolveCvhStreamFromCatalogAsync(
                                 cfg,
@@ -2335,7 +2857,7 @@ namespace YummyKodik.Api
                         return result;
                     }
 
-                    if (provider == YummyVideoProviderKind.Alloha)
+                    if (provider == GatewayFallbackProviderKind.Alloha)
                     {
                         var session = await ResolveAllohaSessionFromCatalogAsync(
                                 cfg,
@@ -2374,32 +2896,6 @@ namespace YummyKodik.Api
                         episode,
                         requestedVoice);
                 }
-            }
-
-            try
-            {
-                return await ResolveKodikFallbackStreamAsync(
-                        cfg,
-                        userId,
-                        anime,
-                        episode,
-                        requestedVoice,
-                        savedYummyVoice,
-                        quality,
-                        format,
-                        cancellationToken)
-                    .ConfigureAwait(false);
-            }
-            catch (Exception ex) when (IsYummyProviderFallbackException(ex))
-            {
-                fallbackErrors.Add(ex);
-                _logger.LogWarning(
-                    ex,
-                    "Kodik fallback attempt failed. from={FromProvider} animeId={AnimeId} ep={Ep} requestedVoice={RequestedVoice}",
-                    failedProvider,
-                    animeId,
-                    episode,
-                    requestedVoice);
             }
 
             throw new InvalidOperationException("All provider fallback attempts failed.", fallbackErrors[^1]);
@@ -2549,16 +3045,12 @@ namespace YummyKodik.Api
 
                 var fmt = (format ?? "mp4").Trim().ToLowerInvariant();
                 var targetUrl = fmt == "hls"
-                    ? KodikClient.BuildHlsUrl(link, quality)
+                    ? BuildKodikProxyRedirectUrl(link, quality)
                     : KodikClient.BuildMp4Url(link, quality);
 
                 SetNoStoreCacheHeader();
 
                 var tid = (translationId ?? string.Empty).Trim();
-                if (!string.IsNullOrWhiteSpace(tid))
-                {
-                    TrySaveTranslationId(cfg, userId, KodikPlaybackSelector.BuildSeriesKey(idType, id), tid);
-                }
 
                 _logger.LogInformation(
                     originalError,

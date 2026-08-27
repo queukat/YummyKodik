@@ -15,6 +15,10 @@ internal sealed class RefreshTitleKeySource
         _saveConfiguration = saveConfiguration;
     }
 
+    public bool UserListFetchFailed { get; private set; }
+
+    public bool UserListFetchSucceeded { get; private set; }
+
     public async Task<List<string>> BuildAsync(
         PluginConfiguration cfg,
         YummyClient yummyClient,
@@ -51,6 +55,9 @@ internal sealed class RefreshTitleKeySource
         HashSet<string> keys,
         CancellationToken cancellationToken)
     {
+        UserListFetchFailed = false;
+        UserListFetchSucceeded = false;
+
         if (!cfg.UseUserListSubscription)
         {
             return;
@@ -76,9 +83,11 @@ internal sealed class RefreshTitleKeySource
                 items.Count);
 
             AddUserListItemKeys(items, keys);
+            UserListFetchSucceeded = true;
         }
         catch (Exception ex)
         {
+            UserListFetchFailed = true;
             _logger.LogError(ex, "[YummyKodik] Failed to fetch user list, falling back to manual slugs only.");
         }
     }

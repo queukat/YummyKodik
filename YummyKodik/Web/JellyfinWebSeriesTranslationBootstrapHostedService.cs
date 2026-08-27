@@ -58,7 +58,9 @@ public sealed class JellyfinWebSeriesTranslationBootstrapHostedService : IHosted
 
             var html = File.ReadAllText(indexPath);
             var version = typeof(Plugin).Assembly.GetName().Version?.ToString() ?? "1";
-            var scriptUrl = $"/web/ConfigurationPage?name=seriesTranslation.js&v={Uri.EscapeDataString(version)}";
+            var buildId = typeof(Plugin).Assembly.ManifestModule.ModuleVersionId.ToString("N");
+            var scriptVersion = Uri.EscapeDataString($"{version}-{buildId}");
+            var scriptUrl = $"/web/ConfigurationPage?name=seriesTranslation.js&v={scriptVersion}";
 
             if (!JellyfinWebIndexPatcher.TryInjectSeriesTranslationScript(html, scriptUrl, out var patchedHtml))
             {

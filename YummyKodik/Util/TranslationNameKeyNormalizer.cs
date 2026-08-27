@@ -50,6 +50,25 @@ public static class TranslationNameKeyNormalizer
         return CanonicalizeKey(NormalizeTokens(normalized));
     }
 
+    public static string? FindEquivalent(string? value, IEnumerable<string> candidates)
+    {
+        ArgumentNullException.ThrowIfNull(candidates);
+
+        var requested = (value ?? string.Empty).Trim();
+        var requestedKey = Normalize(requested);
+        if (requested.Length == 0 || requestedKey.Length == 0)
+        {
+            return null;
+        }
+
+        return candidates
+            .Select(candidate => (candidate ?? string.Empty).Trim())
+            .Where(candidate => candidate.Length > 0)
+            .FirstOrDefault(candidate =>
+                string.Equals(candidate, requested, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(Normalize(candidate), requestedKey, StringComparison.Ordinal));
+    }
+
     private static Dictionary<string, string> BuildCanonicalAliases()
     {
         var aliases = new Dictionary<string, string>(StringComparer.Ordinal);

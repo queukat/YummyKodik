@@ -1,17 +1,27 @@
+using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Http;
 using System.Reflection;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
+using System.Xml.Linq;
+using Jellyfin.Database.Implementations.Enums;
+using MediaBrowser.Model.Dto;
+using MediaBrowser.Model.Entities;
+using MediaBrowser.Model.MediaSegments;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using YummyKodik;
 using YummyKodik.Cvh;
 using YummyKodik.Alloha;
 using YummyKodik.Configuration;
 using YummyKodik.Kodik;
 using YummyKodik.Logging;
+using YummyKodik.Media;
 using YummyKodik.Shikimori;
 using YummyKodik.Tasks;
+using YummyKodik.Tasks.Refresh;
 using YummyKodik.Util;
 using YummyKodik.Web;
 using YummyKodik.Yummy;
@@ -46,6 +56,14 @@ var tests = new (string Name, Action Run)[]
     ("KodikClient_GetAnimeInfoAsync_TracksExplicitEpisodeCoverageFromSearch", KodikClient_GetAnimeInfoAsync_TracksExplicitEpisodeCoverageFromSearch),
     ("KodikClient_GetEpisodeTimingsAsync_UsesEpisodeLevelSearchLink", KodikClient_GetEpisodeTimingsAsync_UsesEpisodeLevelSearchLink),
     ("KodikClient_GetEpisodeLinkAsync_FallsBackToSeasonLinkWhenEpisodeLinkIsBroken", KodikClient_GetEpisodeLinkAsync_FallsBackToSeasonLinkWhenEpisodeLinkIsBroken),
+    ("KodikClient_RunSearchCacheSharesInflightAndEvictsFaults", KodikClient_RunSearchCacheSharesInflightAndEvictsFaults),
+    ("KodikClient_RunScriptCacheSharesSuccessAndEvictsAfterPostFailure", KodikClient_RunScriptCacheSharesSuccessAndEvictsAfterPostFailure),
+    ("KodikSupplement_RuntimeProbeUsesDeepValidatedLink", KodikSupplement_RuntimeProbeUsesDeepValidatedLink),
+    ("KodikPlaybackService_ProxiesHlsResourcesAndCachesSegments", KodikPlaybackService_ProxiesHlsResourcesAndCachesSegments),
+    ("KodikPlaybackService_RetriesTransientSegmentFailures", KodikPlaybackService_RetriesTransientSegmentFailures),
+    ("KodikPlaybackService_UsesShortBackoffForTransportFailures", KodikPlaybackService_UsesShortBackoffForTransportFailures),
+    ("KodikPlaybackService_RetriesTransientNotFoundSegments", KodikPlaybackService_RetriesTransientNotFoundSegments),
+    ("KodikPlaybackService_BoundsPersistentTransientFailures", KodikPlaybackService_BoundsPersistentTransientFailures),
     ("KodikClient_GetAnimeInfoAsync_FallsBackToHtmlFindPlayerResponse", KodikClient_GetAnimeInfoAsync_FallsBackToHtmlFindPlayerResponse),
     ("KodikTokenResolver_DecodesOnlineModPayload", KodikTokenResolver_DecodesOnlineModPayload),
     ("KodikTitleResolver_NormalizesUnicodeWords", KodikTitleResolver_NormalizesUnicodeWords),
@@ -72,6 +90,9 @@ var tests = new (string Name, Action Run)[]
     ("ShikimoriSeriesLayoutResolver_DoesNotTreatSpecialAsNewSeason", ShikimoriSeriesLayoutResolver_DoesNotTreatSpecialAsNewSeason),
     ("NfoBuilder_BuildSeriesNfo_ProducesXml", NfoBuilder_BuildSeriesNfo_ProducesXml),
     ("NfoBuilder_BuildEpisodeNfo_ProducesXml", NfoBuilder_BuildEpisodeNfo_ProducesXml),
+    ("NfoBuilder_BuildEpisodeNfo_WritesExactRuntime", NfoBuilder_BuildEpisodeNfo_WritesExactRuntime),
+    ("NfoBuilder_EnsureEpisodeRuntime_BackfillsLegacyNfo", NfoBuilder_EnsureEpisodeRuntime_BackfillsLegacyNfo),
+    ("EpisodeRuntimeBackfillService_BorrowsSiblingRuntime", EpisodeRuntimeBackfillService_BorrowsSiblingRuntime),
     ("RewriteEpisodeFileSeasonPrefix_UsesSeasonZeroForSpecials", RewriteEpisodeFileSeasonPrefix_UsesSeasonZeroForSpecials),
     ("BuildSeriesFolderName_UsesProviderCompatibleShikimoriTag", BuildSeriesFolderName_UsesProviderCompatibleShikimoriTag),
     ("PrepareSeasonDirectory_MovesSeasonOneArtifactsOutOfMistakenSeasonTwoFolder", PrepareSeasonDirectory_MovesSeasonOneArtifactsOutOfMistakenSeasonTwoFolder),
@@ -80,6 +101,8 @@ var tests = new (string Name, Action Run)[]
     ("PrepareSeasonDirectory_MovesSpecialArtifactsIntoSeasonZeroFolder", PrepareSeasonDirectory_MovesSpecialArtifactsIntoSeasonZeroFolder),
     ("YummyVideoCatalog_ParsesCvhProviders", YummyVideoCatalog_ParsesCvhProviders),
     ("YummyVideoCatalog_DecodesCvhDubbingCodePlusAsSpace", YummyVideoCatalog_DecodesCvhDubbingCodePlusAsSpace),
+    ("YummyClient_GetUserListAsync_AcceptsValidEmptyResponse", YummyClient_GetUserListAsync_AcceptsValidEmptyResponse),
+    ("YummyClient_GetUserListAsync_RejectsMissingResponseArray", YummyClient_GetUserListAsync_RejectsMissingResponseArray),
     ("CvhClient_AddsBrowserHeadersAndParsesResponses", CvhClient_AddsBrowserHeadersAndParsesResponses),
     ("CvhClient_PrefersDubbingNameOverNumericDubbingCode", CvhClient_PrefersDubbingNameOverNumericDubbingCode),
     ("CvhClient_MatchesEquivalentVoiceKeys", CvhClient_MatchesEquivalentVoiceKeys),
@@ -103,8 +126,17 @@ var tests = new (string Name, Action Run)[]
     ("YummyVideoCatalog_MatchesCrossProviderVoiceAliases", YummyVideoCatalog_MatchesCrossProviderVoiceAliases),
     ("YummyVideoCatalog_FindPreferredEntryWithSkipsAcrossProviders_FallsBackToOtherProvider", YummyVideoCatalog_FindPreferredEntryWithSkipsAcrossProviders_FallsBackToOtherProvider),
     ("YummyVideoCatalog_FindPreferredEntryWithSkipsAcrossProviders_PrefersRequestedProvider", YummyVideoCatalog_FindPreferredEntryWithSkipsAcrossProviders_PrefersRequestedProvider),
-    ("ResolveKodikAvailableEpisodeCount_UsesYummyHintWhenSeriesCountIsZero", ResolveKodikAvailableEpisodeCount_UsesYummyHintWhenSeriesCountIsZero),
+    ("YummyKodikMediaSourceProvider_RuntimePublicationPolicyRepairsMissingOrShortValues", YummyKodikMediaSourceProvider_RuntimePublicationPolicyRepairsMissingOrShortValues),
+    ("YummyKodikMediaSourceProvider_AuthoritativeRuntimeCorrectsPlausibleMismatch", YummyKodikMediaSourceProvider_AuthoritativeRuntimeCorrectsPlausibleMismatch),
+    ("YummyKodikMediaSourceProvider_ResolvesPrimaryOnlyForExplicitSeriesSelection", YummyKodikMediaSourceProvider_ResolvesPrimaryOnlyForExplicitSeriesSelection),
+    ("YummyKodikMediaSourceProvider_FillsMissingSourceRuntimeFromSiblingOrItem", YummyKodikMediaSourceProvider_FillsMissingSourceRuntimeFromSiblingOrItem),
+    ("YummyKodikMediaSourceProvider_SharesRuntimeOnlyWithinEpisodeVersionSet", YummyKodikMediaSourceProvider_SharesRuntimeOnlyWithinEpisodeVersionSet),
+    ("YummyKodikMediaSourceFactory_CarriesRuntimeWithoutReflection", YummyKodikMediaSourceFactory_CarriesRuntimeWithoutReflection),
+    ("YummyKodikMediaSegmentProvider_ClonesCachedSegmentsPerItem", YummyKodikMediaSegmentProvider_ClonesCachedSegmentsPerItem),
+    ("ResolveProviderCoverage_UsesYummyHintWhenKodikSeriesCountIsZero", ResolveProviderCoverage_UsesYummyHintWhenKodikSeriesCountIsZero),
+    ("ResolveProviderCoverage_PreservesYummyCoverageBeyondKodik", ResolveProviderCoverage_PreservesYummyCoverageBeyondKodik),
     ("GenerateKodikEpisodeFilesAsync_FillsMissingTranslationsForExistingEpisode", GenerateKodikEpisodeFilesAsync_FillsMissingTranslationsForExistingEpisode),
+    ("ResolveEpisodesNeedingKodikTranslation_SkipsYummyCoveredPairs", ResolveEpisodesNeedingKodikTranslation_SkipsYummyCoveredPairs),
     ("EpisodeArtifactMaintenance_NormalizesEquivalentTranslationVariants", EpisodeArtifactMaintenance_NormalizesEquivalentTranslationVariants),
     ("ResolveEpisodeTranslationFileBaseName_ReusesExistingEquivalentArtifactName", ResolveEpisodeTranslationFileBaseName_ReusesExistingEquivalentArtifactName),
     ("KeepLatestEpisodePerResolvedLink_DropsEarlierEpisodesWhenKodikReusesSameVideo", KeepLatestEpisodePerResolvedLink_DropsEarlierEpisodesWhenKodikReusesSameVideo),
@@ -112,16 +144,36 @@ var tests = new (string Name, Action Run)[]
     ("RefreshFileWriter_ReplacesReadOnlyExistingArtifact", RefreshFileWriter_ReplacesReadOnlyExistingArtifact),
     ("RefreshState_AllowsSingleFileSkipWhenFingerprintAndFilesMatch", RefreshState_AllowsSingleFileSkipWhenFingerprintAndFilesMatch),
     ("RefreshState_InvalidatesSkipWhenInputsChange", RefreshState_InvalidatesSkipWhenInputsChange),
+    ("RefreshState_LegacyGenerationContractDisablesSkip", RefreshState_LegacyGenerationContractDisablesSkip),
     ("RefreshState_ExtraEpisodeArtifactsDisableSkip", RefreshState_ExtraEpisodeArtifactsDisableSkip),
     ("RefreshState_ZeroExpectedEpisodesWithStaleArtifactsDisablesSkip", RefreshState_ZeroExpectedEpisodesWithStaleArtifactsDisablesSkip),
     ("RefreshState_PreservesMultipleSeasonsInSeriesRoot", RefreshState_PreservesMultipleSeasonsInSeriesRoot),
+    ("RefreshState_WritesAndReadsMediaSegmentsForEpisodeFile", RefreshState_WritesAndReadsMediaSegmentsForEpisodeFile),
+    ("RefreshState_KodikCatalogSignatureIsOrderIndependent", RefreshState_KodikCatalogSignatureIsOrderIndependent),
+    ("RefreshState_PerVoiceDeepSkipRequiresFreshMatchingCatalog", RefreshState_PerVoiceDeepSkipRequiresFreshMatchingCatalog),
+    ("RefreshState_PerVoiceDeepSkipRejectsDamagedOrUnexpectedFiles", RefreshState_PerVoiceDeepSkipRejectsDamagedOrUnexpectedFiles),
+    ("RefreshState_SkipDecisionReportsReasonsAndFileCounts", RefreshState_SkipDecisionReportsReasonsAndFileCounts),
+    ("ExistingLibraryFallbackRefreshInfoLoader_LoadsSnapshotFromRefreshState", ExistingLibraryFallbackRefreshInfoLoader_LoadsSnapshotFromRefreshState),
+    ("StaleReleaseCleanup_DeletesStaleManagedDirectory", StaleReleaseCleanup_DeletesStaleManagedDirectory),
+    ("StaleReleaseCleanup_RetainsCurrentAndManualKeys", StaleReleaseCleanup_RetainsCurrentAndManualKeys),
+    ("StaleReleaseCleanup_SkipsMissingCorruptAndAmbiguousState", StaleReleaseCleanup_SkipsMissingCorruptAndAmbiguousState),
+    ("StaleReleaseCleanup_SkipsSeasonWithUnknownFile", StaleReleaseCleanup_SkipsSeasonWithUnknownFile),
+    ("StaleReleaseCleanup_SkipsSeasonWithModifiedManagedFile", StaleReleaseCleanup_SkipsSeasonWithModifiedManagedFile),
+    ("StaleReleaseCleanup_CanonicalizesPlainAndUrlCurrentKeys", StaleReleaseCleanup_CanonicalizesPlainAndUrlCurrentKeys),
+    ("StaleReleaseCleanup_SkipsLegacyGenerationContract", StaleReleaseCleanup_SkipsLegacyGenerationContract),
+    ("StaleReleaseCleanup_DeletesMixedRootStaleSeasonAndStateEntry", StaleReleaseCleanup_DeletesMixedRootStaleSeasonAndStateEntry),
+    ("StaleReleaseCleanup_DeletesAllStaleRootForEmptyCurrentSet", StaleReleaseCleanup_DeletesAllStaleRootForEmptyCurrentSet),
+    ("RefreshTitleKeySource_ValidEmptyUserListMarksFetchSucceeded", RefreshTitleKeySource_ValidEmptyUserListMarksFetchSucceeded),
     ("RefreshTask_ProcessesAtMostTwoTitlesConcurrently", RefreshTask_ProcessesAtMostTwoTitlesConcurrently),
     ("RefreshTask_RunGateSkipsConcurrentRun", RefreshTask_RunGateSkipsConcurrentRun),
     ("RefreshTask_LazyKodikInitializationRunsOnlyWhenValueIsUsed", RefreshTask_LazyKodikInitializationRunsOnlyWhenValueIsUsed),
     ("ShikimoriGraphQlClient_DeduplicatesConcurrentSameIdRequests", ShikimoriGraphQlClient_DeduplicatesConcurrentSameIdRequests),
     ("RefreshState_PerVoiceModeDoesNotPreSkip", RefreshState_PerVoiceModeDoesNotPreSkip),
+    ("KodikClient_PreferredQualityFallsBackToAvailableMaximum", KodikClient_PreferredQualityFallsBackToAvailableMaximum),
     ("AllohaPlaybackService_BuildsExpectedBorthSuffix", AllohaPlaybackService_BuildsExpectedBorthSuffix),
     ("AllohaPlaybackService_CreatesSessionViaIframeAndBnsi", AllohaPlaybackService_CreatesSessionViaIframeAndBnsi),
+    ("AllohaPlaybackService_DoesNotResolveDynamicTokenAfterSuccessfulManifest", AllohaPlaybackService_DoesNotResolveDynamicTokenAfterSuccessfulManifest),
+    ("AllohaPlaybackService_RetriesManifestWithDynamicStreamTokenAfter403", AllohaPlaybackService_RetriesManifestWithDynamicStreamTokenAfter403),
     ("AllohaPlaybackService_UsesIframeOriginForMirroredHost", AllohaPlaybackService_UsesIframeOriginForMirroredHost),
     ("AllohaPlaybackService_RejectsUntrustedIframeUrl", AllohaPlaybackService_RejectsUntrustedIframeUrl),
     ("AllohaPlaybackService_PrefersRequestedVoiceWhenBnsiReturnsMultipleTracks", AllohaPlaybackService_PrefersRequestedVoiceWhenBnsiReturnsMultipleTracks),
@@ -130,15 +182,34 @@ var tests = new (string Name, Action Run)[]
     ("YummyKodikStreamController_AllowsSingleOpaqueAllohaTrackMarker", YummyKodikStreamController_AllowsSingleOpaqueAllohaTrackMarker),
     ("YummyKodikStreamController_RejectsSingleGenericRussianAllohaTrackMarker", YummyKodikStreamController_RejectsSingleGenericRussianAllohaTrackMarker),
     ("YummyKodikStreamController_RejectsMultipleOpaqueAllohaTrackMarkers", YummyKodikStreamController_RejectsMultipleOpaqueAllohaTrackMarkers),
-    ("YummyKodikStreamController_OrdersYummyFallbackProviders", YummyKodikStreamController_OrdersYummyFallbackProviders),
+    ("YummyKodikStreamController_OrdersGatewayFallbackProviders", YummyKodikStreamController_OrdersGatewayFallbackProviders),
+    ("YummyKodikStreamController_PrioritizesKodikForVoiceMissingFromYummyCatalog", YummyKodikStreamController_PrioritizesKodikForVoiceMissingFromYummyCatalog),
     ("YummyKodikStreamController_UsesSharedYummyVoicePreferenceAcrossProviders", YummyKodikStreamController_UsesSharedYummyVoicePreferenceAcrossProviders),
     ("YummyKodikStreamController_DetectsSavedVoiceOnNeighborProvider", YummyKodikStreamController_DetectsSavedVoiceOnNeighborProvider),
+    ("YummyKodikStreamController_UnionsProviderAndManagedVoices", YummyKodikStreamController_UnionsProviderAndManagedVoices),
+    ("YummyKodikStreamController_MirrorsWidgetVoiceAcrossMixedProviderKeys", YummyKodikStreamController_MirrorsWidgetVoiceAcrossMixedProviderKeys),
+    ("YummyKodikStreamController_ExplicitPerVoiceSourceOverridesSavedDefault", YummyKodikStreamController_ExplicitPerVoiceSourceOverridesSavedDefault),
+    ("KodikPlaybackSelector_ResolvesSavedVoiceNameToTranslationId", KodikPlaybackSelector_ResolvesSavedVoiceNameToTranslationId),
+    ("EpisodeVersionsMerge_UsesSavedYummyVoicePreferenceForPrimary", EpisodeVersionsMerge_UsesSavedYummyVoicePreferenceForPrimary),
+    ("EpisodeVersionsMerge_MatchesSavedKodikTranslationIdFromStrm", EpisodeVersionsMerge_MatchesSavedKodikTranslationIdFromStrm),
+    ("PostRefreshMergeBarrier_MissingOrUnindexedEpisodeIsUnresolved", PostRefreshMergeBarrier_MissingOrUnindexedEpisodeIsUnresolved),
+    ("PostRefreshMergeBarrier_NewEpisodeBeforeArtifactRefreshIsUnresolved", PostRefreshMergeBarrier_NewEpisodeBeforeArtifactRefreshIsUnresolved),
+    ("PostRefreshMergeBarrier_LateRefreshedEpisodeIsReady", PostRefreshMergeBarrier_LateRefreshedEpisodeIsReady),
+    ("PostRefreshMergeBarrier_PreExistingEpisodeDoesNotBlockReadiness", PostRefreshMergeBarrier_PreExistingEpisodeDoesNotBlockReadiness),
+    ("PostRefreshMergeBarrier_DeletedEpisodeMustDisappear", PostRefreshMergeBarrier_DeletedEpisodeMustDisappear),
     ("YummyKodikStreamController_FindsKodikFallbackVoiceByAlias", YummyKodikStreamController_FindsKodikFallbackVoiceByAlias),
+    ("YummyKodikStreamController_KodikFallbackUsesDefaultWhenRequestedVoiceMissing", YummyKodikStreamController_KodikFallbackUsesDefaultWhenRequestedVoiceMissing),
     ("AllohaPlaybackService_RewritesManifestUrisToProxyUrls", AllohaPlaybackService_RewritesManifestUrisToProxyUrls),
+    ("AllohaPlaybackService_SharesOnlyInFlightResolution", AllohaPlaybackService_SharesOnlyInFlightResolution),
     ("AllohaPlaybackService_DownloadProxyResourceRewritesNestedManifest", AllohaPlaybackService_DownloadProxyResourceRewritesNestedManifest),
+    ("AllohaPlaybackService_BuffersUpcomingMediaSegments", AllohaPlaybackService_BuffersUpcomingMediaSegments),
+    ("AllohaPlaybackService_PrefetchSurvivesCompletedSegmentRequest", AllohaPlaybackService_PrefetchSurvivesCompletedSegmentRequest),
     ("AllohaPlaybackService_DownloadProxyResourceRefreshesSessionAfter403", AllohaPlaybackService_DownloadProxyResourceRefreshesSessionAfter403),
     ("AllohaPlaybackService_DownloadProxyResourceRefreshesSegmentUsingParentChainAfter403", AllohaPlaybackService_DownloadProxyResourceRefreshesSegmentUsingParentChainAfter403),
     ("AllohaPlaybackService_DownloadProxyResourceRefreshesSegmentUsingParentChainAfterAlloha500", AllohaPlaybackService_DownloadProxyResourceRefreshesSegmentUsingParentChainAfterAlloha500),
+    ("AllohaPlaybackService_DownloadProxyResourceRefreshesSegmentUsingParentChainAfter502", AllohaPlaybackService_DownloadProxyResourceRefreshesSegmentUsingParentChainAfter502),
+    ("AllohaPlaybackService_DownloadProxyResourceRefreshesSegmentAfterNetworkFailure", AllohaPlaybackService_DownloadProxyResourceRefreshesSegmentAfterNetworkFailure),
+    ("AllohaPlaybackService_SuppressesConcurrentFailedRefreshStorm", AllohaPlaybackService_SuppressesConcurrentFailedRefreshStorm),
     ("YummyKodikStreamUri_ParsesCvhRequest", YummyKodikStreamUri_ParsesCvhRequest),
     ("YummyKodikStreamUri_ParsesAllohaRequest", YummyKodikStreamUri_ParsesAllohaRequest),
     ("YummyKodikStreamUri_BuildsAllohaRequestWithEmbeddedSource", YummyKodikStreamUri_BuildsAllohaRequestWithEmbeddedSource),
@@ -147,9 +218,11 @@ var tests = new (string Name, Action Run)[]
     ("YummyKodikLogFilter_UsesConfiguredMinimumLevel", YummyKodikLogFilter_UsesConfiguredMinimumLevel),
     ("YummyKodikLogFilter_CategoryRuleSuppressesPluginInformationLogs", YummyKodikLogFilter_CategoryRuleSuppressesPluginInformationLogs),
     ("YummyKodikLogger_SuppressesInformationBeforeInnerLogger", YummyKodikLogger_SuppressesInformationBeforeInnerLogger),
+    ("RefreshPerformanceSummary_IsVisibleWithoutInformationNoise", RefreshPerformanceSummary_IsVisibleWithoutInformationNoise),
     ("JellyfinWebIndexPatcher_InsertsManagedBootstrapBeforeHeadClose", JellyfinWebIndexPatcher_InsertsManagedBootstrapBeforeHeadClose),
     ("JellyfinWebIndexPatcher_ReplacesExistingManagedBootstrap", JellyfinWebIndexPatcher_ReplacesExistingManagedBootstrap),
-    ("JellyfinWebIndexPatcher_DoesNotDuplicateBootstrap", JellyfinWebIndexPatcher_DoesNotDuplicateBootstrap)
+    ("JellyfinWebIndexPatcher_DoesNotDuplicateBootstrap", JellyfinWebIndexPatcher_DoesNotDuplicateBootstrap),
+    ("SeriesTranslationScript_AcceptsJellyfinPascalCaseTranslationOptions", SeriesTranslationScript_AcceptsJellyfinPascalCaseTranslationOptions)
 };
 
 var passed = 0;
@@ -795,6 +868,101 @@ static void NfoBuilder_BuildEpisodeNfo_ProducesXml()
     AssertTrue(xml.Contains("<season>2</season>", StringComparison.Ordinal), "Episode NFO should contain the requested season number.");
 }
 
+static void NfoBuilder_BuildEpisodeNfo_WritesExactRuntime()
+{
+    const int durationSeconds = 1425;
+    var xml = NfoBuilder.BuildEpisodeNfo(
+        episodeNumber: 1,
+        season: 2,
+        seriesTitle: "Test series",
+        description: "Plot",
+        durationSeconds);
+    var document = XDocument.Parse(xml);
+
+    AssertEqual("24", document.Root!.Element("runtime")!.Value, "Episode NFO should include Jellyfin's minute-based runtime.");
+    AssertEqual(
+        durationSeconds.ToString(),
+        document.Descendants("durationinseconds").Single().Value,
+        "Episode NFO should also keep the exact duration in Jellyfin streamdetails.");
+    AssertTrue(
+        NfoBuilder.TryGetEpisodeRuntimeSeconds(xml, out var parsedDuration),
+        "Generated episode NFO runtime should be reusable without another provider request.");
+    AssertEqual(durationSeconds, parsedDuration, "Generated episode NFO should retain exact runtime seconds.");
+}
+
+static void NfoBuilder_EnsureEpisodeRuntime_BackfillsLegacyNfo()
+{
+    const int durationSeconds = 1425;
+    var legacyXml = NfoBuilder.BuildEpisodeNfo(1, 1, "Test series", "Plot");
+    var enrichedXml = NfoBuilder.EnsureEpisodeRuntime(legacyXml, durationSeconds);
+    var document = XDocument.Parse(enrichedXml);
+
+    AssertEqual("24", document.Root!.Element("runtime")!.Value, "Runtime backfill should add the minute-based Jellyfin field.");
+    AssertEqual(
+        durationSeconds.ToString(),
+        document.Descendants("durationinseconds").Single().Value,
+        "Runtime backfill should add the exact streamdetails duration.");
+    AssertEqual(
+        enrichedXml,
+        NfoBuilder.EnsureEpisodeRuntime(enrichedXml, durationSeconds),
+        "Runtime backfill should be idempotent once the NFO already has the desired values.");
+    AssertTrue(
+        NfoBuilder.TryGetEpisodeRuntimeSeconds(enrichedXml, out var parsedDuration),
+        "Backfilled episode runtime should be reusable on later refresh runs.");
+    AssertEqual(durationSeconds, parsedDuration, "Backfilled episode NFO should retain exact runtime seconds.");
+}
+
+static void EpisodeRuntimeBackfillService_BorrowsSiblingRuntime()
+{
+    var tempRoot = Path.Combine(Path.GetTempPath(), "YummyKodikTests", Guid.NewGuid().ToString("N"));
+    var seasonDir = Path.Combine(tempRoot, "Series", "Season 01");
+    var knownPath = Path.Combine(seasonDir, "S01E01 - Known.nfo");
+    var missingPath = Path.Combine(seasonDir, "S01E01 - Missing.nfo");
+    var otherEpisodePath = Path.Combine(seasonDir, "S01E02 - Missing.nfo");
+
+    try
+    {
+        Directory.CreateDirectory(seasonDir);
+        File.WriteAllText(
+            knownPath,
+            NfoBuilder.BuildEpisodeNfo(1, 1, "Test", "Plot", durationSeconds: 1425));
+        File.WriteAllText(
+            missingPath,
+            NfoBuilder.BuildEpisodeNfo(1, 1, "Test", "Plot"));
+        File.WriteAllText(
+            otherEpisodePath,
+            NfoBuilder.BuildEpisodeNfo(2, 1, "Test", "Plot"));
+
+        var updated = EpisodeRuntimeBackfillService
+            .BackfillMissingAsync(tempRoot, NullLogger.Instance, CancellationToken.None)
+            .GetAwaiter()
+            .GetResult();
+
+        AssertEqual(1, updated, "Only the sibling version of the same episode should be backfilled.");
+        var enrichedXml = File.ReadAllText(missingPath);
+        AssertTrue(
+            NfoBuilder.TryGetExactEpisodeRuntimeSeconds(enrichedXml, out var durationSeconds),
+            "Sibling runtime backfill should persist an exact duration.");
+        AssertEqual(1425, durationSeconds, "Sibling runtime backfill should reuse the known episode duration.");
+        AssertFalse(
+            NfoBuilder.TryGetEpisodeRuntimeSeconds(File.ReadAllText(otherEpisodePath), out _),
+            "A runtime must not leak into a different episode.");
+
+        var secondPass = EpisodeRuntimeBackfillService
+            .BackfillMissingAsync(tempRoot, NullLogger.Instance, CancellationToken.None)
+            .GetAwaiter()
+            .GetResult();
+        AssertEqual(0, secondPass, "Sibling runtime backfill should be idempotent.");
+    }
+    finally
+    {
+        if (Directory.Exists(tempRoot))
+        {
+            Directory.Delete(tempRoot, recursive: true);
+        }
+    }
+}
+
 static void RewriteEpisodeFileSeasonPrefix_UsesSeasonZeroForSpecials()
 {
     var helperType = typeof(NfoBuilder).Assembly.GetType("YummyKodik.Tasks.SeasonDirectoryMaintenance");
@@ -1004,6 +1172,41 @@ static void YummyVideoCatalog_DecodesCvhDubbingCodePlusAsSpace()
     AssertTrue(entry?.Cvh != null, "CVH source should be created for plus-encoded query parameters.");
     AssertEqual("Dream Cast", entry!.Cvh!.DubbingCode, "dubbing_code should be decoded with spaces.");
     AssertEqual("Dream Cast", entry.Cvh.DubbingName, "dubbing should stay normalized after query decoding.");
+}
+
+static void YummyClient_GetUserListAsync_AcceptsValidEmptyResponse()
+{
+    var handler = new DelegatingTestHandler(request =>
+    {
+        AssertEqual(HttpMethod.Get, request.Method, "Yummy user-list request should use GET.");
+        AssertEqual("https://yummy.test/users/42/lists/0", request.RequestUri!.AbsoluteUri, "Yummy user-list request should target the requested user and list.");
+        return new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("{\"response\":[]}", Encoding.UTF8, "application/json")
+        };
+    });
+
+    using var http = new HttpClient(handler);
+    var client = new YummyClient(http, "test-client", "https://yummy.test");
+    var items = client.GetUserListAsync(42, 0, CancellationToken.None).GetAwaiter().GetResult();
+
+    AssertEqual(0, items.Count, "A syntactically complete empty user list is a valid successful response.");
+}
+
+static void YummyClient_GetUserListAsync_RejectsMissingResponseArray()
+{
+    var handler = new DelegatingTestHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+    {
+        Content = new StringContent("{}", Encoding.UTF8, "application/json")
+    });
+
+    using var http = new HttpClient(handler);
+    var client = new YummyClient(http, "test-client", "https://yummy.test");
+
+    var error = AssertThrows<InvalidOperationException>(
+        () => client.GetUserListAsync(42, 0, CancellationToken.None).GetAwaiter().GetResult(),
+        "A 2xx user-list response without the response array must fail rather than open the cleanup gate.");
+    AssertTrue(error.Message.Contains("response", StringComparison.OrdinalIgnoreCase), "Missing response-array error should identify the incomplete payload.");
 }
 
 static void CvhClient_AddsBrowserHeadersAndParsesResponses()
@@ -1646,6 +1849,520 @@ static void KodikClient_GetEpisodeLinkAsync_FallsBackToSeasonLinkWhenEpisodeLink
         "Kodik should fetch the generic season player link with the requested episode as fallback.");
 }
 
+static void KodikClient_RunSearchCacheSharesInflightAndEvictsFaults()
+{
+    const string playerUrl = "https://kodikplayer.com/seria/1592110/episode/720p";
+    const string searchJson =
+        """
+        {
+          "results": [
+            {
+              "link": "//kodikplayer.com/serial/74203/series/720p",
+              "episodes_count": 1,
+              "last_episode": 1,
+              "seasons": { "1": { "episodes": { "1": { "link": "//kodikplayer.com/seria/1592110/episode/720p" } } } },
+              "translation": { "id": 610, "title": "AniLibria.TV", "type": "voice" }
+            }
+          ]
+        }
+        """;
+
+    var searchRequests = 0;
+    var metrics = new ConcurrentDictionary<string, long>(StringComparer.Ordinal);
+    using var http = new HttpClient(new AsyncDelegatingTestHandler(async (request, cancellationToken) =>
+    {
+        if (request.Method == HttpMethod.Post &&
+            request.RequestUri!.AbsoluteUri.StartsWith("https://kodik-api.com/search?", StringComparison.Ordinal))
+        {
+            Interlocked.Increment(ref searchRequests);
+            await Task.Delay(40, cancellationToken).ConfigureAwait(false);
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(searchJson) };
+        }
+
+        throw new InvalidOperationException("Unexpected cached search request: " + request.RequestUri);
+    }));
+    var client = new KodikClient(
+        http,
+        "test-token",
+        (key, delta) => metrics.AddOrUpdate(key, delta, (_, current) => current + delta));
+
+    Task.WhenAll(
+            Enumerable.Range(0, 5)
+                .Select(_ => client.GetAnimeInfoAsync("59970", KodikIdType.Shikimori, CancellationToken.None)))
+        .GetAwaiter()
+        .GetResult();
+    client.GetAnimeInfoAsync("59970", KodikIdType.Shikimori, CancellationToken.None).GetAwaiter().GetResult();
+
+    AssertEqual(1, searchRequests, "Concurrent and sequential same-key searches should share one upstream request.");
+    client.GetAnimeInfoAsync("59971", KodikIdType.Shikimori, CancellationToken.None).GetAwaiter().GetResult();
+    client.GetAnimeInfoAsync("59970", KodikIdType.Kinopoisk, CancellationToken.None).GetAwaiter().GetResult();
+    AssertEqual(3, searchRequests, "Search cache key must include both id type and id.");
+    AssertTrue(metrics.TryGetValue("kodik.search.cache_hits", out var hits) && hits >= 5, "Shared searches should report cache hits.");
+
+    var freshClient = new KodikClient(http, "test-token", static (_, _) => { });
+    freshClient.GetAnimeInfoAsync("59970", KodikIdType.Shikimori, CancellationToken.None).GetAwaiter().GetResult();
+    AssertEqual(4, searchRequests, "A fresh Kodik client must not inherit a previous refresh run's cache.");
+
+    var faultSearchRequests = 0;
+    using var faultHttp = new HttpClient(new DelegatingTestHandler(request =>
+    {
+        if (request.Method == HttpMethod.Post &&
+            request.RequestUri!.AbsoluteUri.StartsWith("https://kodik-api.com/search?", StringComparison.Ordinal))
+        {
+            faultSearchRequests++;
+            return faultSearchRequests == 1
+                ? new HttpResponseMessage(HttpStatusCode.ServiceUnavailable) { Content = new StringContent("upstream failed") }
+                : new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(searchJson) };
+        }
+
+        if (request.Method == HttpMethod.Get && request.RequestUri!.AbsoluteUri == playerUrl)
+        {
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("<html><body></body></html>") };
+        }
+
+        throw new InvalidOperationException("Unexpected faulted search request: " + request.RequestUri);
+    }));
+    var faultClient = new KodikClient(faultHttp, "test-token", static (_, _) => { });
+
+    AssertThrows<KodikException>(
+        () => faultClient.GetEpisodeTimingsAsync("59970", KodikIdType.Shikimori, 1, "610", CancellationToken.None)
+            .GetAwaiter()
+            .GetResult(),
+        "A real search failure should be surfaced to the caller.");
+    faultClient.GetEpisodeTimingsAsync("59970", KodikIdType.Shikimori, 1, "610", CancellationToken.None)
+        .GetAwaiter()
+        .GetResult();
+    AssertEqual(2, faultSearchRequests, "A faulted search entry should be evicted so the next real call retries upstream.");
+}
+
+static void KodikClient_RunScriptCacheSharesSuccessAndEvictsAfterPostFailure()
+{
+    const string playerUrl = "https://kodikplayer.com/seria/1599999/demo/720p";
+    const string scriptUrl = "https://kodikplayer.com/assets/app.player_single.js";
+    const string playerHtml =
+        """
+        <html><head>
+          <script>
+            var urlParams = '{"d":"kodik.cc","d_sign":"d-sign","pd":"kodikplayer.com","pd_sign":"pd-sign","ref":"","ref_sign":"ref-sign"}';
+            player.type = 'seria'; player.hash = '0123456789abcdef0123456789abcdef'; player.id = '1599999';
+          </script>
+          <script src="/assets/app.player_single.js"></script>
+        </head><body></body></html>
+        """;
+    const string scriptBody = """$.ajax({type:"POST",url:atob("L2Z0b3I="),cache:!1,dataType:"json"})""";
+    const string linksJson =
+        """
+        { "links": { "720": [ { "src": "https://cloud.kodik-storage.example/useruploads/demo/720.mp4:hls:manifest.m3u8" } ] } }
+        """;
+
+    var scriptGets = 0;
+    var videoPosts = 0;
+    using var http = new HttpClient(new AsyncDelegatingTestHandler(async (request, cancellationToken) =>
+    {
+        if (request.Method == HttpMethod.Get && request.RequestUri!.AbsoluteUri == playerUrl)
+        {
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(playerHtml) };
+        }
+
+        if (request.Method == HttpMethod.Get && request.RequestUri!.AbsoluteUri == scriptUrl)
+        {
+            scriptGets++;
+            await Task.Delay(40, cancellationToken).ConfigureAwait(false);
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(scriptBody) };
+        }
+
+        if (request.Method == HttpMethod.Post && request.RequestUri!.AbsoluteUri == "https://kodikplayer.com/ftor")
+        {
+            videoPosts++;
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(linksJson) };
+        }
+
+        throw new InvalidOperationException("Unexpected cached script request: " + request.RequestUri);
+    }));
+    var client = new KodikClient(http, "test-token", static (_, _) => { });
+    Task.WhenAll(
+            client.GetPlayerLinkAsync(playerUrl, 1, CancellationToken.None),
+            client.GetPlayerLinkAsync(playerUrl, 1, CancellationToken.None))
+        .GetAwaiter()
+        .GetResult();
+
+    AssertEqual(1, scriptGets, "Concurrent successful script decoding should be single-flight for the current refresh run.");
+    AssertEqual(2, videoPosts, "Only script bootstrap should be cached; each player payload must still be resolved.");
+
+    var faultScriptGets = 0;
+    var faultVideoPosts = 0;
+    using var faultHttp = new HttpClient(new DelegatingTestHandler(request =>
+    {
+        if (request.Method == HttpMethod.Get && request.RequestUri!.AbsoluteUri == playerUrl)
+        {
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(playerHtml) };
+        }
+
+        if (request.Method == HttpMethod.Get && request.RequestUri!.AbsoluteUri == scriptUrl)
+        {
+            faultScriptGets++;
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(scriptBody) };
+        }
+
+        if (request.Method == HttpMethod.Post && request.RequestUri!.AbsoluteUri == "https://kodikplayer.com/ftor")
+        {
+            faultVideoPosts++;
+            return faultVideoPosts == 1
+                ? new HttpResponseMessage(HttpStatusCode.InternalServerError) { Content = new StringContent("upstream failed") }
+                : new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(linksJson) };
+        }
+
+        throw new InvalidOperationException("Unexpected invalidated script request: " + request.RequestUri);
+    }));
+    var faultClient = new KodikClient(faultHttp, "test-token", static (_, _) => { });
+    AssertThrows<KodikException>(
+        () => faultClient.GetPlayerLinkAsync(playerUrl, 1, CancellationToken.None).GetAwaiter().GetResult(),
+        "A real video-links POST failure should be surfaced.");
+    faultClient.GetPlayerLinkAsync(playerUrl, 1, CancellationToken.None).GetAwaiter().GetResult();
+
+    AssertEqual(2, faultScriptGets, "A post-path mapping should be reloaded only after the mapping produced a real POST failure.");
+    AssertEqual(2, faultVideoPosts, "The next real caller should retry the failed video-links operation once.");
+}
+
+static void KodikSupplement_RuntimeProbeUsesDeepValidatedLink()
+{
+    const string manifestUrl = "https://cdn.kodik.example/useruploads/demo/720.mp4:hls:manifest.m3u8";
+    var requests = new List<HttpRequestMessage>();
+    using var http = new HttpClient(new DelegatingTestHandler(request =>
+    {
+        requests.Add(CloneRequest(request));
+        if (request.Method == HttpMethod.Get && request.RequestUri!.AbsoluteUri == manifestUrl)
+        {
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("#EXTM3U\n#EXTINF:6.0,\nsegment.ts\n#EXT-X-ENDLIST\n")
+            };
+        }
+
+        throw new InvalidOperationException("Runtime reuse attempted an unexpected link-resolution request: " + request.RequestUri);
+    }));
+    var client = new KodikClient(http, "test-token", NullLogger.Instance, static () => false);
+    var translations = new[]
+    {
+        new KodikTranslation { Id = "610", Name = "AniLibria.TV", Type = "voice", MaxEpisode = 1 }
+    };
+    var playable = new Dictionary<string, HashSet<int>>(StringComparer.Ordinal)
+    {
+        ["610"] = new HashSet<int> { 1 }
+    };
+    var links = new Dictionary<string, Dictionary<int, KodikLinkInfo>>(StringComparer.Ordinal)
+    {
+        ["610"] = new Dictionary<int, KodikLinkInfo>
+        {
+            [1] = new KodikLinkInfo("//cdn.kodik.example/useruploads/demo/", 720)
+        }
+    };
+
+    var seconds = KodikSupplementService.ResolveKodikDurationSecondsAsync(
+            NullLogger.Instance,
+            client,
+            KodikIdType.Shikimori,
+            "59970",
+            translations,
+            playable,
+            links,
+            1,
+            perf: null,
+            CancellationToken.None)
+        .GetAwaiter()
+        .GetResult();
+
+    AssertEqual(6, seconds!.Value, "Runtime probe should parse the manifest reached through the deep-validated link.");
+    AssertEqual(1, requests.Count, "Reusing KodikLinkInfo should require only the manifest request.");
+}
+
+static void KodikPlaybackService_ProxiesHlsResourcesAndCachesSegments()
+{
+    const string proxyBaseUrl = "/base/YummyKodik/kodik-proxy";
+    const string manifestUrl = "https://cdn.kodik.example/useruploads/demo/720.mp4:hls:manifest.m3u8";
+    const string segmentUrl = "https://cdn.kodik.example/useruploads/demo/segment-001.ts";
+    const string manifestText =
+        """
+        #EXTM3U
+        #EXT-X-TARGETDURATION:6
+        #EXTINF:6.000,
+        segment-001.ts
+        #EXT-X-ENDLIST
+        """;
+    var segmentBody = new byte[] { 1, 2, 3, 4 };
+    var requests = new List<HttpRequestMessage>();
+
+    var handler = new DelegatingTestHandler(request =>
+    {
+        requests.Add(CloneRequest(request));
+
+        if (request.Method == HttpMethod.Get &&
+            request.RequestUri!.AbsoluteUri == manifestUrl)
+        {
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(manifestText, Encoding.UTF8, "application/vnd.apple.mpegurl")
+            };
+        }
+
+        if (request.Method == HttpMethod.Get &&
+            request.RequestUri!.AbsoluteUri == segmentUrl)
+        {
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new ByteArrayContent(segmentBody)
+            };
+        }
+
+        throw new InvalidOperationException("Unexpected Kodik proxy test request: " + request.RequestUri);
+    });
+
+    using var http = new HttpClient(handler);
+    var service = new KodikPlaybackService(http, NullLogger.Instance);
+    var session = KodikPlaybackService.CreateSession(new KodikLinkInfo("//cdn.kodik.example/useruploads/demo/", 720), 720);
+
+    var manifest = service.DownloadProxyResourceAsync(session, "manifest", session.ManifestUrl, proxyBaseUrl, CancellationToken.None)
+        .GetAwaiter()
+        .GetResult();
+    var manifestBody = Encoding.UTF8.GetString(manifest.Content);
+
+    AssertEqual("application/vnd.apple.mpegurl", manifest.ContentType, "Kodik proxy should preserve HLS manifest content type.");
+    AssertTrue(manifestBody.Contains(proxyBaseUrl + "/", StringComparison.Ordinal), "Kodik manifest should retain the Jellyfin base path in root-relative proxy urls.");
+    AssertFalse(manifestBody.Contains("://", StringComparison.Ordinal), "Kodik proxy urls embedded in manifests must remain root-relative.");
+    AssertTrue(manifestBody.Contains(".ts?sessionId=" + session.SessionId, StringComparison.Ordinal), "Kodik segment proxy urls should keep a playable media extension and session id.");
+
+    var segmentResource = session.ProxyResources.Single(x => x.Value == segmentUrl).Key;
+    var firstSegment = service.DownloadProxyResourceAsync(session, segmentResource, segmentUrl, proxyBaseUrl, CancellationToken.None)
+        .GetAwaiter()
+        .GetResult();
+    var secondSegment = service.DownloadProxyResourceAsync(session, segmentResource, segmentUrl, proxyBaseUrl, CancellationToken.None)
+        .GetAwaiter()
+        .GetResult();
+
+    AssertEqual("video/mp2t", firstSegment.ContentType, "Kodik TS segments should get a playable content type when upstream omits one.");
+    AssertEqual(string.Join(",", segmentBody), string.Join(",", firstSegment.Content), "Kodik proxy should return the segment body.");
+    AssertEqual(string.Join(",", segmentBody), string.Join(",", secondSegment.Content), "Kodik proxy should return cached segment bytes on repeat requests.");
+    AssertEqual(1, requests.Count(x => x.RequestUri!.AbsoluteUri == segmentUrl), "Repeated Kodik segment requests should hit the one-minute proxy cache.");
+}
+
+static void KodikPlaybackService_RetriesTransientSegmentFailures()
+{
+    var resourceUrl = $"https://cdn.kodik.example/useruploads/retry-{Guid.NewGuid():N}/segment-001.ts";
+    var expectedBody = new byte[] { 5, 6, 7, 8 };
+    var requestCount = 0;
+    var retryDelays = new List<TimeSpan>();
+
+    var handler = new DelegatingTestHandler(_ =>
+    {
+        requestCount++;
+        if (requestCount == 1)
+        {
+            throw new HttpRequestException("Simulated connection reset.");
+        }
+
+        if (requestCount == 2)
+        {
+            return new HttpResponseMessage(HttpStatusCode.BadGateway)
+            {
+                Content = new StringContent("temporary upstream failure")
+            };
+        }
+
+        return new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(expectedBody)
+        };
+    });
+
+    using var http = new HttpClient(handler);
+    var service = new KodikPlaybackService(
+        http,
+        NullLogger.Instance,
+        (delay, _) =>
+        {
+            retryDelays.Add(delay);
+            return Task.CompletedTask;
+        });
+    var session = KodikPlaybackService.CreateSession(
+        new KodikLinkInfo("//cdn.kodik.example/useruploads/retry/", 720),
+        720);
+
+    var result = service.DownloadProxyResourceAsync(
+            session,
+            "retry-segment",
+            resourceUrl,
+            "/YummyKodik/kodik-proxy",
+            CancellationToken.None)
+        .GetAwaiter()
+        .GetResult();
+
+    AssertEqual(3, requestCount, "Kodik proxy should retry a transport reset and a transient 502.");
+    AssertEqual(
+        "150,6000",
+        string.Join(",", retryDelays.Select(delay => delay.TotalMilliseconds)),
+        "Kodik proxy should use a short delay after transport failure and the extended delay only after a received 502.");
+    AssertEqual(
+        string.Join(",", expectedBody),
+        string.Join(",", result.Content),
+        "Kodik proxy should return the successful retry payload.");
+}
+
+static void KodikPlaybackService_UsesShortBackoffForTransportFailures()
+{
+    var resourceUrl = $"https://cdn.kodik.example/useruploads/transport-{Guid.NewGuid():N}/segment-001.ts";
+    var expectedBody = new byte[] { 13, 14, 15, 16 };
+    var requestCount = 0;
+    var retryDelays = new List<TimeSpan>();
+    var handler = new DelegatingTestHandler(_ =>
+    {
+        requestCount++;
+        if (requestCount == 1)
+        {
+            throw new HttpRequestException("Simulated connection reset.");
+        }
+
+        if (requestCount == 2)
+        {
+            throw new TaskCanceledException("Simulated upstream timeout.");
+        }
+
+        return new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(expectedBody)
+        };
+    });
+
+    using var http = new HttpClient(handler);
+    var service = new KodikPlaybackService(
+        http,
+        NullLogger.Instance,
+        (delay, _) =>
+        {
+            retryDelays.Add(delay);
+            return Task.CompletedTask;
+        });
+    var session = KodikPlaybackService.CreateSession(
+        new KodikLinkInfo("//cdn.kodik.example/useruploads/transport/", 720),
+        720);
+
+    var result = service.DownloadProxyResourceAsync(
+            session,
+            "transport-segment",
+            resourceUrl,
+            "/YummyKodik/kodik-proxy",
+            CancellationToken.None)
+        .GetAwaiter()
+        .GetResult();
+
+    AssertEqual(3, requestCount, "Kodik proxy should preserve its three-request cap for transport failures.");
+    AssertEqual(
+        "150,300",
+        string.Join(",", retryDelays.Select(delay => delay.TotalMilliseconds)),
+        "Transport resets and timeouts should keep the short retry schedule because the failed request already consumed wait time.");
+    AssertEqual(
+        string.Join(",", expectedBody),
+        string.Join(",", result.Content),
+        "Kodik proxy should return the payload after transport recovery.");
+}
+
+static void KodikPlaybackService_RetriesTransientNotFoundSegments()
+{
+    var resourceUrl = $"https://cdn.kodik.example/useruploads/not-found-{Guid.NewGuid():N}/segment-001.ts";
+    var expectedBody = new byte[] { 9, 10, 11, 12 };
+    var requestCount = 0;
+    var retryDelays = new List<TimeSpan>();
+
+    var handler = new DelegatingTestHandler(_ =>
+    {
+        requestCount++;
+        if (requestCount < 3)
+        {
+            return new HttpResponseMessage(HttpStatusCode.NotFound);
+        }
+
+        return new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(expectedBody)
+        };
+    });
+
+    using var http = new HttpClient(handler);
+    var service = new KodikPlaybackService(
+        http,
+        NullLogger.Instance,
+        (delay, _) =>
+        {
+            retryDelays.Add(delay);
+            return Task.CompletedTask;
+        });
+    var session = KodikPlaybackService.CreateSession(
+        new KodikLinkInfo("//cdn.kodik.example/useruploads/not-found/", 720),
+        720);
+
+    var result = service.DownloadProxyResourceAsync(
+            session,
+            "not-found-segment",
+            resourceUrl,
+            "/YummyKodik/kodik-proxy",
+            CancellationToken.None)
+        .GetAwaiter()
+        .GetResult();
+
+    AssertEqual(3, requestCount, "Kodik proxy should retry a CDN segment that is temporarily unavailable with 404.");
+    AssertEqual(
+        "2000,6000",
+        string.Join(",", retryDelays.Select(delay => delay.TotalMilliseconds)),
+        "Received transient 404 responses should keep the extended bounded recovery window.");
+    AssertEqual(
+        string.Join(",", expectedBody),
+        string.Join(",", result.Content),
+        "Kodik proxy should return a segment after CDN propagation completes.");
+}
+
+static void KodikPlaybackService_BoundsPersistentTransientFailures()
+{
+    var resourceUrl = $"https://cdn.kodik.example/useruploads/persistent-{Guid.NewGuid():N}/manifest.m3u8";
+    var requestCount = 0;
+    var retryDelays = new List<TimeSpan>();
+    var handler = new DelegatingTestHandler(_ =>
+    {
+        requestCount++;
+        return new HttpResponseMessage(HttpStatusCode.BadGateway)
+        {
+            Content = new StringContent("persistent upstream failure")
+        };
+    });
+
+    using var http = new HttpClient(handler);
+    var service = new KodikPlaybackService(
+        http,
+        NullLogger.Instance,
+        (delay, _) =>
+        {
+            retryDelays.Add(delay);
+            return Task.CompletedTask;
+        });
+    var session = KodikPlaybackService.CreateSession(
+        new KodikLinkInfo("//cdn.kodik.example/useruploads/persistent/", 720),
+        720);
+
+    AssertThrows<InvalidOperationException>(() => service.DownloadProxyResourceAsync(
+            session,
+            "manifest",
+            resourceUrl,
+            "/YummyKodik/kodik-proxy",
+            CancellationToken.None)
+        .GetAwaiter()
+        .GetResult(),
+        "Persistent Kodik CDN failures should surface after the bounded retry window.");
+
+    AssertEqual(3, requestCount, "Persistent Kodik CDN failures must remain capped at three HTTP requests.");
+    AssertEqual(
+        "2000,6000",
+        string.Join(",", retryDelays.Select(delay => delay.TotalMilliseconds)),
+        "Persistent failures should stop after the bounded eight-second recovery window.");
+}
+
 static void KodikClient_GetAnimeInfoAsync_FallsBackToHtmlFindPlayerResponse()
 {
     const string finalPlayerUrl = "https://kodik.info/serial/12345/abcdef?episode=1&season=1";
@@ -1804,9 +2521,11 @@ static void CvhClient_BuildManifestResponseBody_ProxiesNestedPlaylists()
             """
     };
 
-    var manifest = CvhClient.BuildManifestResponseBody(session, "http://localhost:8096/YummyKodik/cvh-proxy");
+    const string proxyBaseUrl = "/base/YummyKodik/cvh-proxy";
+    var manifest = CvhClient.BuildManifestResponseBody(session, proxyBaseUrl);
 
-    AssertTrue(manifest.Contains("/YummyKodik/cvh-proxy/", StringComparison.Ordinal), "CVH master manifest should proxy nested playlist urls through the local endpoint.");
+    AssertTrue(manifest.Contains(proxyBaseUrl + "/", StringComparison.Ordinal), "CVH master manifest should retain the Jellyfin base path in root-relative proxy urls.");
+    AssertFalse(manifest.Contains("://", StringComparison.Ordinal), "CVH proxy urls embedded in manifests must remain root-relative.");
     AssertTrue(manifest.Contains(".m3u8?sessionId=cvh-session", StringComparison.Ordinal), "Proxied CVH nested playlist urls should carry an HLS extension and session id.");
     AssertEqual(2, session.ProxyResources.Count, "Each nested CVH playlist url should be tracked as a proxy resource.");
 }
@@ -2369,6 +3088,18 @@ static void TranslationNameKeyNormalizer_UsesCuratedVoiceAliasGroups()
     AssertEqual("studioband", TranslationNameKeyNormalizer.Normalize("Studio Band"), "Spacing-only StudioBand variants should normalize to the canonical key.");
     AssertEqual("anileague", TranslationNameKeyNormalizer.Normalize("AniLeague.TV"), "Dotted .TV suffixes should normalize to the transport-free canonical key.");
     AssertEqual("shizaproject", TranslationNameKeyNormalizer.Normalize("SHIZA Project"), "Stable provider names without aliases should keep their direct canonical key.");
+    AssertEqual(
+        "AniLibria.TV",
+        TranslationNameKeyNormalizer.FindEquivalent(
+            "AniLibria",
+            new[] { "AnimeVost", "AniLibria.TV" }),
+        "A saved canonical voice should resolve to the actual catalog option id used for widget highlighting.");
+    AssertEqual(
+        "РуАниме / DEEP",
+        TranslationNameKeyNormalizer.FindEquivalent(
+            "РуАниме _ DEEP",
+            new[] { "РуАниме / DEEP", "AniStar & DEEP" }),
+        "Provider punctuation variants should resolve to the actual catalog option id.");
 }
 
 static void YummyVideoCatalog_MatchesCrossProviderVoiceAliases()
@@ -2508,6 +3239,194 @@ static void YummyVideoCatalog_FindPreferredEntryWithSkipsAcrossProviders_Prefers
     AssertEqual(12, entry.Skips?.Opening?.Time ?? 0, "Cross-provider skip lookup should keep the requested provider's own skip timings.");
 }
 
+static void YummyKodikMediaSourceProvider_RuntimePublicationPolicyRepairsMissingOrShortValues()
+{
+    var policyType = typeof(YummyKodikStreamUri).Assembly.GetType("YummyKodik.Media.MediaRunTimePolicy");
+    AssertTrue(policyType is not null, "Media-source runtime publication policy should exist.");
+    var method = policyType!.GetMethod(
+        "ShouldPublish",
+        BindingFlags.Static | BindingFlags.Public);
+    AssertTrue(method is not null, "Media-source runtime publication policy should exist.");
+
+    bool ShouldPublish(long? current, long? resolved)
+    {
+        return (bool)method!.Invoke(null, new object?[] { current, resolved })!;
+    }
+
+    var episodeRunTime = TimeSpan.FromMinutes(24).Ticks;
+    AssertTrue(ShouldPublish(null, episodeRunTime), "A resolved provider runtime should fill a missing Jellyfin item runtime.");
+    AssertTrue(
+        ShouldPublish(TimeSpan.FromSeconds(7).Ticks, episodeRunTime),
+        "A resolved provider runtime should replace the implausibly short first-play runtime.");
+    AssertFalse(
+        ShouldPublish(TimeSpan.FromMinutes(23).Ticks, episodeRunTime),
+        "An already plausible Jellyfin runtime should be preserved.");
+    AssertFalse(ShouldPublish(null, null), "A missing provider runtime must not overwrite Jellyfin metadata.");
+}
+
+static void YummyKodikMediaSourceProvider_AuthoritativeRuntimeCorrectsPlausibleMismatch()
+{
+    var staleNfoRuntime = TimeSpan.FromSeconds(1299).Ticks;
+    var resolvedHlsRuntime = TimeSpan.FromMilliseconds(1256050).Ticks;
+
+    AssertTrue(
+        MediaRunTimePolicy.ShouldPublishAuthoritative(staleNfoRuntime, resolvedHlsRuntime),
+        "An exact provider runtime should correct a plausible but materially wrong NFO runtime.");
+    AssertFalse(
+        MediaRunTimePolicy.ShouldPublishAuthoritative(
+            resolvedHlsRuntime + TimeSpan.FromSeconds(1).Ticks,
+            resolvedHlsRuntime),
+        "Sub-second and rounding-level runtime differences should not rewrite Jellyfin metadata.");
+    AssertFalse(
+        MediaRunTimePolicy.ShouldPublishAuthoritative(staleNfoRuntime, null),
+        "A missing provider runtime must not overwrite a plausible Jellyfin runtime.");
+}
+
+static void YummyKodikMediaSourceProvider_ResolvesPrimaryOnlyForExplicitSeriesSelection()
+{
+    var configuration = new PluginConfiguration();
+    configuration.SetUserSeriesPreferredTranslationId(
+        Guid.Empty,
+        "yummy:123",
+        "СВ-Дубль");
+
+    AssertTrue(
+        MediaRunTimePolicy.HasExplicitSeriesSelection(
+            configuration,
+            new[] { "cvh:123", "yummy:123" }),
+        "A mirrored widget selection should activate merged-primary source resolution.");
+    AssertFalse(
+        MediaRunTimePolicy.HasExplicitSeriesSelection(
+            configuration,
+            new[] { "yummy:456", "shikimori:456" }),
+        "A selection for another series must not affect the requested episode.");
+
+    configuration.SetUserSeriesPreferredTranslationId(Guid.Empty, "yummy:123", null);
+    AssertFalse(
+        MediaRunTimePolicy.HasExplicitSeriesSelection(
+            configuration,
+            new[] { "yummy:123" }),
+        "Auto should disable forced primary source resolution and retain native version selection.");
+}
+
+static void YummyKodikMediaSourceProvider_FillsMissingSourceRuntimeFromSiblingOrItem()
+{
+    var resolvedTicks = TimeSpan.FromMinutes(24).Ticks;
+    var sources = new[]
+    {
+        new MediaSourceInfo { Name = "Missing", RunTimeTicks = null },
+        new MediaSourceInfo { Name = "Resolved", RunTimeTicks = resolvedTicks },
+        new MediaSourceInfo { Name = "Short", RunTimeTicks = TimeSpan.FromSeconds(7).Ticks }
+    };
+
+    var fallback = MediaRunTimePolicy.FillMissingSourceRunTimes(
+        itemRunTimeTicks: TimeSpan.FromMinutes(23).Ticks,
+        sources);
+
+    AssertEqual(resolvedTicks, fallback!.Value, "A provider duration should be preferred as the source fallback.");
+    AssertTrue(
+        sources.All(source => source.RunTimeTicks == resolvedTicks),
+        "Missing and implausibly short media-source runtimes should inherit a known sibling duration.");
+
+    var itemOnlySource = new MediaSourceInfo { Name = "Item fallback" };
+    var itemTicks = TimeSpan.FromMinutes(25).Ticks;
+    MediaRunTimePolicy.FillMissingSourceRunTimes(
+        itemTicks,
+        new[] { itemOnlySource });
+    AssertEqual(
+        itemTicks,
+        itemOnlySource.RunTimeTicks!.Value,
+        "A dynamic media source should inherit a plausible Jellyfin item runtime when provider metadata is missing.");
+}
+
+static void YummyKodikMediaSourceProvider_SharesRuntimeOnlyWithinEpisodeVersionSet()
+{
+    const string presentationKey = "episode-presentation-key";
+    var seasonDir = Path.Combine("D:\\video\\YummyKodik", "Series", "Season 01");
+
+    AssertTrue(
+        MediaRunTimePolicy.IsSiblingEpisodeVersion(
+            presentationKey,
+            seasonDir,
+            presentationKey,
+            Path.Combine(seasonDir, "S01E03 - Voice.strm")),
+        "A STRM in the same season directory with the same presentation key should receive the runtime.");
+    AssertFalse(
+        MediaRunTimePolicy.IsSiblingEpisodeVersion(
+            presentationKey,
+            seasonDir,
+            presentationKey,
+            Path.Combine("D:\\video\\OtherLibrary", "Season 01", "S01E03.strm")),
+        "Runtime propagation must not cross library or season directories.");
+    AssertFalse(
+        MediaRunTimePolicy.IsSiblingEpisodeVersion(
+            presentationKey,
+            seasonDir,
+            "different-episode",
+            Path.Combine(seasonDir, "S01E04.strm")),
+        "Runtime propagation must not leak into a different episode presentation key.");
+}
+
+static void YummyKodikMediaSourceFactory_CarriesRuntimeWithoutReflection()
+{
+    var assembly = typeof(YummyKodikStreamUri).Assembly;
+    var optionsType = assembly.GetType("YummyKodik.Media.MediaSourceBuildOptions");
+    var factoryType = assembly.GetType("YummyKodik.Media.YummyKodikMediaSourceFactory");
+    AssertTrue(optionsType is not null, "Media-source build options should exist.");
+    AssertTrue(factoryType is not null, "Media-source factory should exist.");
+
+    var options = Activator.CreateInstance(optionsType!, nonPublic: true);
+    AssertTrue(options is not null, "Media-source build options should be constructible.");
+    optionsType!.GetProperty("ItemId")!.SetValue(options, "item-1");
+    optionsType.GetProperty("Episode")!.SetValue(options, 7);
+    optionsType.GetProperty("Suffix")!.SetValue(options, "kodik-auto");
+    optionsType.GetProperty("Name")!.SetValue(options, "Auto");
+    optionsType.GetProperty("Url")!.SetValue(options, "http://127.0.0.1:8096/YummyKodik/stream?ep=7&format=hls");
+    optionsType.GetProperty("Container")!.SetValue(options, "m3u8");
+    optionsType.GetProperty("SupportsDirectPlay")!.SetValue(options, false);
+    optionsType.GetProperty("RunTimeTicks")!.SetValue(options, TimeSpan.FromMinutes(24).Ticks);
+
+    var build = factoryType!.GetMethod("Build", BindingFlags.Static | BindingFlags.Public);
+    AssertTrue(build is not null, "Media-source factory Build method should exist.");
+    var source = (MediaSourceInfo)build!.Invoke(null, new[] { options })!;
+
+    AssertEqual(VideoType.VideoFile, source.VideoType!.Value, "Dynamic YummyKodik media sources should be classified as regular video.");
+    AssertEqual(TimeSpan.FromMinutes(24).Ticks, source.RunTimeTicks!.Value, "Dynamic media source should carry the resolved total episode duration.");
+    AssertEqual("m3u8", source.Container, "Dynamic media source should expose the resolved HLS container.");
+    AssertFalse(source.SupportsDirectPlay, "Gateway HLS source should not be mistaken for the original static STRM source.");
+}
+
+static void YummyKodikMediaSegmentProvider_ClonesCachedSegmentsPerItem()
+{
+    var templateItemId = Guid.NewGuid();
+    var itemA = Guid.NewGuid();
+    var itemB = Guid.NewGuid();
+    var templateId = Guid.NewGuid();
+    IReadOnlyList<MediaSegmentDto> template = new[]
+    {
+        new MediaSegmentDto
+        {
+            Id = templateId,
+            ItemId = templateItemId,
+            Type = MediaSegmentType.Intro,
+            StartTicks = TimeSpan.FromSeconds(12).Ticks,
+            EndTicks = TimeSpan.FromSeconds(88).Ticks
+        }
+    };
+
+    var cloneA = YummyKodikMediaSegmentCache.CloneSegmentsForItem(template, itemA).Single();
+    var cloneB = YummyKodikMediaSegmentCache.CloneSegmentsForItem(template, itemB).Single();
+
+    AssertEqual(itemA, cloneA.ItemId, "Cached segment clones must target the requested item.");
+    AssertEqual(itemB, cloneB.ItemId, "Cached segment clones must target each requested item independently.");
+    AssertFalse(cloneA.Id == templateId, "Cached segment clone must not reuse the template segment id.");
+    AssertFalse(cloneB.Id == templateId, "Cached segment clone must not reuse the template segment id.");
+    AssertFalse(cloneA.Id == cloneB.Id, "Cached segment clones for different items must not collide.");
+    AssertEqual(template[0].Type, cloneA.Type, "Cached segment clone should preserve segment type.");
+    AssertEqual(template[0].StartTicks, cloneA.StartTicks, "Cached segment clone should preserve start ticks.");
+    AssertEqual(template[0].EndTicks, cloneA.EndTicks, "Cached segment clone should preserve end ticks.");
+}
+
 static void GenerateKodikEpisodeFilesAsync_FillsMissingTranslationsForExistingEpisode()
 {
     var expectedEpisodeTranslationKeys = new Dictionary<int, HashSet<string>>();
@@ -2521,6 +3440,28 @@ static void GenerateKodikEpisodeFilesAsync_FillsMissingTranslationsForExistingEp
 
     AssertEqual(1, missing.Length, "Only translations absent from Yummy/CVH coverage should remain for Kodik supplementation.");
     AssertEqual("AniLibria", missing[0], "Kodik supplement should only add the missing translation.");
+}
+
+static void ResolveEpisodesNeedingKodikTranslation_SkipsYummyCoveredPairs()
+{
+    var expectedEpisodeTranslationKeys = new Dictionary<int, HashSet<string>>();
+    EpisodeArtifactMaintenance.TrackExpectedEpisodeTranslation(expectedEpisodeTranslationKeys, 1, "AniLibria.TV");
+    EpisodeArtifactMaintenance.TrackExpectedEpisodeTranslation(expectedEpisodeTranslationKeys, 3, "AniLibria");
+    var translation = new KodikTranslation
+    {
+        Id = "610",
+        Type = "voice",
+        Name = "AniLibria",
+        MaxEpisode = 3,
+        AvailableEpisodes = new[] { 1, 2, 3 }
+    };
+
+    var episodes = KodikSupplementService.ResolveEpisodesNeedingKodikTranslation(
+        translation,
+        new[] { 1, 2, 3 },
+        expectedEpisodeTranslationKeys);
+
+    AssertEqual("2", string.Join(",", episodes), "Kodik should deep-check only episode/voice pairs not already supplied by an equivalent Yummy provider voice.");
 }
 
 static void EpisodeArtifactMaintenance_NormalizesEquivalentTranslationVariants()
@@ -2551,10 +3492,19 @@ static void ResolveEpisodeTranslationFileBaseName_ReusesExistingEquivalentArtifa
     AssertEqual("S01E01 - AniLibria.TV", fileBaseName, "Refresh should reuse the existing equivalent file name to keep Jellyfin item ids stable.");
 }
 
-static void ResolveKodikAvailableEpisodeCount_UsesYummyHintWhenSeriesCountIsZero()
+static void ResolveProviderCoverage_UsesYummyHintWhenKodikSeriesCountIsZero()
 {
-    var count = YummyEpisodeAvailability.ResolveKodikAvailableEpisodeCount(0, 1);
-    AssertEqual(1, count, "When Kodik search returns zero seriesCount but Yummy knows episode 1 exists, refresh should still generate files.");
+    var coverage = YummyEpisodeAvailability.ResolveProviderCoverage(0, 1);
+    AssertEqual(1, coverage.KodikAvailableEpisodes, "When Kodik search returns zero seriesCount but Yummy knows episode 1 exists, refresh should still generate files.");
+    AssertEqual(1, coverage.OverallAvailableEpisodes, "The overall cleanup ceiling should preserve Yummy's known episode.");
+}
+
+static void ResolveProviderCoverage_PreservesYummyCoverageBeyondKodik()
+{
+    var coverage = YummyEpisodeAvailability.ResolveProviderCoverage(8, 16);
+
+    AssertEqual(8, coverage.KodikAvailableEpisodes, "Kodik link processing should stay bounded by Kodik's eight reported episodes.");
+    AssertEqual(16, coverage.OverallAvailableEpisodes, "Whole-season cleanup must preserve the wider sixteen-episode Yummy/CVH coverage.");
 }
 
 static void KeepLatestEpisodePerResolvedLink_DropsEarlierEpisodesWhenKodikReusesSameVideo()
@@ -2682,10 +3632,22 @@ static void RefreshState_AllowsSingleFileSkipWhenFingerprintAndFilesMatch()
 static void RefreshState_InvalidatesSkipWhenInputsChange()
 {
     var baseline = RefreshStateManager.BuildFingerprint(BuildRefreshStateFingerprintInput());
+    AssertTrue(
+        typeof(RefreshStateFingerprintInput).GetProperty("ServerBaseUrl") is null,
+        "Refresh-state fingerprint inputs must not retain the client-facing ServerBaseUrl.");
+
+    var sameGatewayWithTrailingSlash = RefreshStateManager.BuildFingerprint(
+        BuildRefreshStateFingerprintInput(streamGatewayBaseUrl: "http://127.0.0.1:8096/"));
+    AssertEqual(
+        baseline,
+        sameGatewayWithTrailingSlash,
+        "Fingerprint should be independent of public server topology and normalize the internal gateway trailing slash.");
+
     var cases = new (string Name, RefreshStateFingerprintInput Input)[]
     {
-        ("ServerBaseUrl", BuildRefreshStateFingerprintInput(serverBaseUrl: "https://other.example")),
+        ("StreamGatewayBaseUrl", BuildRefreshStateFingerprintInput(streamGatewayBaseUrl: "http://127.0.0.1:18096")),
         ("PreferredTranslationFilter", BuildRefreshStateFingerprintInput(preferredTranslationFilter: "dreamcast")),
+        ("PreferredQuality", BuildRefreshStateFingerprintInput(preferredQuality: 720)),
         ("Mode", BuildRefreshStateFingerprintInput(mode: "per-voice")),
         ("ProviderCoverage", BuildRefreshStateFingerprintInput(providerCoverage: new[] { "ep:1:preferred:Cvh" })),
         ("SeasonTitleIdentity", BuildRefreshStateFingerprintInput(seriesTitle: "Frieren Season Two", seasonNumber: 2)),
@@ -2868,6 +3830,427 @@ static void RefreshState_PreservesMultipleSeasonsInSeriesRoot()
     }
 }
 
+static void RefreshState_LegacyGenerationContractDisablesSkip()
+{
+    AssertTrue(
+        RefreshStateManager.GenerationContractVersion > 1,
+        "Gateway STRM generation must bump the refresh-state contract version.");
+
+    var tempRoot = Path.Combine(Path.GetTempPath(), "YummyKodikTests", Guid.NewGuid().ToString("N"));
+    try
+    {
+        var fixture = CreateRefreshStateFixture(tempRoot);
+        RefreshStateManager.WriteSeasonStateAsync(
+                fixture.SeriesRoot,
+                fixture.Input,
+                fixture.ExpectedEpisodeFileBaseNames,
+                CancellationToken.None)
+            .GetAwaiter()
+            .GetResult();
+
+        var statePath = Path.Combine(fixture.SeriesRoot, RefreshStateManager.StateFileName);
+        var currentVersion = RefreshStateManager.GenerationContractVersion;
+        var currentJson = File.ReadAllText(statePath);
+        var legacyJson = currentJson.Replace(
+            $"\"generationContractVersion\": {currentVersion}",
+            $"\"generationContractVersion\": {currentVersion - 1}",
+            StringComparison.Ordinal);
+        AssertFalse(
+            string.Equals(currentJson, legacyJson, StringComparison.Ordinal),
+            "Test fixture should contain the generated contract version before simulating a legacy state file.");
+        File.WriteAllText(statePath, legacyJson);
+
+        var canSkip = RefreshStateManager.CanSkipSingleFileRefreshAsync(
+                fixture.SeriesRoot,
+                fixture.Input,
+                CancellationToken.None)
+            .GetAwaiter()
+            .GetResult();
+        AssertFalse(canSkip, "A v1 refresh-state file must not skip refresh after the gateway STRM contract changes.");
+    }
+    finally
+    {
+        TryDeleteDirectory(tempRoot);
+    }
+}
+
+static void RefreshState_WritesAndReadsMediaSegmentsForEpisodeFile()
+{
+    var tempRoot = Path.Combine(Path.GetTempPath(), "YummyKodikTests", Guid.NewGuid().ToString("N"));
+
+    try
+    {
+        var fixture = CreateRefreshStateFixture(tempRoot, createStrmPerVoiceTranslation: true);
+        var seasonDir = Path.Combine(fixture.SeriesRoot, fixture.Input.SeasonKey);
+        var voiceFileBaseName = "S01E01 - AniLibria";
+        File.WriteAllText(Path.Combine(seasonDir, voiceFileBaseName + ".strm"), "https://jellyfin.test/YummyKodik/cvh/1/1");
+        File.WriteAllText(
+            Path.Combine(seasonDir, voiceFileBaseName + ".nfo"),
+            NfoBuilder.BuildEpisodeNfo(1, 1, "Frieren", "Plot"));
+        fixture.ExpectedEpisodeFileBaseNames[1].Add(voiceFileBaseName);
+
+        var mediaSegments = new Dictionary<string, RefreshStateMediaSegmentEntry>(StringComparer.OrdinalIgnoreCase)
+        {
+            [voiceFileBaseName] = new RefreshStateMediaSegmentEntry
+            {
+                FileBaseName = voiceFileBaseName,
+                EpisodeNumber = 1,
+                Provider = "Cvh",
+                VoiceName = "AniLibria",
+                SourceProvider = "Cvh",
+                SourceVoiceName = "Komnata Didi",
+                Segments = new[]
+                {
+                    new RefreshStateMediaSegment
+                    {
+                        Type = "Intro",
+                        StartTicks = TimeSpan.FromSeconds(44).Ticks,
+                        EndTicks = TimeSpan.FromSeconds(133).Ticks
+                    },
+                    new RefreshStateMediaSegment
+                    {
+                        Type = "Outro",
+                        StartTicks = TimeSpan.FromSeconds(1482).Ticks,
+                        EndTicks = TimeSpan.FromSeconds(1496).Ticks
+                    }
+                }
+            }
+        };
+
+        RefreshStateManager.WriteSeasonStateAsync(
+                fixture.SeriesRoot,
+                fixture.Input,
+                fixture.ExpectedEpisodeFileBaseNames,
+                mediaSegments,
+                CancellationToken.None)
+            .GetAwaiter()
+            .GetResult();
+
+        var entry = RefreshStateManager.TryReadMediaSegmentEntryForPathAsync(
+                Path.Combine(seasonDir, voiceFileBaseName + ".strm"),
+                CancellationToken.None)
+            .GetAwaiter()
+            .GetResult();
+
+        AssertTrue(entry != null, "Media segment state should be readable by episode file path.");
+        AssertEqual("AniLibria", entry!.VoiceName, "Requested voice should be stored with local media segments.");
+        AssertEqual("Komnata Didi", entry.SourceVoiceName, "Source voice should record where fallback timings came from.");
+        AssertEqual(2, entry.Segments.Length, "Intro and outro segments should be stored.");
+        AssertEqual(TimeSpan.FromSeconds(44).Ticks, entry.Segments[0].StartTicks, "Intro start ticks should round-trip.");
+    }
+    finally
+    {
+        TryDeleteDirectory(tempRoot);
+    }
+}
+
+static void ExistingLibraryFallbackRefreshInfoLoader_LoadsSnapshotFromRefreshState()
+{
+    var tempRoot = Path.Combine(Path.GetTempPath(), "YummyKodikTests", Guid.NewGuid().ToString("N"));
+    var seriesRoot = Path.Combine(tempRoot, "Frieren [shikimori-52991]");
+    var seasonDir = Path.Combine(seriesRoot, "Season 01");
+
+    try
+    {
+        Directory.CreateDirectory(seasonDir);
+        File.WriteAllText(Path.Combine(seriesRoot, "tvshow.nfo"), NfoBuilder.BuildSeriesNfo("Frieren", "Existing plot"));
+        File.WriteAllText(
+            Path.Combine(seasonDir, "S01E01 - Dream Cast.strm"),
+            "https://jellyfin.test/YummyKodik/stream?provider=cvh&animeId=21008&ep=1&voice=Dream%20Cast&format=hls" + Environment.NewLine);
+        File.WriteAllText(
+            Path.Combine(seasonDir, "S01E01 - Dream Cast.nfo"),
+            NfoBuilder.BuildEpisodeNfo(1, 1, "Frieren", "Existing plot"));
+
+        var input = BuildRefreshStateSeasonInput(fingerprint: "provider-only-fallback-test");
+        var expectedEpisodeFileBaseNames = new Dictionary<int, HashSet<string>>
+        {
+            [1] = new(StringComparer.OrdinalIgnoreCase)
+            {
+                "S01E01 - Dream Cast"
+            }
+        };
+
+        RefreshStateManager.WriteSeasonStateAsync(
+                seriesRoot,
+                input,
+                expectedEpisodeFileBaseNames,
+                CancellationToken.None)
+            .GetAwaiter()
+            .GetResult();
+
+        var keys = ExistingLibraryFallbackRefreshInfoLoader.FindExistingCleanKeys(tempRoot);
+        AssertTrue(keys.Contains("frieren", StringComparer.OrdinalIgnoreCase), "Existing refresh state should provide fallback title keys when the Yummy user list is unavailable.");
+
+        var refresh = new ExistingLibraryFallbackRefreshInfoLoader()
+            .TryLoad(NullLogger.Instance, "frieren", tempRoot, "http://127.0.0.1:8096");
+
+        AssertTrue(refresh is not null, "Existing local library snapshot should be loadable by clean key.");
+        AssertEqual("Frieren", refresh!.TitleInfo.Title, "Fallback title should come from tvshow.nfo.");
+        AssertEqual(1, refresh.TitleInfo.SeasonNumber, "Fallback season should come from refresh state.");
+        AssertEqual(52991L, refresh.TitleInfo.Anime.RemoteIds?.ShikimoriId ?? 0, "Fallback remote id should come from the provider tag.");
+        AssertEqual(21008L, refresh.TitleInfo.Anime.AnimeId, "Fallback Yummy anime id should be recovered from existing provider STRM urls.");
+        AssertEqual(seasonDir, refresh.Files.SeasonDir, "Fallback season dir should point at the existing generated season.");
+        AssertEqual(
+            "http://127.0.0.1:8096",
+            refresh.Files.BaseUrl,
+            "Fallback refresh should generate future STRM files through Jellyfin's internal gateway.");
+
+        var state = ExistingLibraryFallbackRefreshInfoLoader.BuildExistingEpisodeState(seasonDir, 1);
+        AssertTrue(state.GeneratedEpisodeNumbers.Contains(1), "Existing STRM files should count as already generated episodes.");
+        AssertTrue(
+            EpisodeArtifactMaintenance.HasExpectedEpisodeTranslation(state.ExpectedEpisodeTranslationKeys, 1, "Dream Cast"),
+            "Existing per-voice files should be treated as expected during provider-only fallback.");
+    }
+    finally
+    {
+        TryDeleteDirectory(tempRoot);
+    }
+}
+
+static void StaleReleaseCleanup_DeletesStaleManagedDirectory()
+{
+    var tempRoot = Path.Combine(Path.GetTempPath(), "YummyKodikTests", Guid.NewGuid().ToString("N"));
+    try
+    {
+        var staleSeries = Path.Combine(tempRoot, "Stale series");
+        WriteManagedCleanupSeason(staleSeries, 1, "stale-release");
+
+        var result = RunStaleReleaseCleanup(tempRoot, Array.Empty<string>());
+
+        AssertFalse(Directory.Exists(staleSeries), "A managed series absent from the current keys should be deleted.");
+        AssertEqual(1, result.DeletedDirectoryCount, "Exactly one stale managed series root should be deleted.");
+    }
+    finally
+    {
+        TryDeleteDirectory(tempRoot);
+    }
+}
+
+static void StaleReleaseCleanup_RetainsCurrentAndManualKeys()
+{
+    var tempRoot = Path.Combine(Path.GetTempPath(), "YummyKodikTests", Guid.NewGuid().ToString("N"));
+    try
+    {
+        var currentSeries = Path.Combine(tempRoot, "Current series");
+        var manualSeries = Path.Combine(tempRoot, "Manual series");
+        WriteManagedCleanupSeason(currentSeries, 1, "current-release");
+        WriteManagedCleanupSeason(manualSeries, 1, "manual-release");
+
+        var result = RunStaleReleaseCleanup(tempRoot, new[] { "CURRENT-RELEASE", "manual-release" });
+
+        AssertTrue(Directory.Exists(currentSeries), "A current user-list key must retain its managed series directory.");
+        AssertTrue(Directory.Exists(manualSeries), "A manual slug passed in the current key set must retain its managed series directory.");
+        AssertEqual(2, result.RetainedDirectoryCount, "Both current and manual configured releases should be retained.");
+        AssertEqual(0, result.DeletedDirectoryCount, "No current release should be deleted.");
+    }
+    finally
+    {
+        TryDeleteDirectory(tempRoot);
+    }
+}
+
+static void StaleReleaseCleanup_SkipsMissingCorruptAndAmbiguousState()
+{
+    var tempRoot = Path.Combine(Path.GetTempPath(), "YummyKodikTests", Guid.NewGuid().ToString("N"));
+    try
+    {
+        var missingState = Path.Combine(tempRoot, "Missing state");
+        var corruptState = Path.Combine(tempRoot, "Corrupt state");
+        var ambiguousState = Path.Combine(tempRoot, "Ambiguous state");
+        Directory.CreateDirectory(missingState);
+        Directory.CreateDirectory(corruptState);
+        Directory.CreateDirectory(ambiguousState);
+        File.WriteAllText(Path.Combine(corruptState, RefreshStateManager.StateFileName), "{ not-json");
+        WriteCleanupState(ambiguousState, ("Season 01", string.Empty));
+
+        var result = RunStaleReleaseCleanup(tempRoot, Array.Empty<string>());
+
+        AssertTrue(Directory.Exists(missingState), "Directories without managed refresh state must not be deleted.");
+        AssertTrue(Directory.Exists(corruptState), "Directories with corrupt refresh state must not be deleted.");
+        AssertTrue(Directory.Exists(ambiguousState), "Directories with ambiguous refresh state must not be deleted.");
+        AssertEqual(3, result.SkippedDirectoryCount, "Missing, corrupt, and ambiguous state should each take the safe skip path.");
+        AssertEqual(0, result.DeletedDirectoryCount, "Unproven directories must never be deleted by stale cleanup.");
+    }
+    finally
+    {
+        TryDeleteDirectory(tempRoot);
+    }
+}
+
+static void StaleReleaseCleanup_SkipsSeasonWithUnknownFile()
+{
+    var tempRoot = Path.Combine(Path.GetTempPath(), "YummyKodikTests", Guid.NewGuid().ToString("N"));
+    try
+    {
+        var seriesRoot = Path.Combine(tempRoot, "Unknown file series");
+        var seasonDir = WriteManagedCleanupSeason(seriesRoot, 1, "stale-release");
+        File.WriteAllText(Path.Combine(seasonDir, "user-note.txt"), "do not delete");
+
+        var result = RunStaleReleaseCleanup(tempRoot, Array.Empty<string>());
+
+        AssertTrue(Directory.Exists(seriesRoot), "An untracked file in a stale season must block recursive deletion.");
+        AssertTrue(Directory.Exists(seasonDir), "A season containing an untracked file must remain intact.");
+        AssertEqual(0, result.DeletedDirectoryCount, "Cleanup must not delete a season whose manifest is no longer exact.");
+    }
+    finally
+    {
+        TryDeleteDirectory(tempRoot);
+    }
+}
+
+static void StaleReleaseCleanup_SkipsSeasonWithModifiedManagedFile()
+{
+    var tempRoot = Path.Combine(Path.GetTempPath(), "YummyKodikTests", Guid.NewGuid().ToString("N"));
+    try
+    {
+        var seriesRoot = Path.Combine(tempRoot, "Modified file series");
+        var seasonDir = WriteManagedCleanupSeason(seriesRoot, 1, "stale-release");
+        File.AppendAllText(Path.Combine(seasonDir, "S01E01.strm"), "modified");
+
+        var result = RunStaleReleaseCleanup(tempRoot, Array.Empty<string>());
+
+        AssertTrue(Directory.Exists(seriesRoot), "A stale root with modified managed artifacts must not be deleted.");
+        AssertTrue(Directory.Exists(seasonDir), "A season with a managed-file hash mismatch must remain intact.");
+        AssertEqual(0, result.DeletedDirectoryCount, "Cleanup must not delete a stale season when its managed file hash no longer matches state.");
+    }
+    finally
+    {
+        TryDeleteDirectory(tempRoot);
+    }
+}
+
+static void StaleReleaseCleanup_CanonicalizesPlainAndUrlCurrentKeys()
+{
+    var tempRoot = Path.Combine(Path.GetTempPath(), "YummyKodikTests", Guid.NewGuid().ToString("N"));
+    try
+    {
+        var seriesRoot = Path.Combine(tempRoot, "Canonical key series");
+        WriteManagedCleanupSeason(seriesRoot, 1, "frieren");
+        var statePath = Path.Combine(seriesRoot, RefreshStateManager.StateFileName);
+        var state = JsonNode.Parse(File.ReadAllText(statePath))!.AsObject();
+        var season = state["seasons"]!.AsObject()["Season 01"]!.AsObject();
+        season["cleanKey"] = "https://yani.tv/anime/frieren";
+        File.WriteAllText(statePath, state.ToJsonString());
+
+        var result = RunStaleReleaseCleanup(tempRoot, new[] { "frieren" });
+
+        AssertTrue(Directory.Exists(seriesRoot), "A plain current slug must retain a matching URL-form state cleanKey.");
+        AssertEqual(1, result.RetainedDirectoryCount, "Shared key canonicalization should retain the matching managed root.");
+        AssertEqual(0, result.DeletedDirectoryCount, "Equivalent URL and slug key forms must never trigger stale deletion.");
+    }
+    finally
+    {
+        TryDeleteDirectory(tempRoot);
+    }
+}
+
+static void StaleReleaseCleanup_SkipsLegacyGenerationContract()
+{
+    AssertTrue(RefreshStateManager.GenerationContractVersion > 1, "Gateway cleanup must have a newer generation contract than legacy state files.");
+
+    var tempRoot = Path.Combine(Path.GetTempPath(), "YummyKodikTests", Guid.NewGuid().ToString("N"));
+    try
+    {
+        var seriesRoot = Path.Combine(tempRoot, "Legacy contract series");
+        WriteManagedCleanupSeason(seriesRoot, 1, "stale-release");
+        var statePath = Path.Combine(seriesRoot, RefreshStateManager.StateFileName);
+        var state = JsonNode.Parse(File.ReadAllText(statePath))!.AsObject();
+        state["generationContractVersion"] = RefreshStateManager.GenerationContractVersion - 1;
+        File.WriteAllText(statePath, state.ToJsonString());
+
+        var result = RunStaleReleaseCleanup(tempRoot, Array.Empty<string>());
+
+        AssertTrue(Directory.Exists(seriesRoot), "A stale directory with an older generation contract must be preserved.");
+        AssertEqual(1, result.SkippedDirectoryCount, "Legacy generation state should take the safe skip path.");
+        AssertEqual(0, result.DeletedDirectoryCount, "Legacy state must not authorize deletion.");
+    }
+    finally
+    {
+        TryDeleteDirectory(tempRoot);
+    }
+}
+
+static void StaleReleaseCleanup_DeletesMixedRootStaleSeasonAndStateEntry()
+{
+    var tempRoot = Path.Combine(Path.GetTempPath(), "YummyKodikTests", Guid.NewGuid().ToString("N"));
+    try
+    {
+        var seriesRoot = Path.Combine(tempRoot, "Shared series");
+        var currentSeason = Path.Combine(seriesRoot, "Season 01");
+        var staleSeason = Path.Combine(seriesRoot, "Season 02");
+        WriteManagedCleanupSeason(seriesRoot, 1, "current-release");
+        WriteManagedCleanupSeason(seriesRoot, 2, "stale-release");
+
+        var result = RunStaleReleaseCleanup(tempRoot, new[] { "current-release" });
+
+        AssertTrue(Directory.Exists(seriesRoot), "A mixed series root must remain while it has a current season.");
+        AssertTrue(Directory.Exists(currentSeason), "The current season directory must remain in a mixed series root.");
+        AssertFalse(Directory.Exists(staleSeason), "The stale season directory must be removed from a mixed series root.");
+        AssertEqual(1, result.DeletedDirectoryCount, "Removing one stale season must count as one managed directory deletion.");
+        AssertEqual(0, result.DeletedSeriesDirectoryCount, "Removing only a stale season must not count as deleting its retained series root.");
+        AssertEqual(1, result.DeletedSeasonDirectoryCount, "Mixed-root cleanup should report the removed stale season.");
+
+        using var state = JsonDocument.Parse(File.ReadAllText(Path.Combine(seriesRoot, RefreshStateManager.StateFileName)));
+        var seasons = state.RootElement.GetProperty("seasons");
+        AssertTrue(seasons.TryGetProperty("Season 01", out _), "Current season state must remain after mixed-root cleanup.");
+        AssertFalse(seasons.TryGetProperty("Season 02", out _), "Stale season state must be removed with its directory.");
+    }
+    finally
+    {
+        TryDeleteDirectory(tempRoot);
+    }
+}
+
+static void StaleReleaseCleanup_DeletesAllStaleRootForEmptyCurrentSet()
+{
+    var tempRoot = Path.Combine(Path.GetTempPath(), "YummyKodikTests", Guid.NewGuid().ToString("N"));
+    try
+    {
+        var seriesRoot = Path.Combine(tempRoot, "All stale series");
+        WriteManagedCleanupSeason(seriesRoot, 1, "stale-one");
+        WriteManagedCleanupSeason(seriesRoot, 2, "stale-two");
+
+        var result = RunStaleReleaseCleanup(tempRoot, Array.Empty<string>());
+
+        AssertFalse(Directory.Exists(seriesRoot), "An all-stale managed series root should be deleted when the valid current user list is empty.");
+        AssertEqual(1, result.DeletedDirectoryCount, "Deleting an all-stale multi-season root should count as one root deletion.");
+    }
+    finally
+    {
+        TryDeleteDirectory(tempRoot);
+    }
+}
+
+static void RefreshTitleKeySource_ValidEmptyUserListMarksFetchSucceeded()
+{
+    var handler = new DelegatingTestHandler(request =>
+    {
+        AssertEqual(HttpMethod.Get, request.Method, "Refresh title key source should fetch the configured Yummy user list.");
+        AssertEqual("https://yummy.test/users/42/lists/7", request.RequestUri!.AbsoluteUri, "Refresh title key source should request the configured user and list ids.");
+        return new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("{\"response\":[]}", Encoding.UTF8, "application/json")
+        };
+    });
+
+    using var http = new HttpClient(handler);
+    var yummy = new YummyClient(http, "test-client", "https://yummy.test");
+    var source = new RefreshTitleKeySource(NullLogger.Instance, static () => { });
+    var cfg = new PluginConfiguration
+    {
+        UseUserListSubscription = true,
+        YummyUserId = 42,
+        YummyUserListId = 7,
+        Slugs = new List<string>()
+    };
+
+    var keys = source.BuildAsync(cfg, yummy, CancellationToken.None).GetAwaiter().GetResult();
+
+    AssertEqual(0, keys.Count, "A valid empty user list should produce no release keys.");
+    AssertTrue(source.UserListFetchSucceeded, "A valid empty user-list response must open the stale-cleanup success gate.");
+    AssertFalse(source.UserListFetchFailed, "A valid empty user-list response must not be marked as a fetch failure.");
+}
+
 static void RefreshTask_ProcessesAtMostTwoTitlesConcurrently()
 {
     var active = 0;
@@ -2887,6 +4270,7 @@ static void RefreshTask_ProcessesAtMostTwoTitlesConcurrently()
             }),
             progress,
             NullLogger.Instance,
+            null,
             CancellationToken.None)
         .GetAwaiter()
         .GetResult();
@@ -3027,6 +4411,387 @@ static void RefreshState_PerVoiceModeDoesNotPreSkip()
     }
 }
 
+static void RefreshState_KodikCatalogSignatureIsOrderIndependent()
+{
+    var first = RefreshStateManager.BuildKodikCatalogSignature(new RefreshStateKodikCatalogInput
+    {
+        IdType = "Shikimori",
+        Id = "52991",
+        SeriesCount = 2,
+        Translations = new[]
+        {
+            new RefreshStateKodikTranslationInput
+            {
+                Id = "610",
+                Type = "voice",
+                Name = "AniLibria",
+                MaxEpisode = 2,
+                AvailableEpisodes = new[] { 2, 1, 2 }
+            },
+            new RefreshStateKodikTranslationInput
+            {
+                Id = "777",
+                Type = "voice",
+                Name = "AniStar",
+                MaxEpisode = 2,
+                AvailableEpisodes = new[] { 1, 2 }
+            }
+        }
+    });
+    var reordered = RefreshStateManager.BuildKodikCatalogSignature(new RefreshStateKodikCatalogInput
+    {
+        IdType = "Shikimori",
+        Id = "52991",
+        SeriesCount = 2,
+        Translations = new[]
+        {
+            new RefreshStateKodikTranslationInput
+            {
+                Id = "777",
+                Type = "voice",
+                Name = "AniStar",
+                MaxEpisode = 2,
+                AvailableEpisodes = new[] { 2, 1 }
+            },
+            new RefreshStateKodikTranslationInput
+            {
+                Id = "610",
+                Type = "voice",
+                Name = "AniLibria",
+                MaxEpisode = 2,
+                AvailableEpisodes = new[] { 1, 2 }
+            }
+        }
+    });
+    var changed = RefreshStateManager.BuildKodikCatalogSignature(new RefreshStateKodikCatalogInput
+    {
+        IdType = "Shikimori",
+        Id = "52991",
+        SeriesCount = 2,
+        Translations = new[]
+        {
+            new RefreshStateKodikTranslationInput
+            {
+                Id = "610",
+                Type = "voice",
+                Name = "AniLibria",
+                MaxEpisode = 2,
+                AvailableEpisodes = new[] { 1, 2 }
+            },
+            new RefreshStateKodikTranslationInput
+            {
+                Id = "778",
+                Type = "voice",
+                Name = "New Voice",
+                MaxEpisode = 2,
+                AvailableEpisodes = new[] { 1, 2 }
+            }
+        }
+    });
+
+    AssertEqual(first, reordered, "Kodik catalog signature should ignore provider ordering and duplicate episode numbers.");
+    AssertFalse(string.Equals(first, changed, StringComparison.Ordinal), "A changed Kodik translation catalog should invalidate the signature.");
+}
+
+static void RefreshState_PerVoiceDeepSkipRequiresFreshMatchingCatalog()
+{
+    var tempRoot = Path.Combine(Path.GetTempPath(), "YummyKodikTests", Guid.NewGuid().ToString("N"));
+
+    try
+    {
+        var fixture = CreateRefreshStateFixture(tempRoot, createStrmPerVoiceTranslation: true);
+        var validatedAtUtc = new DateTimeOffset(2026, 8, 11, 0, 0, 0, TimeSpan.Zero);
+        const string signature = "sha256:kodik-catalog-a";
+        var seasonDir = Path.Combine(fixture.SeriesRoot, fixture.Input.SeasonKey);
+        const string kodikOnlyFileBaseName = "S01E02 - Kodik Voice";
+        File.WriteAllText(
+            Path.Combine(seasonDir, kodikOnlyFileBaseName + ".strm"),
+            "https://jellyfin.test/YummyKodik/stream?type=shikimori&id=52991&ep=2&tr=610&format=hls" + Environment.NewLine);
+        File.WriteAllText(
+            Path.Combine(seasonDir, kodikOnlyFileBaseName + ".nfo"),
+            NfoBuilder.BuildEpisodeNfo(2, 1, "Frieren", "Plot"));
+        fixture.ExpectedEpisodeFileBaseNames[2] = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            kodikOnlyFileBaseName
+        };
+        var written = RefreshStateManager.WriteSeasonStateAsync(
+                fixture.SeriesRoot,
+                fixture.Input,
+                fixture.ExpectedEpisodeFileBaseNames,
+                mediaSegmentEntriesByFileBaseName: null,
+                new RefreshStateKodikValidation
+                {
+                    CatalogSignature = signature,
+                    DeepValidatedAtUtc = validatedAtUtc
+                },
+                CancellationToken.None)
+            .GetAwaiter()
+            .GetResult();
+        AssertTrue(written, "Complete per-voice artifacts should produce refresh state with Kodik validation metadata.");
+
+        var canSkip = RefreshStateManager.CanSkipPerVoiceDeepRefreshAsync(
+                fixture.SeriesRoot,
+                fixture.Input,
+                signature,
+                validatedAtUtc.AddHours(1),
+                CancellationToken.None)
+            .GetAwaiter()
+            .GetResult();
+        AssertTrue(canSkip, "Fresh matching Yummy state and Kodik catalog should skip deep per-episode validation.");
+
+        var canSkipKodikLookup = RefreshStateManager.CanSkipPerVoiceKodikLookupAsync(
+                fixture.SeriesRoot,
+                fixture.Input,
+                validatedAtUtc.AddHours(1),
+                CancellationToken.None)
+            .GetAwaiter()
+            .GetResult();
+        AssertTrue(canSkipKodikLookup, "A high-quality fast refresh should avoid a redundant Kodik lookup while verified fallback state is fresh.");
+
+        var targetQualityInput = BuildRefreshStateSeasonInput(
+            expectedAvailableEpisodes: fixture.Input.ExpectedAvailableEpisodes,
+            createStrmPerVoiceTranslation: true,
+            preferredQuality: RefreshStateManager.KodikKnownMaximumQuality,
+            fingerprint: fixture.Input.Fingerprint);
+        var targetQualityCanSkipLookup = RefreshStateManager.CanSkipPerVoiceKodikLookupAsync(
+                fixture.SeriesRoot,
+                targetQualityInput,
+                validatedAtUtc.AddHours(1),
+                CancellationToken.None)
+            .GetAwaiter()
+            .GetResult();
+        AssertFalse(targetQualityCanSkipLookup, "When Kodik can satisfy the requested quality, its lightweight catalog must still be checked every refresh.");
+
+        var changedCatalogCanSkip = RefreshStateManager.CanSkipPerVoiceDeepRefreshAsync(
+                fixture.SeriesRoot,
+                fixture.Input,
+                "sha256:kodik-catalog-b",
+                validatedAtUtc.AddHours(1),
+                CancellationToken.None)
+            .GetAwaiter()
+            .GetResult();
+        AssertFalse(changedCatalogCanSkip, "Changed Kodik metadata should force deep validation.");
+
+        var expiredCanSkip = RefreshStateManager.CanSkipPerVoiceDeepRefreshAsync(
+                fixture.SeriesRoot,
+                fixture.Input,
+                signature,
+                validatedAtUtc.Add(RefreshStateManager.PerVoiceDeepValidationInterval),
+                CancellationToken.None)
+            .GetAwaiter()
+            .GetResult();
+        AssertFalse(expiredCanSkip, "Expired Kodik validation should force a periodic deep check.");
+
+        var expiredLookupCanSkip = RefreshStateManager.CanSkipPerVoiceKodikLookupAsync(
+                fixture.SeriesRoot,
+                fixture.Input,
+                validatedAtUtc.Add(RefreshStateManager.PerVoiceDeepValidationInterval),
+                CancellationToken.None)
+            .GetAwaiter()
+            .GetResult();
+        AssertFalse(expiredLookupCanSkip, "Expired high-quality fast-path state should force a fresh Kodik catalog lookup.");
+    }
+    finally
+    {
+        TryDeleteDirectory(tempRoot);
+    }
+}
+
+static void RefreshState_PerVoiceDeepSkipRejectsDamagedOrUnexpectedFiles()
+{
+    var tempRoot = Path.Combine(Path.GetTempPath(), "YummyKodikTests", Guid.NewGuid().ToString("N"));
+
+    try
+    {
+        var fixture = CreateRefreshStateFixture(tempRoot, createStrmPerVoiceTranslation: true);
+        var validatedAtUtc = DateTimeOffset.UtcNow;
+        const string signature = "sha256:kodik-catalog";
+        RefreshStateManager.WriteSeasonStateAsync(
+                fixture.SeriesRoot,
+                fixture.Input,
+                fixture.ExpectedEpisodeFileBaseNames,
+                mediaSegmentEntriesByFileBaseName: null,
+                new RefreshStateKodikValidation
+                {
+                    CatalogSignature = signature,
+                    DeepValidatedAtUtc = validatedAtUtc
+                },
+                CancellationToken.None)
+            .GetAwaiter()
+            .GetResult();
+
+        var seasonDir = Path.Combine(fixture.SeriesRoot, fixture.Input.SeasonKey);
+        var managedStrm = Directory.EnumerateFiles(seasonDir, "*.strm", SearchOption.TopDirectoryOnly).Single();
+        File.AppendAllText(managedStrm, "damaged");
+        var damagedCanSkip = RefreshStateManager.CanSkipPerVoiceDeepRefreshAsync(
+                fixture.SeriesRoot,
+                fixture.Input,
+                signature,
+                validatedAtUtc.AddMinutes(1),
+                CancellationToken.None)
+            .GetAwaiter()
+            .GetResult();
+        AssertFalse(damagedCanSkip, "A modified managed artifact should force deep validation.");
+
+        File.WriteAllText(managedStrm, "https://jellyfin.test/YummyKodik/stream?ep=1&allohaRequestToken=secret-request-1" + Environment.NewLine);
+        RefreshStateManager.WriteSeasonStateAsync(
+                fixture.SeriesRoot,
+                fixture.Input,
+                fixture.ExpectedEpisodeFileBaseNames,
+                mediaSegmentEntriesByFileBaseName: null,
+                new RefreshStateKodikValidation
+                {
+                    CatalogSignature = signature,
+                    DeepValidatedAtUtc = validatedAtUtc
+                },
+                CancellationToken.None)
+            .GetAwaiter()
+            .GetResult();
+        File.WriteAllText(Path.Combine(seasonDir, "S01E02 - Stale.strm"), "stale");
+        File.WriteAllText(Path.Combine(seasonDir, "S01E02 - Stale.nfo"), "<episodedetails />");
+
+        var unexpectedCanSkip = RefreshStateManager.CanSkipPerVoiceDeepRefreshAsync(
+                fixture.SeriesRoot,
+                fixture.Input,
+                signature,
+                validatedAtUtc.AddMinutes(1),
+                CancellationToken.None)
+            .GetAwaiter()
+            .GetResult();
+        AssertFalse(unexpectedCanSkip, "Unexpected episode artifacts should force deep validation and cleanup.");
+    }
+    finally
+    {
+        TryDeleteDirectory(tempRoot);
+    }
+}
+
+static void RefreshState_SkipDecisionReportsReasonsAndFileCounts()
+{
+    var tempRoot = Path.Combine(Path.GetTempPath(), "YummyKodikTests", Guid.NewGuid().ToString("N"));
+
+    try
+    {
+        var missingInput = BuildRefreshStateSeasonInput();
+        var missing = RefreshStateManager.EvaluateSingleFileRefreshAsync(
+                Path.Combine(tempRoot, "Missing"),
+                missingInput,
+                CancellationToken.None)
+            .GetAwaiter()
+            .GetResult();
+        AssertEqual(RefreshSkipReason.StateMissing, missing.Reason, "Missing state should have an actionable skip reason.");
+        AssertEqual(0, missing.ManagedFilesChecked, "Missing state must not claim any file hashes were checked.");
+
+        var fixture = CreateRefreshStateFixture(tempRoot);
+        AssertTrue(
+            RefreshStateManager.WriteSeasonStateAsync(
+                    fixture.SeriesRoot,
+                    fixture.Input,
+                    fixture.ExpectedEpisodeFileBaseNames,
+                    CancellationToken.None)
+                .GetAwaiter()
+                .GetResult(),
+            "Complete fixture should write refresh state.");
+
+        var matched = RefreshStateManager.EvaluateSingleFileRefreshAsync(
+                fixture.SeriesRoot,
+                fixture.Input,
+                CancellationToken.None)
+            .GetAwaiter()
+            .GetResult();
+        AssertTrue(matched.ShouldSkip, "Matching state should produce a positive skip decision.");
+        AssertEqual(RefreshSkipReason.Matched, matched.Reason, "Matching state should report Matched.");
+        AssertEqual(3, matched.ManagedFilesChecked, "Fixture should hash tvshow NFO plus one STRM/NFO pair.");
+
+        var changedInput = BuildRefreshStateSeasonInput(fingerprint: "sha256:changed");
+        var changed = RefreshStateManager.EvaluateSingleFileRefreshAsync(
+                fixture.SeriesRoot,
+                changedInput,
+                CancellationToken.None)
+            .GetAwaiter()
+            .GetResult();
+        AssertEqual(RefreshSkipReason.FingerprintMismatch, changed.Reason, "Input drift should be distinguishable from file damage.");
+        AssertEqual(0, changed.ManagedFilesChecked, "Fingerprint mismatch should reject before hashing files.");
+
+        var seasonDir = Path.Combine(fixture.SeriesRoot, fixture.Input.SeasonKey);
+        var strmPath = Directory.EnumerateFiles(seasonDir, "*.strm", SearchOption.TopDirectoryOnly).Single();
+        File.AppendAllText(strmPath, "damaged");
+        var damaged = RefreshStateManager.EvaluateSingleFileRefreshAsync(
+                fixture.SeriesRoot,
+                fixture.Input,
+                CancellationToken.None)
+            .GetAwaiter()
+            .GetResult();
+        AssertEqual(RefreshSkipReason.ManagedFileHashMismatch, damaged.Reason, "Damaged content should report a managed hash mismatch.");
+        AssertTrue(damaged.ManagedFilesChecked > 0 && damaged.ManagedFilesChecked <= 3, "File count should reflect hashes actually computed before mismatch.");
+
+        File.WriteAllText(
+            strmPath,
+            "https://jellyfin.test/YummyKodik/stream?ep=1&allohaRequestToken=secret-request-1" + Environment.NewLine);
+        RefreshStateManager.WriteSeasonStateAsync(
+                fixture.SeriesRoot,
+                fixture.Input,
+                fixture.ExpectedEpisodeFileBaseNames,
+                CancellationToken.None)
+            .GetAwaiter()
+            .GetResult();
+        File.WriteAllText(Path.Combine(seasonDir, "S01E02 - Stale.strm"), "stale");
+        File.WriteAllText(Path.Combine(seasonDir, "S01E02 - Stale.nfo"), "<episodedetails />");
+        var unexpected = RefreshStateManager.EvaluateSingleFileRefreshAsync(
+                fixture.SeriesRoot,
+                fixture.Input,
+                CancellationToken.None)
+            .GetAwaiter()
+            .GetResult();
+        AssertEqual(RefreshSkipReason.UnexpectedArtifacts, unexpected.Reason, "Extra episode files should be a distinct skip rejection reason.");
+        AssertEqual(3, unexpected.ManagedFilesChecked, "Unexpected-artifact scan should run only after all managed hashes match.");
+        AssertEqual(2, unexpected.UnexpectedArtifactCount, "Both stale STRM and NFO should be reported.");
+
+        var perVoiceRoot = Path.Combine(tempRoot, "PerVoice");
+        var perVoiceFixture = CreateRefreshStateFixture(perVoiceRoot, createStrmPerVoiceTranslation: true);
+        var validatedAt = DateTimeOffset.UtcNow.AddDays(-2);
+        const string signature = "sha256:kodik-catalog";
+        RefreshStateManager.WriteSeasonStateAsync(
+                perVoiceFixture.SeriesRoot,
+                perVoiceFixture.Input,
+                perVoiceFixture.ExpectedEpisodeFileBaseNames,
+                mediaSegmentEntriesByFileBaseName: null,
+                new RefreshStateKodikValidation
+                {
+                    CatalogSignature = signature,
+                    DeepValidatedAtUtc = validatedAt
+                },
+                CancellationToken.None)
+            .GetAwaiter()
+            .GetResult();
+        var expired = RefreshStateManager.EvaluatePerVoiceDeepRefreshAsync(
+                perVoiceFixture.SeriesRoot,
+                perVoiceFixture.Input,
+                signature,
+                DateTimeOffset.UtcNow,
+                CancellationToken.None)
+            .GetAwaiter()
+            .GetResult();
+        AssertEqual(RefreshSkipReason.DeepValidationExpired, expired.Reason, "Expired 24-hour validation should have a stable reason.");
+        AssertEqual(0, expired.ManagedFilesChecked, "Expired validation should reject before redundant hashing.");
+    }
+    finally
+    {
+        TryDeleteDirectory(tempRoot);
+    }
+}
+
+static void KodikClient_PreferredQualityFallsBackToAvailableMaximum()
+{
+    var link = new KodikLinkInfo("//cloud.kodik-storage.example/useruploads/demo/", 720);
+
+    var hlsUrl = KodikClient.BuildHlsUrl(link, 1080);
+    var mp4Url = KodikClient.BuildMp4Url(link, 1080);
+
+    AssertTrue(hlsUrl.EndsWith("/720.mp4:hls:manifest.m3u8", StringComparison.Ordinal), "Kodik HLS should keep the stream and use its best available quality when 1080p is requested.");
+    AssertTrue(mp4Url.EndsWith("/720.mp4", StringComparison.Ordinal), "Kodik MP4 should keep the stream and use its best available quality when 1080p is requested.");
+}
+
 static void AllohaPlaybackService_BuildsExpectedBorthSuffix()
 {
     var buildBorthSuffix = typeof(AllohaPlaybackService).GetMethod(
@@ -3129,7 +4894,7 @@ static void AllohaPlaybackService_CreatesSessionViaIframeAndBnsi()
     AssertTrue(ctor is not null, "Alloha internal test constructor should exist.");
 
     var service = (AllohaPlaybackService)ctor!.Invoke(new object[] { NullLogger<AllohaPlaybackService>.Instance, http });
-    var proxyBaseUrl = "http://localhost:8096/YummyKodik/alloha-proxy";
+    var proxyBaseUrl = "/base/YummyKodik/alloha-proxy";
     var source = new YummyAllohaSource
     {
         MovieToken = "6ab5db4ce142f2103d0bed3e641380",
@@ -3145,11 +4910,339 @@ static void AllohaPlaybackService_CreatesSessionViaIframeAndBnsi()
     var manifestBody = AllohaPlaybackService.BuildManifestResponseBody(session, proxyBaseUrl);
 
     AssertEqual("https://stream-balancer-alloha.example/serial/master.m3u8", session.ManifestUrl, "Alloha should choose the requested quality manifest.");
-    AssertTrue(manifestBody.Contains($"{proxyBaseUrl}/", StringComparison.Ordinal), "Alloha manifest should rewrite entries to local proxy urls.");
+    AssertTrue(manifestBody.Contains($"{proxyBaseUrl}/", StringComparison.Ordinal), "Alloha manifest should retain the Jellyfin base path in root-relative proxy urls.");
+    AssertFalse(manifestBody.Contains("://", StringComparison.Ordinal), "Alloha proxy urls embedded in manifests must remain root-relative.");
     AssertTrue(manifestBody.Contains($".ts?sessionId={session.SessionId}&resource=", StringComparison.Ordinal), "Alloha segment proxy urls should keep a playable media extension.");
     AssertTrue(session.ProxyResources.Values.Contains("https://stream-balancer-alloha.example/serial/segment-001.ts"), "Relative Alloha manifest urls should be registered as proxy resources.");
     AssertTrue(session.ProxyResources.Values.Contains("https://cdn.example/segment-002.ts"), "Absolute Alloha manifest urls should be registered as proxy resources.");
     AssertEqual(3, requests.Count, "Alloha browserless flow should perform iframe, bnsi, and manifest requests.");
+}
+
+static void AllohaPlaybackService_SharesOnlyInFlightResolution()
+{
+    const string iframeUrl = "https://alloha.yani.tv/?token_movie=single-flight-movie&translation=410&season=1&episode=7&token=single-flight-token";
+    const string bnsiUrl = "https://alloha.yani.tv/bnsi/movies/1410007";
+    const string manifestBaseUrl = "https://stream-balancer-alloha.example/single-flight";
+    const string viewporti = "yZFgNFZy3110sc1dwXZnDgUdFUlkj1XGFX2SVdEx9ZJRpd9w8wNoxqFTSSRUQmmmWTDjnV0mNSdURTVUNNNVQMVT";
+    var iframeRequests = 0;
+    var bnsiRequests = 0;
+    var manifestRequests = 0;
+    var firstResolutionStarted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+    var releaseFirstResolution = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    using var http = new HttpClient(new AsyncDelegatingTestHandler(async (request, cancellationToken) =>
+    {
+        var url = request.RequestUri!.AbsoluteUri;
+        if (request.Method == HttpMethod.Get &&
+            url.StartsWith("https://alloha.yani.tv/?token_movie=single-flight-movie", StringComparison.Ordinal))
+        {
+            var requestNumber = Interlocked.Increment(ref iframeRequests);
+            if (requestNumber == 1)
+            {
+                firstResolutionStarted.TrySetResult(true);
+                await releaseFirstResolution.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(
+                    "<!DOCTYPE html><html><head>" +
+                    $"<meta name=\"viewporti\" content=\"{viewporti}\">" +
+                    "</head><body><script>" +
+                    "const fileList = JSON.parse('{\"active\":{\"id\":1410007,\"seasons\":1,\"episode\":7,\"id_translation\":410},\"all\":{\"t410\":{\"file\":{\"1\":{\"7\":{\"id\":1410007}}}}}}');" +
+                    "</script></body></html>")
+            };
+        }
+
+        if (request.Method == HttpMethod.Post && url == bnsiUrl)
+        {
+            var requestNumber = Interlocked.Increment(ref bnsiRequests);
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent($$"""
+                    {
+                      "hlsSource": [
+                        {
+                          "quality": {
+                            "1080": "{{manifestBaseUrl}}/master-{{requestNumber}}.m3u8"
+                          }
+                        }
+                      ]
+                    }
+                    """)
+            };
+        }
+
+        if (request.Method == HttpMethod.Get && url.StartsWith(manifestBaseUrl + "/master-", StringComparison.Ordinal))
+        {
+            Interlocked.Increment(ref manifestRequests);
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("#EXTM3U\n#EXTINF:3.0,\nsegment-001.ts\n#EXT-X-ENDLIST")
+            };
+        }
+
+        throw new InvalidOperationException("Unexpected Alloha single-flight test request: " + request.RequestUri);
+    }));
+    var service = new AllohaPlaybackService(NullLogger<AllohaPlaybackService>.Instance, http);
+    var source = new YummyAllohaSource
+    {
+        MovieToken = "single-flight-movie",
+        RequestToken = "single-flight-token",
+        TranslationId = 410,
+        SeasonNumber = 1,
+        EpisodeNumber = 7,
+        RefererUrl = iframeUrl
+    };
+
+    var firstSessionTask = service.CreateSessionAsync(source, 1080, CancellationToken.None);
+    AssertTrue(firstResolutionStarted.Task.Wait(1000), "The first Alloha resolution should reach the upstream iframe request.");
+    var concurrentSessionTask = service.CreateSessionAsync(source, 1080, CancellationToken.None);
+    releaseFirstResolution.TrySetResult(true);
+    var concurrentSessions = Task.WhenAll(firstSessionTask, concurrentSessionTask).GetAwaiter().GetResult();
+
+    AssertEqual(1, iframeRequests, "Concurrent Alloha sessions should share one in-flight iframe request.");
+    AssertEqual(1, bnsiRequests, "Concurrent Alloha sessions should share one in-flight BNSI request.");
+    AssertEqual(1, manifestRequests, "Concurrent Alloha sessions should share one in-flight manifest request.");
+    AssertEqual(concurrentSessions[0].ManifestUrl, concurrentSessions[1].ManifestUrl, "Concurrent sessions should use the same freshly resolved payload.");
+
+    var sequentialSession = service.CreateSessionAsync(source, 1080, CancellationToken.None).GetAwaiter().GetResult();
+
+    AssertEqual(2, iframeRequests, "A sequential Alloha session must resolve a fresh volatile payload.");
+    AssertEqual(2, bnsiRequests, "A sequential Alloha session must not reuse the previous BNSI payload.");
+    AssertEqual(2, manifestRequests, "A sequential Alloha session must validate a fresh manifest.");
+    AssertTrue(
+        !string.Equals(concurrentSessions[0].ManifestUrl, sequentialSession.ManifestUrl, StringComparison.Ordinal),
+        "A sequential session must not inherit the previous session's token-bearing manifest.");
+}
+
+static void AllohaPlaybackService_DoesNotResolveDynamicTokenAfterSuccessfulManifest()
+{
+    var resolverCalls = 0;
+    var iframeUrl = "https://alloha.yani.tv/?token_movie=success-movie&translation=340&season=4&episode=12&token=req-token";
+    var manifestUrl = "https://e1-72-f3-r402.vkvideo.cloud/success/master.m3u8";
+    var viewporti = "yZFgNFZy3110sc1dwXZnDgUdFUlkj1XGFX2SVdEx9ZJRpd9w8wNoxqFTSSRUQmmmWTDjnV0mNSdURTVUNNNVQMVT";
+
+    var handler = new DelegatingTestHandler(request =>
+    {
+        if (request.Method == HttpMethod.Get &&
+            request.RequestUri!.AbsoluteUri.StartsWith("https://alloha.yani.tv/?token_movie=success-movie", StringComparison.Ordinal))
+        {
+            var iframeHtml =
+                "<!DOCTYPE html>\n" +
+                "<html>\n" +
+                "<head>\n" +
+                $"    <meta name=\"viewporti\" content=\"{viewporti}\">\n" +
+                "</head>\n" +
+                "<body>\n" +
+                "<script>\n" +
+                "const fileList = JSON.parse('{\"active\":{\"id\":1191500,\"seasons\":4,\"episode\":12,\"id_translation\":340},\"all\":{\"t340\":{\"file\":{\"4\":{\"12\":{\"id\":1191500}}}}}}');\n" +
+                "</script>\n" +
+                "</body>\n" +
+                "</html>";
+
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(iframeHtml)
+            };
+        }
+
+        if (request.Method == HttpMethod.Post &&
+            request.RequestUri!.AbsoluteUri == "https://alloha.yani.tv/bnsi/movies/1191500")
+        {
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent($$"""
+                    {
+                      "pnr": "wss://alloha-ws.example/socket",
+                      "pnk": "ws-session-success",
+                      "hlsSource": [
+                        {
+                          "label": "AniMaunt",
+                          "audioId": "2",
+                          "quality": {
+                            "1080": "{{manifestUrl}}"
+                          }
+                        }
+                      ]
+                    }
+                    """)
+            };
+        }
+
+        if (request.Method == HttpMethod.Get &&
+            request.RequestUri!.AbsoluteUri == manifestUrl)
+        {
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("""
+                    #EXTM3U
+                    #EXT-X-VERSION:3
+                    segment-001.ts
+                    """)
+            };
+        }
+
+        throw new InvalidOperationException("Unexpected Alloha successful-manifest test request: " + request.RequestUri);
+    });
+
+    using var http = new HttpClient(handler);
+    Func<AllohaStreamTokenRequest, CancellationToken, Task<string?>> resolver = (_, _) =>
+    {
+        resolverCalls++;
+        return Task.FromResult<string?>("unexpected-token");
+    };
+    var ctor = typeof(AllohaPlaybackService)
+        .GetConstructors(BindingFlags.Instance | BindingFlags.NonPublic)
+        .SingleOrDefault(x => x.GetParameters().Length == 3);
+    AssertTrue(ctor is not null, "Alloha internal test constructor should allow injecting stream token resolver.");
+
+    var service = (AllohaPlaybackService)ctor!.Invoke(new object[] { NullLogger<AllohaPlaybackService>.Instance, http, resolver });
+    var source = new YummyAllohaSource
+    {
+        MovieToken = "success-movie",
+        RequestToken = "req-token",
+        TranslationId = 340,
+        SeasonNumber = 4,
+        EpisodeNumber = 12,
+        RefererUrl = iframeUrl
+    };
+
+    var session = service.CreateSessionAsync(source, 1080, "AniMaunt", CancellationToken.None).GetAwaiter().GetResult();
+
+    AssertEqual(manifestUrl, session.ManifestUrl, "Alloha should use the successful manifest response.");
+    AssertEqual(string.Empty, session.StreamToken, "Successful manifest setup should not wait for a dynamic stream token.");
+    AssertEqual(0, resolverCalls, "Successful manifest setup should not call the optional dynamic token resolver.");
+}
+
+static void AllohaPlaybackService_RetriesManifestWithDynamicStreamTokenAfter403()
+{
+    var requests = new List<HttpRequestMessage>();
+    var resolverRequests = new List<AllohaStreamTokenRequest>();
+    var iframeUrl = "https://alloha.yani.tv/?token_movie=retry-movie&translation=163&season=1&episode=1&token=retry-token";
+    var manifestUrl = "https://e1-72-f3-r402.vkvideo.cloud/demo/master.m3u8";
+    var viewporti = "yZFgNFZy3110sc1dwXZnDgUdFUlkj1XGFX2SVdEx9ZJRpd9w8wNoxqFTSSRUQmmmWTDjnV0mNSdURTVUNNNVQMVT";
+
+    var handler = new DelegatingTestHandler(request =>
+    {
+        requests.Add(CloneRequest(request));
+
+        if (request.Method == HttpMethod.Get &&
+            request.RequestUri!.AbsoluteUri.StartsWith("https://alloha.yani.tv/?token_movie=retry-movie", StringComparison.Ordinal))
+        {
+            var iframeHtml =
+                "<!DOCTYPE html>\n" +
+                "<html>\n" +
+                "<head>\n" +
+                $"    <meta name=\"viewporti\" content=\"{viewporti}\">\n" +
+                "</head>\n" +
+                "<body>\n" +
+                "<script>\n" +
+                "const fileList = JSON.parse('{\"active\":{\"id\":1191400,\"seasons\":1,\"episode\":1,\"id_translation\":163},\"all\":{\"t163\":{\"file\":{\"1\":{\"1\":{\"id\":1191400}}}}}}');\n" +
+                "</script>\n" +
+                "</body>\n" +
+                "</html>";
+
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(iframeHtml)
+            };
+        }
+
+        if (request.Method == HttpMethod.Post &&
+            request.RequestUri!.AbsoluteUri == "https://alloha.yani.tv/bnsi/movies/1191400")
+        {
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent($$"""
+                    {
+                      "pnr": "wss://alloha-ws.example/socket",
+                      "pnk": "ws-session-1",
+                      "hlsSource": [
+                        {
+                          "label": "AniMaunt",
+                          "audioId": "7",
+                          "quality": {
+                            "1080": "{{manifestUrl}}"
+                          }
+                        }
+                      ]
+                    }
+                    """)
+            };
+        }
+
+        if (request.Method == HttpMethod.Get &&
+            request.RequestUri!.AbsoluteUri == manifestUrl)
+        {
+            var acceptsControls = request.Headers.TryGetValues("Accepts-Controls", out var values)
+                ? values.Single()
+                : string.Empty;
+
+            if (acceptsControls == "dynamic-edge-token")
+            {
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent("""
+                        #EXTM3U
+                        #EXT-X-VERSION:3
+                        segment-001.ts
+                        """)
+                };
+            }
+
+            return new HttpResponseMessage(HttpStatusCode.Forbidden)
+            {
+                Content = new StringContent("<html><body>403 Forbidden</body></html>")
+            };
+        }
+
+        throw new InvalidOperationException("Unexpected Alloha retry test request: " + request.RequestUri);
+    });
+
+    using var http = new HttpClient(handler);
+    Func<AllohaStreamTokenRequest, CancellationToken, Task<string?>> resolver = (request, _) =>
+    {
+        resolverRequests.Add(request);
+        return Task.FromResult<string?>("dynamic-edge-token");
+    };
+    var ctor = typeof(AllohaPlaybackService)
+        .GetConstructors(BindingFlags.Instance | BindingFlags.NonPublic)
+        .SingleOrDefault(x => x.GetParameters().Length == 3);
+    AssertTrue(ctor is not null, "Alloha internal test constructor should allow injecting stream token resolver.");
+
+    var service = (AllohaPlaybackService)ctor!.Invoke(new object[] { NullLogger<AllohaPlaybackService>.Instance, http, resolver });
+    var source = new YummyAllohaSource
+    {
+        MovieToken = "retry-movie",
+        RequestToken = "retry-token",
+        TranslationId = 163,
+        SeasonNumber = 1,
+        EpisodeNumber = 1,
+        RefererUrl = iframeUrl
+    };
+
+    var session = service.CreateSessionAsync(source, 1080, "AniMaunt", CancellationToken.None).GetAwaiter().GetResult();
+    var manifestRequests = requests
+        .Where(x => x.Method == HttpMethod.Get && x.RequestUri!.AbsoluteUri == manifestUrl)
+        .ToArray();
+
+    AssertEqual(manifestUrl, session.ManifestUrl, "Alloha should keep the manifest selected before retry.");
+    AssertEqual("dynamic-edge-token", session.StreamToken, "Successful 403 recovery should keep the dynamic stream token for proxied resources.");
+    AssertEqual(2, manifestRequests.Length, "Alloha manifest download should retry once after upstream 403.");
+    AssertEqual(
+        "9badb2c5dd28e9cd0bed84e7391523d9d308a48b690428dae6049233218645d9",
+        manifestRequests[0].Headers.GetValues("Accepts-Controls").Single(),
+        "Initial Alloha manifest request should keep the static guard header.");
+    AssertEqual(
+        "dynamic-edge-token",
+        manifestRequests[1].Headers.GetValues("Accepts-Controls").Single(),
+        "Retried Alloha manifest request should use the dynamic stream token.");
+    AssertEqual(1, resolverRequests.Count, "Alloha should resolve the dynamic stream token once after manifest 403.");
+    AssertEqual("wss://alloha-ws.example/socket", resolverRequests[0].WebSocketBaseUrl, "Token request should include the BNSI websocket endpoint.");
+    AssertEqual("ws-session-1", resolverRequests[0].WebSocketSessionId, "Token request should include the BNSI websocket session id.");
+    AssertEqual("7", resolverRequests[0].AudioTrackId, "Token request should include the selected audio track.");
+    AssertEqual(1080, resolverRequests[0].SelectedQuality, "Token request should include the selected manifest quality.");
 }
 
 static void AllohaPlaybackService_UsesIframeOriginForMirroredHost()
@@ -3622,20 +5715,62 @@ static void YummyKodikStreamController_RejectsMultipleOpaqueAllohaTrackMarkers()
     AssertFalse(supported, "Opaque multi-track Alloha sessions should still be rejected until we can match a real voice name.");
 }
 
-static void YummyKodikStreamController_OrdersYummyFallbackProviders()
+static void YummyKodikStreamController_OrdersGatewayFallbackProviders()
 {
     var method = typeof(YummyKodik.Api.YummyKodikStreamController).GetMethod(
         "GetFallbackProviderOrder",
         BindingFlags.NonPublic | BindingFlags.Static);
-    AssertTrue(method is not null, "Yummy fallback provider ordering helper should exist.");
+    AssertTrue(method is not null, "Gateway fallback provider ordering helper should exist.");
 
-    var allohaFallback = ((IEnumerable<YummyVideoProviderKind>)method!.Invoke(null, new object[] { YummyStreamProviderKind.Alloha })!)
+    var allohaFallback = ((System.Collections.IEnumerable)method!.Invoke(null, new object[] { YummyStreamProviderKind.Alloha })!)
+        .Cast<object>()
+        .Select(x => x.ToString())
         .ToArray();
-    var cvhFallback = ((IEnumerable<YummyVideoProviderKind>)method.Invoke(null, new object[] { YummyStreamProviderKind.Cvh })!)
+    var cvhFallback = ((System.Collections.IEnumerable)method.Invoke(null, new object[] { YummyStreamProviderKind.Cvh })!)
+        .Cast<object>()
+        .Select(x => x.ToString())
         .ToArray();
 
-    AssertEqual("Cvh", string.Join(",", allohaFallback), "Alloha failures should first compensate through CVH.");
-    AssertEqual("Alloha", string.Join(",", cvhFallback), "CVH failures should first compensate through Alloha.");
+    AssertEqual("Kodik,Cvh", string.Join(",", allohaFallback), "Alloha failures should try Kodik before the less reliable CVH transport.");
+    AssertEqual("Alloha,Kodik", string.Join(",", cvhFallback), "CVH failures should first try the preferred Yummy provider and then Kodik.");
+}
+
+static void YummyKodikStreamController_PrioritizesKodikForVoiceMissingFromYummyCatalog()
+{
+    var method = typeof(YummyKodik.Api.YummyKodikStreamController).GetMethod(
+        "GetVoiceAwareFallbackProviderOrder",
+        BindingFlags.NonPublic | BindingFlags.Static);
+    AssertTrue(method is not null, "Voice-aware gateway fallback ordering helper should exist.");
+
+    var catalog = YummyVideoCatalog.Create(new YummyAnimeResponse
+    {
+        AnimeId = 12852,
+        Videos = new List<YummyVideoItem>
+        {
+            new()
+            {
+                Number = "42",
+                IframeUrl = "https://play.example/player?anime_id=12852&episode=42&dubbing=AnimeVost",
+                Data = new YummyVideoData
+                {
+                    PlayerId = (int)YummyVideoProviderKind.Cvh,
+                    Dubbing = "AnimeVost"
+                }
+            }
+        }
+    });
+
+    var fallback = ((System.Collections.IEnumerable)method!.Invoke(
+            null,
+            new object[] { YummyStreamProviderKind.Cvh, catalog, 42, "СВ-Дубль" })!)
+        .Cast<object>()
+        .Select(x => x.ToString())
+        .ToArray();
+
+    AssertEqual(
+        "Kodik,Alloha",
+        string.Join(",", fallback),
+        "A voice absent from both Yummy-backed providers should go directly to Kodik instead of warning once per provider.");
 }
 
 static void YummyKodikStreamController_UsesSharedYummyVoicePreferenceAcrossProviders()
@@ -3710,6 +5845,349 @@ static void YummyKodikStreamController_DetectsSavedVoiceOnNeighborProvider()
     AssertEqual(YummyVideoProviderKind.Cvh, (YummyVideoProviderKind)args[4], "Saved voice should resolve to the CVH provider.");
 }
 
+static void YummyKodikStreamController_UnionsProviderAndManagedVoices()
+{
+    var options = InvokeStatic<object>(
+        typeof(YummyKodik.Api.YummyKodikStreamController),
+        "BuildTranslationOptions",
+        (IEnumerable<string>)new[] { "AnimeVost", "AniStar", "AniMaunt" },
+        (IEnumerable<string>)new[] { "AnimeVost", "СВ-Дубль" });
+
+    var names = ((System.Collections.IEnumerable)options)
+        .Cast<object>()
+        .Select(x => GetProperty<string>(x, "Name"))
+        .ToArray();
+
+    AssertEqual(
+        "AnimeVost,AniStar,AniMaunt,СВ-Дубль",
+        string.Join(",", names),
+        "The widget should append real managed versions missing from the provider catalog without duplicating existing voices.");
+}
+
+static void YummyKodikStreamController_MirrorsWidgetVoiceAcrossMixedProviderKeys()
+{
+    var controllerType = typeof(YummyKodik.Api.YummyKodikStreamController);
+    var cfg = new PluginConfiguration();
+    var firstUser = Guid.NewGuid();
+    var secondUser = Guid.NewGuid();
+    var keys = new[] { "yummy:12852", "alloha:12852", "cvh:12852", "shikimori:56215" };
+
+    foreach (var key in keys)
+    {
+        cfg.SetSeriesPreferredTranslationId(key, "AnimeVost");
+    }
+
+    cfg.SetUserSeriesPreferredTranslationId(firstUser, "cvh:12852", "AniStar");
+    cfg.SetUserSeriesPreferredTranslationId(secondUser, "shikimori:56215", "729");
+
+    var changed = InvokeStatic<bool>(
+        controllerType,
+        "SetLibraryWideTranslationPreference",
+        cfg,
+        (IEnumerable<string>)keys,
+        "СВ-Дубль");
+
+    AssertTrue(changed, "Widget selection should update the mixed-provider preference group.");
+    foreach (var key in keys)
+    {
+        AssertEqual(
+            "СВ-Дубль",
+            cfg.GetSeriesPreferredTranslationId(key) ?? string.Empty,
+            "Every provider key should carry the same library-wide widget voice.");
+    }
+
+    AssertFalse(
+        cfg.UserSeriesPreferredTranslations.Any(x => keys.Contains(x.SeriesKey, StringComparer.OrdinalIgnoreCase)),
+        "Stale per-user values for the same library-global primary must be removed.");
+
+    changed = InvokeStatic<bool>(
+        controllerType,
+        "SetLibraryWideTranslationPreference",
+        cfg,
+        (IEnumerable<string>)keys,
+        string.Empty);
+
+    AssertTrue(changed, "Auto should clear the library-wide voice lock.");
+    foreach (var key in keys)
+    {
+        AssertEqual(
+            string.Empty,
+            cfg.GetSeriesPreferredTranslationId(key) ?? string.Empty,
+            "Auto should clear every provider key in the mixed group.");
+    }
+}
+
+static void YummyKodikStreamController_ExplicitPerVoiceSourceOverridesSavedDefault()
+{
+    var controllerType = typeof(YummyKodik.Api.YummyKodikStreamController);
+
+    var cvhVoice = InvokeStatic<string>(
+        controllerType,
+        "PickGatewayVoice",
+        "Dream Cast",
+        "AnimeVost");
+    AssertEqual(
+        "Dream Cast",
+        cvhVoice,
+        "An explicit per-voice CVH/Alloha STRM must override a stale saved default.");
+
+    var translations = new[]
+    {
+        new KodikTranslation { Id = "923", Name = "AnimeVost", Type = "voice", AvailableEpisodes = new[] { 7 } },
+        new KodikTranslation { Id = "1978", Name = "Dream Cast", Type = "voice", AvailableEpisodes = new[] { 7 } }
+    };
+    var kodikSelection = KodikPlaybackSelector.PickTranslationForPlayback(
+        translations,
+        Array.Empty<string>(),
+        savedTranslationId: "923",
+        explicitTranslationId: "1978",
+        episode: 7);
+    AssertEqual(
+        "1978",
+        kodikSelection.TranslationId,
+        "An explicit per-voice Kodik STRM must override a stale saved default.");
+    AssertEqual("explicit", kodikSelection.Reason, "Kodik selection should report explicit-source precedence.");
+
+    var defaultVoice = InvokeStatic<string>(
+        controllerType,
+        "PickGatewayVoice",
+        string.Empty,
+        "AnimeVost");
+    AssertEqual("AnimeVost", defaultVoice, "A saved voice should remain the default when a source has no explicit voice.");
+}
+
+static void KodikPlaybackSelector_ResolvesSavedVoiceNameToTranslationId()
+{
+    var translations = new[]
+    {
+        new KodikTranslation
+        {
+            Id = "729",
+            Type = "voice",
+            Name = "СВ-Дубль",
+            AvailableEpisodes = new[] { 41, 42 }
+        },
+        new KodikTranslation
+        {
+            Id = "825",
+            Type = "voice",
+            Name = "AniMaunt",
+            AvailableEpisodes = new[] { 41, 42 }
+        }
+    };
+
+    var selection = KodikPlaybackSelector.PickTranslationForPlayback(
+        translations,
+        Array.Empty<string>(),
+        "СВ-Дубль",
+        string.Empty,
+        42);
+
+    AssertEqual("729", selection.TranslationId, "A canonical widget voice name should resolve back to the Kodik provider id.");
+    AssertEqual("saved-name", selection.Reason, "Kodik selection should report the voice-name compatibility path.");
+}
+
+static void EpisodeVersionsMerge_UsesSavedYummyVoicePreferenceForPrimary()
+{
+    var serviceType = typeof(YummyKodik.Versioning.YummyKodikEpisodeVersionsMergeHostedService);
+    var tempRoot = Path.Combine(Path.GetTempPath(), "YummyKodikTests", Guid.NewGuid().ToString("N"));
+
+    try
+    {
+        Directory.CreateDirectory(tempRoot);
+        var dreamPath = Path.Combine(tempRoot, "S01E01 - Dream Cast.strm");
+        var aniPath = Path.Combine(tempRoot, "S01E01 - AniLibria.strm");
+        File.WriteAllText(dreamPath, "http://localhost:8096/YummyKodik/stream?provider=alloha&animeId=21008&ep=1&voice=Dream%20Cast");
+        File.WriteAllText(aniPath, "http://localhost:8096/YummyKodik/stream?provider=alloha&animeId=21008&ep=1&voice=AniLibria");
+
+        var cfg = new PluginConfiguration();
+        var userId = Guid.NewGuid();
+        AssertTrue(
+            cfg.SetUserSeriesPreferredTranslationId(userId, "yummy:21008", "Dream Cast"),
+            "Saved Yummy voice should be stored for the shared series key.");
+
+        var tokens = InvokeStatic<string[]>(
+            serviceType,
+            "BuildSavedPreferenceTokensForPaths",
+            (IEnumerable<string>)new[] { dreamPath, aniPath },
+            cfg);
+
+        AssertEqual("Dream Cast", string.Join(",", tokens), "Version merge should find the saved Yummy voice for this group.");
+
+        var needleSafe = InvokeStatic<string>(serviceType, "NormalizeTokenForFilename", "Dream Cast");
+        var matchesDream = InvokeStatic<bool>(serviceType, "PathMatchesPreferredToken", dreamPath, "Dream Cast", needleSafe);
+        var matchesAni = InvokeStatic<bool>(serviceType, "PathMatchesPreferredToken", aniPath, "Dream Cast", needleSafe);
+
+        AssertTrue(matchesDream, "Saved Yummy voice should match the corresponding voice STRM.");
+        AssertFalse(matchesAni, "Saved Yummy voice should not match a different voice STRM.");
+    }
+    finally
+    {
+        TryDeleteDirectory(tempRoot);
+    }
+}
+
+static void EpisodeVersionsMerge_MatchesSavedKodikTranslationIdFromStrm()
+{
+    var serviceType = typeof(YummyKodik.Versioning.YummyKodikEpisodeVersionsMergeHostedService);
+    var tempRoot = Path.Combine(Path.GetTempPath(), "YummyKodikTests", Guid.NewGuid().ToString("N"));
+
+    try
+    {
+        Directory.CreateDirectory(tempRoot);
+        var kodikPath = Path.Combine(tempRoot, "S01E01 - AniLibria.strm");
+        var otherPath = Path.Combine(tempRoot, "S01E01 - Other.strm");
+        File.WriteAllText(kodikPath, "http://localhost:8096/YummyKodik/stream?type=shikimori&id=52991&ep=1&tr=610");
+        File.WriteAllText(otherPath, "http://localhost:8096/YummyKodik/stream?type=shikimori&id=52991&ep=1&tr=611");
+
+        var cfg = new PluginConfiguration();
+        var userId = Guid.NewGuid();
+        AssertTrue(
+            cfg.SetUserSeriesPreferredTranslationId(userId, "shikimori:52991", "610"),
+            "Saved Kodik translation id should be stored for the series key.");
+
+        var tokens = InvokeStatic<string[]>(
+            serviceType,
+            "BuildSavedPreferenceTokensForPaths",
+            (IEnumerable<string>)new[] { kodikPath, otherPath },
+            cfg);
+
+        AssertEqual("610", string.Join(",", tokens), "Version merge should find the saved Kodik translation id for this group.");
+
+        var matchesSaved = InvokeStatic<bool>(serviceType, "PathMatchesPreferredToken", kodikPath, "610", "610");
+        var matchesOther = InvokeStatic<bool>(serviceType, "PathMatchesPreferredToken", otherPath, "610", "610");
+
+        AssertTrue(matchesSaved, "Saved Kodik translation id should match the STRM tr query.");
+        AssertFalse(matchesOther, "Saved Kodik translation id should not match another tr query.");
+    }
+    finally
+    {
+        TryDeleteDirectory(tempRoot);
+    }
+}
+
+static void PostRefreshMergeBarrier_MissingOrUnindexedEpisodeIsUnresolved()
+{
+    var refreshStartedUtc = new DateTime(2026, 7, 24, 12, 0, 0, DateTimeKind.Utc);
+    var artifact = new YummyKodik.Versioning.ExpectedEpisodeArtifact(
+        @"C:\YummyKodik\Series\Season 01\S01E01.strm",
+        refreshStartedUtc.AddSeconds(4));
+
+    var missing = YummyKodik.Versioning.YummyKodikPostRefreshMergeBarrier.EvaluatePostRefreshReadiness(
+        new[] { artifact },
+        Array.Empty<YummyKodik.Versioning.EpisodeReadinessSnapshot>(),
+        refreshStartedUtc);
+    AssertFalse(missing.IsReady, "A refreshed STRM without a Jellyfin Episode must keep the post-refresh merge barrier unresolved.");
+    AssertEqual(1, missing.UnresolvedPaths.Count, "Missing Episode should be reported as one unresolved artifact.");
+
+    var unindexed = YummyKodik.Versioning.YummyKodikPostRefreshMergeBarrier.EvaluatePostRefreshReadiness(
+        new[] { artifact },
+        new[]
+        {
+            new YummyKodik.Versioning.EpisodeReadinessSnapshot(
+                artifact.Path,
+                IndexNumber: null,
+                DateCreatedUtc: refreshStartedUtc,
+                DateLastRefreshedUtc: refreshStartedUtc.AddSeconds(5))
+        },
+        refreshStartedUtc);
+    AssertFalse(unindexed.IsReady, "An Episode without IndexNumber must not release the post-refresh merge barrier.");
+    AssertEqual(1, unindexed.UnresolvedPaths.Count, "Unindexed Episode should be reported as unresolved.");
+}
+
+static void PostRefreshMergeBarrier_NewEpisodeBeforeArtifactRefreshIsUnresolved()
+{
+    var refreshStartedUtc = new DateTime(2026, 7, 24, 12, 0, 0, DateTimeKind.Utc);
+    var artifact = new YummyKodik.Versioning.ExpectedEpisodeArtifact(
+        @"C:\YummyKodik\Series\Season 01\S01E01.strm",
+        refreshStartedUtc.AddSeconds(10));
+
+    var readiness = YummyKodik.Versioning.YummyKodikPostRefreshMergeBarrier.EvaluatePostRefreshReadiness(
+        new[] { artifact },
+        new[]
+        {
+            new YummyKodik.Versioning.EpisodeReadinessSnapshot(
+                artifact.Path,
+                IndexNumber: 1,
+                DateCreatedUtc: refreshStartedUtc.AddSeconds(1),
+                DateLastRefreshedUtc: refreshStartedUtc.AddSeconds(5))
+        },
+        refreshStartedUtc);
+
+    AssertFalse(readiness.IsReady, "A newly materialized Episode whose refresh predates the generated STRM/NFO timestamp must remain unresolved.");
+    AssertEqual(1, readiness.UnresolvedPaths.Count, "Early refreshed Episode should keep its artifact unresolved.");
+}
+
+static void PostRefreshMergeBarrier_LateRefreshedEpisodeIsReady()
+{
+    var refreshStartedUtc = new DateTime(2026, 7, 24, 12, 0, 0, DateTimeKind.Utc);
+    var artifact = new YummyKodik.Versioning.ExpectedEpisodeArtifact(
+        @"C:\YummyKodik\Series\Season 01\S01E01.strm",
+        refreshStartedUtc.AddSeconds(10));
+
+    var readiness = YummyKodik.Versioning.YummyKodikPostRefreshMergeBarrier.EvaluatePostRefreshReadiness(
+        new[] { artifact },
+        new[]
+        {
+            new YummyKodik.Versioning.EpisodeReadinessSnapshot(
+                artifact.Path,
+                IndexNumber: 1,
+                DateCreatedUtc: refreshStartedUtc.AddSeconds(1),
+                DateLastRefreshedUtc: refreshStartedUtc.AddSeconds(12))
+        },
+        refreshStartedUtc);
+
+    AssertTrue(readiness.IsReady, "The late Episode refresh after generated artifact timestamps must release the barrier for one final merge.");
+    AssertEqual(0, readiness.UnresolvedPaths.Count, "Ready Episode should leave no unresolved artifact paths.");
+}
+
+static void PostRefreshMergeBarrier_PreExistingEpisodeDoesNotBlockReadiness()
+{
+    var refreshStartedUtc = new DateTime(2026, 7, 24, 12, 0, 0, DateTimeKind.Utc);
+    var artifact = new YummyKodik.Versioning.ExpectedEpisodeArtifact(
+        @"C:\YummyKodik\Series\Season 01\S01E01.strm",
+        refreshStartedUtc.AddSeconds(10));
+
+    var readiness = YummyKodik.Versioning.YummyKodikPostRefreshMergeBarrier.EvaluatePostRefreshReadiness(
+        new[] { artifact },
+        new[]
+        {
+            new YummyKodik.Versioning.EpisodeReadinessSnapshot(
+                artifact.Path,
+                IndexNumber: 1,
+                DateCreatedUtc: refreshStartedUtc.AddMinutes(-30),
+                DateLastRefreshedUtc: refreshStartedUtc.AddMinutes(-30))
+        },
+        refreshStartedUtc);
+
+    AssertTrue(readiness.IsReady, "A pre-existing indexed Episode must not block the post-refresh merge barrier merely because its prior refresh timestamp is old.");
+}
+
+static void PostRefreshMergeBarrier_DeletedEpisodeMustDisappear()
+{
+    var refreshStartedUtc = new DateTime(2026, 7, 24, 12, 0, 0, DateTimeKind.Utc);
+    const string deletedPath = @"C:\YummyKodik\Series\Season 01\S01E01 - Removed.strm";
+    var staleSnapshot = new YummyKodik.Versioning.EpisodeReadinessSnapshot(
+        deletedPath,
+        IndexNumber: 1,
+        DateCreatedUtc: refreshStartedUtc.AddDays(-1),
+        DateLastRefreshedUtc: refreshStartedUtc.AddDays(-1));
+
+    var stillPresent = YummyKodik.Versioning.YummyKodikPostRefreshMergeBarrier.EvaluatePostRefreshReadiness(
+        Array.Empty<YummyKodik.Versioning.ExpectedEpisodeArtifact>(),
+        new[] { staleSnapshot },
+        refreshStartedUtc,
+        new[] { deletedPath });
+    AssertFalse(stillPresent.IsReady, "A deleted STRM still present in Jellyfin must keep the final merge barrier unresolved.");
+
+    var removed = YummyKodik.Versioning.YummyKodikPostRefreshMergeBarrier.EvaluatePostRefreshReadiness(
+        Array.Empty<YummyKodik.Versioning.ExpectedEpisodeArtifact>(),
+        Array.Empty<YummyKodik.Versioning.EpisodeReadinessSnapshot>(),
+        refreshStartedUtc,
+        new[] { deletedPath });
+    AssertTrue(removed.IsReady, "The barrier should release after Jellyfin removes the deleted Episode item.");
+}
+
 static void YummyKodikStreamController_FindsKodikFallbackVoiceByAlias()
 {
     var method = typeof(YummyKodik.Api.YummyKodikStreamController).GetMethod(
@@ -3739,9 +6217,42 @@ static void YummyKodikStreamController_FindsKodikFallbackVoiceByAlias()
     AssertEqual("10", match?.Id ?? string.Empty, "Kodik fallback should use the same cross-provider voice alias matching as Yummy providers.");
 }
 
+static void YummyKodikStreamController_KodikFallbackUsesDefaultWhenRequestedVoiceMissing()
+{
+    var method = typeof(YummyKodik.Api.YummyKodikStreamController).GetMethod(
+        "PickKodikFallbackSelection",
+        BindingFlags.NonPublic | BindingFlags.Static);
+    AssertTrue(method is not null, "Kodik fallback selector should exist.");
+
+    var translations = new[]
+    {
+        new KodikTranslation
+        {
+            Id = "610",
+            Type = "voice",
+            Name = "Dream Cast",
+            AvailableEpisodes = new[] { 12 }
+        }
+    };
+
+    var selection = method!.Invoke(
+        null,
+        new object[] { translations, Array.Empty<string>(), null!, "AniLibria", string.Empty, 12 });
+    if (selection == null)
+    {
+        throw new InvalidOperationException("Kodik fallback should select an available translation when the requested Yummy voice is missing.");
+    }
+
+    var translationId = selection.GetType().GetProperty("TranslationId")?.GetValue(selection)?.ToString() ?? string.Empty;
+    var reason = selection.GetType().GetProperty("Reason")?.GetValue(selection)?.ToString() ?? string.Empty;
+
+    AssertEqual("610", translationId, "Missing cross-provider voice match should not block fallback to an available Kodik translation.");
+    AssertTrue(!string.Equals("fallback-explicit-voice", reason, StringComparison.Ordinal), "Fallback reason should not claim an explicit voice match when none exists.");
+}
+
 static void AllohaPlaybackService_RewritesManifestUrisToProxyUrls()
 {
-    var proxyBaseUrl = "http://localhost:8096/YummyKodik/alloha-proxy";
+    const string proxyBaseUrl = "/base/YummyKodik/alloha-proxy";
     var session = new AllohaPlaybackSession
     {
         SessionId = "session-1",
@@ -3757,7 +6268,8 @@ static void AllohaPlaybackService_RewritesManifestUrisToProxyUrls()
 
     var manifestBody = AllohaPlaybackService.BuildManifestResponseBody(session, proxyBaseUrl);
 
-    AssertTrue(manifestBody.Contains($"{proxyBaseUrl}/", StringComparison.Ordinal), "Master manifest should point nested resources at the local proxy.");
+    AssertTrue(manifestBody.Contains($"{proxyBaseUrl}/", StringComparison.Ordinal), "Master manifest should retain the Jellyfin base path in root-relative proxy urls.");
+    AssertFalse(manifestBody.Contains("://", StringComparison.Ordinal), "Alloha master manifest proxy urls must remain root-relative.");
     AssertTrue(manifestBody.Contains(".m3u8?sessionId=session-1&resource=", StringComparison.Ordinal), "Nested Alloha playlists should keep a playlist extension in proxy urls.");
     AssertTrue(!manifestBody.Contains("URI=\"index-f1-a1.m3u8\"", StringComparison.Ordinal), "Directive URI attributes should not keep raw relative Alloha urls.");
     AssertTrue(!manifestBody.Contains("\nindex-f1-v1.m3u8", StringComparison.Ordinal), "Variant playlist lines should not keep raw relative Alloha urls.");
@@ -3831,6 +6343,263 @@ static void AllohaPlaybackService_DownloadProxyResourceRewritesNestedManifest()
     AssertEqual("Bearer test-guard-token", request.Headers.GetValues("Authorizations").Single(), "Proxy resource request should keep the Alloha guard token.");
     AssertEqual("https://alloha.yani.tv/?token_movie=demo", request.Headers.Referrer!.AbsoluteUri, "Nested Alloha playlists should keep the iframe page as referer.");
     AssertEqual("https://alloha.yani.tv", string.Join(", ", request.Headers.GetValues("Origin")), "Nested Alloha playlists should keep the iframe page origin.");
+}
+
+static void AllohaPlaybackService_BuffersUpcomingMediaSegments()
+{
+    const string proxyBaseUrl = "http://localhost:8096/YummyKodik/alloha-proxy";
+    const string playlistResourceId = "playlist-buffer";
+    const string parentManifestUrl = "https://stream-balancer-alloha.example/serial/master.m3u8";
+    const string playlistUrl = "https://stream-balancer-alloha.example/serial/index-f1-v1.m3u8";
+    const string segment1Url = "https://stream-balancer-alloha.example/serial/segment-001.m4s";
+    const string segment2Url = "https://stream-balancer-alloha.example/serial/segment-002.m4s";
+    const string segment3Url = "https://stream-balancer-alloha.example/serial/segment-003.m4s";
+    const string segment4Url = "https://stream-balancer-alloha.example/serial/segment-004.m4s";
+    var segmentBodies = new Dictionary<string, byte[]>(StringComparer.Ordinal)
+    {
+        [segment1Url] = new byte[] { 1, 1, 1 },
+        [segment2Url] = new byte[] { 2, 2, 2 },
+        [segment3Url] = new byte[] { 3, 3, 3 },
+        [segment4Url] = new byte[] { 4, 4, 4 }
+    };
+    var segmentRequestCounts = new ConcurrentDictionary<string, int>(StringComparer.Ordinal);
+
+    var handler = new DelegatingTestHandler(request =>
+    {
+        var url = request.RequestUri!.AbsoluteUri;
+        if (request.Method == HttpMethod.Get && url == playlistUrl)
+        {
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("""
+                    #EXTM3U
+                    #EXT-X-TARGETDURATION:60
+                    #EXTINF:60.000,
+                    segment-001.m4s
+                    #EXTINF:60.000,
+                    segment-002.m4s
+                    #EXTINF:60.000,
+                    segment-003.m4s
+                    #EXTINF:60.000,
+                    segment-004.m4s
+                    #EXT-X-ENDLIST
+                    """)
+            };
+        }
+
+        if (request.Method == HttpMethod.Get && segmentBodies.TryGetValue(url, out var body))
+        {
+            var requestCount = segmentRequestCounts.AddOrUpdate(url, 1, (_, count) => count + 1);
+            if (requestCount > 1)
+            {
+                return new HttpResponseMessage(HttpStatusCode.Forbidden)
+                {
+                    Content = new StringContent("<html><body>403 Forbidden</body></html>")
+                };
+            }
+
+            var response = new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new ByteArrayContent(body)
+            };
+            response.Content.Headers.ContentType =
+                new System.Net.Http.Headers.MediaTypeHeaderValue("video/iso.segment");
+            return response;
+        }
+
+        throw new InvalidOperationException("Unexpected Alloha buffer test request: " + request.RequestUri);
+    });
+
+    using var http = new HttpClient(handler);
+    var ctor = typeof(AllohaPlaybackService).GetConstructor(
+        BindingFlags.Instance | BindingFlags.NonPublic,
+        binder: null,
+        types: new[] { typeof(Microsoft.Extensions.Logging.ILogger<AllohaPlaybackService>), typeof(HttpClient) },
+        modifiers: null);
+    AssertTrue(ctor is not null, "Alloha internal test constructor should exist.");
+
+    var service = (AllohaPlaybackService)ctor!.Invoke(new object[] { NullLogger<AllohaPlaybackService>.Instance, http });
+    var session = new AllohaPlaybackSession
+    {
+        SessionId = "session-buffer-1",
+        ManifestUrl = parentManifestUrl,
+        RefererUrl = "https://alloha.yani.tv/?token_movie=demo",
+        RequiredHttpHeaders = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["Accepts-Controls"] = "9badb2c5dd28e9cd0bed84e7391523d9d308a48b690428dae6049233218645d9",
+            ["Authorizations"] = "Bearer test-guard-token",
+            ["Origin"] = "https://alloha.yani.tv",
+            ["Referer"] = "https://alloha.yani.tv/?token_movie=demo"
+        },
+        ExpiresAtUtc = DateTime.UtcNow.AddMinutes(10)
+    };
+    session.ProxyResources[playlistResourceId] = playlistUrl;
+    session.ProxyResourceReferers[playlistResourceId] = parentManifestUrl;
+
+    _ = service.DownloadProxyResourceAsync(
+            session,
+            playlistResourceId,
+            playlistUrl,
+            proxyBaseUrl,
+            CancellationToken.None)
+        .GetAwaiter()
+        .GetResult();
+
+    var segment1ResourceId = session.ProxyResources.Single(x => x.Value == segment1Url).Key;
+    var segment2ResourceId = session.ProxyResources.Single(x => x.Value == segment2Url).Key;
+    var segment3ResourceId = session.ProxyResources.Single(x => x.Value == segment3Url).Key;
+
+    var firstSegment = service.DownloadProxyResourceAsync(
+            session,
+            segment1ResourceId,
+            segment1Url,
+            proxyBaseUrl,
+            CancellationToken.None)
+        .GetAwaiter()
+        .GetResult();
+
+    AssertEqual("video/iso.segment", firstSegment.ContentType, "Foreground Alloha segment should keep the upstream media type.");
+    AssertEqual("1,1,1", string.Join(",", firstSegment.Content), "Foreground Alloha segment should return the upstream bytes.");
+
+    AssertTrue(
+        WaitUntil(() =>
+            session.BufferedProxyResources.ContainsKey(segment2ResourceId) &&
+            session.BufferedProxyResources.ContainsKey(segment3ResourceId),
+            timeoutMs: 3000),
+        "Alloha proxy should prefetch roughly two minutes of upcoming media segments.");
+
+    AssertEqual(0, GetRequestCount(segment4Url), "Initial Alloha prefetch should stop near the two-minute target instead of fetching the whole playlist.");
+
+    var segment2RequestsBefore = GetRequestCount(segment2Url);
+    var secondSegment = service.DownloadProxyResourceAsync(
+            session,
+            segment2ResourceId,
+            segment2Url,
+            proxyBaseUrl,
+            CancellationToken.None)
+        .GetAwaiter()
+        .GetResult();
+
+    AssertEqual("2,2,2", string.Join(",", secondSegment.Content), "Prefetched Alloha segment should be served from the local buffer.");
+    AssertEqual(segment2RequestsBefore, GetRequestCount(segment2Url), "Buffered Alloha segment should not hit upstream again.");
+
+    int GetRequestCount(string url)
+    {
+        return segmentRequestCounts.TryGetValue(url, out var count) ? count : 0;
+    }
+}
+
+static void AllohaPlaybackService_PrefetchSurvivesCompletedSegmentRequest()
+{
+    const string proxyBaseUrl = "http://localhost:8096/YummyKodik/alloha-proxy";
+    const string playlistResourceId = "playlist-session-prefetch";
+    const string parentManifestUrl = "https://stream-balancer-alloha.example/serial/master.m3u8";
+    const string playlistUrl = "https://stream-balancer-alloha.example/serial/index-f1-v1.m3u8";
+    const string segment1Url = "https://stream-balancer-alloha.example/serial/segment-001.m4s";
+    const string segment2Url = "https://stream-balancer-alloha.example/serial/segment-002.m4s";
+    const string segment3Url = "https://stream-balancer-alloha.example/serial/segment-003.m4s";
+    var prefetchStarted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+    var releasePrefetch = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    using var http = new HttpClient(new AsyncDelegatingTestHandler(async (request, cancellationToken) =>
+    {
+        var url = request.RequestUri!.AbsoluteUri;
+        if (request.Method == HttpMethod.Get && url == playlistUrl)
+        {
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("""
+                    #EXTM3U
+                    #EXT-X-TARGETDURATION:60
+                    #EXTINF:60.000,
+                    segment-001.m4s
+                    #EXTINF:60.000,
+                    segment-002.m4s
+                    #EXTINF:60.000,
+                    segment-003.m4s
+                    #EXT-X-ENDLIST
+                    """)
+            };
+        }
+
+        if (request.Method == HttpMethod.Get && url == segment1Url)
+        {
+            return CreateSegmentResponse(1);
+        }
+
+        if (request.Method == HttpMethod.Get && (url == segment2Url || url == segment3Url))
+        {
+            prefetchStarted.TrySetResult(true);
+            await releasePrefetch.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+            return CreateSegmentResponse((byte)(url == segment2Url ? 2 : 3));
+        }
+
+        throw new InvalidOperationException("Unexpected Alloha session-prefetch test request: " + request.RequestUri);
+    }));
+
+    var ctor = typeof(AllohaPlaybackService).GetConstructor(
+        BindingFlags.Instance | BindingFlags.NonPublic,
+        binder: null,
+        types: new[] { typeof(Microsoft.Extensions.Logging.ILogger<AllohaPlaybackService>), typeof(HttpClient) },
+        modifiers: null);
+    AssertTrue(ctor is not null, "Alloha internal test constructor should exist.");
+
+    var service = (AllohaPlaybackService)ctor!.Invoke(new object[] { NullLogger<AllohaPlaybackService>.Instance, http });
+    var session = new AllohaPlaybackSession
+    {
+        SessionId = "session-prefetch-request-lifetime",
+        ManifestUrl = parentManifestUrl,
+        RefererUrl = "https://alloha.yani.tv/?token_movie=demo",
+        RequiredHttpHeaders = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase),
+        ExpiresAtUtc = DateTime.UtcNow.AddMinutes(10)
+    };
+    session.ProxyResources[playlistResourceId] = playlistUrl;
+    session.ProxyResourceReferers[playlistResourceId] = parentManifestUrl;
+
+    _ = service.DownloadProxyResourceAsync(
+            session,
+            playlistResourceId,
+            playlistUrl,
+            proxyBaseUrl,
+            CancellationToken.None)
+        .GetAwaiter()
+        .GetResult();
+
+    var segment1ResourceId = session.ProxyResources.Single(x => x.Value == segment1Url).Key;
+    var segment2ResourceId = session.ProxyResources.Single(x => x.Value == segment2Url).Key;
+    var segment3ResourceId = session.ProxyResources.Single(x => x.Value == segment3Url).Key;
+
+    using var requestCancellation = new CancellationTokenSource();
+    _ = service.DownloadProxyResourceAsync(
+            session,
+            segment1ResourceId,
+            segment1Url,
+            proxyBaseUrl,
+            requestCancellation.Token)
+        .GetAwaiter()
+        .GetResult();
+
+    AssertTrue(prefetchStarted.Task.Wait(1000), "Alloha should start background prefetch after serving the foreground segment.");
+    requestCancellation.Cancel();
+    releasePrefetch.TrySetResult(true);
+
+    AssertTrue(
+        WaitUntil(
+            () => session.BufferedProxyResources.ContainsKey(segment2ResourceId) &&
+                  session.BufferedProxyResources.ContainsKey(segment3ResourceId),
+            timeoutMs: 3000),
+        "Alloha prefetch should remain session-scoped after the foreground HTTP request is complete.");
+
+    static HttpResponseMessage CreateSegmentResponse(byte marker)
+    {
+        var response = new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new ByteArrayContent(new[] { marker, marker, marker })
+        };
+        response.Content.Headers.ContentType =
+            new System.Net.Http.Headers.MediaTypeHeaderValue("video/iso.segment");
+        return response;
+    }
 }
 
 static void AllohaPlaybackService_DownloadProxyResourceRefreshesSessionAfter403()
@@ -4018,10 +6787,223 @@ static void AllohaPlaybackService_DownloadProxyResourceRefreshesSegmentUsingPare
         "Alloha 500");
 }
 
+static void AllohaPlaybackService_DownloadProxyResourceRefreshesSegmentUsingParentChainAfter502()
+{
+    AllohaPlaybackService_DownloadProxyResourceRefreshesSegmentUsingParentChainAfter(
+        HttpStatusCode.BadGateway,
+        "Bad Gateway",
+        "502");
+}
+
+static void AllohaPlaybackService_DownloadProxyResourceRefreshesSegmentAfterNetworkFailure()
+{
+    AllohaPlaybackService_DownloadProxyResourceRefreshesSegmentUsingParentChainAfter(
+        HttpStatusCode.OK,
+        string.Empty,
+        "network failure",
+        new HttpRequestException("The upstream connection was reset."));
+}
+
+static void AllohaPlaybackService_SuppressesConcurrentFailedRefreshStorm()
+{
+    const string proxyBaseUrl = "http://localhost:8096/YummyKodik/alloha-proxy";
+    const string iframeUrl = "https://alloha.yani.tv/?token_movie=movie-token&translation=222&season=1&episode=3&token=req-token&hidden=translation,season,episode";
+    const string oldMasterUrl = "https://stream-balancer-alloha-old.example/serial/master.m3u8";
+    const string failedMasterUrl = "https://stream-balancer-alloha-failed.example/serial/master.m3u8";
+    const string segment1Url = "https://stream-balancer-alloha-old.example/serial/segment-001.m4s";
+    const string segment2Url = "https://stream-balancer-alloha-old.example/serial/segment-002.m4s";
+    const string segment3Url = "https://stream-balancer-alloha-old.example/serial/segment-003.m4s";
+    var viewporti = "yZFgNFZy3110sc1dwXZnDgUdFUlkj1XGFX2SVdEx9ZJRpd9w8wNoxqFTSSRUQmmmWTDjnV0mNSdURTVUNNNVQMVT";
+    var bothInitialResourcesStarted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+    var initialResourceRequests = 0;
+    var iframeRequests = 0;
+    var bnsiRequests = 0;
+    var failedManifestRequests = 0;
+
+    var handler = new AsyncDelegatingTestHandler(async (request, cancellationToken) =>
+    {
+        var url = request.RequestUri!.AbsoluteUri;
+        if (url is segment1Url or segment2Url or segment3Url)
+        {
+            if (Interlocked.Increment(ref initialResourceRequests) >= 2)
+            {
+                bothInitialResourcesStarted.TrySetResult(true);
+            }
+
+            return new HttpResponseMessage(HttpStatusCode.Forbidden)
+            {
+                Content = new StringContent("<HTML>Error</HTML>")
+            };
+        }
+
+        if (request.Method == HttpMethod.Get &&
+            url.StartsWith("https://alloha.yani.tv/?token_movie=movie-token", StringComparison.Ordinal))
+        {
+            Interlocked.Increment(ref iframeRequests);
+            await bothInitialResourcesStarted.Task.WaitAsync(TimeSpan.FromSeconds(2), cancellationToken);
+            var iframeHtml =
+                "<!DOCTYPE html>\n" +
+                "<html>\n" +
+                "<head>\n" +
+                $"    <meta name=\"viewporti\" content=\"{viewporti}\">\n" +
+                "</head>\n" +
+                "<body>\n" +
+                "<script>\n" +
+                "const fileList = JSON.parse('{\"active\":{\"id\":1191328,\"seasons\":1,\"episode\":3,\"id_translation\":222},\"all\":{\"t222\":{\"file\":{\"1\":{\"3\":{\"id\":1191328}}}}}}');\n" +
+                "</script>\n" +
+                "</body>\n" +
+                "</html>";
+
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(iframeHtml)
+            };
+        }
+
+        if (request.Method == HttpMethod.Post &&
+            url == "https://alloha.yani.tv/bnsi/movies/1191328")
+        {
+            Interlocked.Increment(ref bnsiRequests);
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent($$"""
+                    {
+                      "hlsSource": [
+                        {
+                          "label": "РуАниме / DEEP",
+                          "audioId": "1",
+                          "quality": {
+                            "1080": "{{failedMasterUrl}}"
+                          }
+                        }
+                      ]
+                    }
+                    """)
+            };
+        }
+
+        if (request.Method == HttpMethod.Get && url == failedMasterUrl)
+        {
+            Interlocked.Increment(ref failedManifestRequests);
+            return new HttpResponseMessage(HttpStatusCode.Forbidden)
+            {
+                Content = new StringContent("<HTML>Error</HTML>")
+            };
+        }
+
+        throw new InvalidOperationException("Unexpected Alloha failed-refresh test request: " + request.RequestUri);
+    });
+
+    using var http = new HttpClient(handler);
+    var service = new AllohaPlaybackService(NullLogger<AllohaPlaybackService>.Instance, http);
+    var blockedSession = CreateSession("failed-refresh-session");
+
+    var firstFailure = CaptureFailureAsync(service.DownloadProxyResourceAsync(
+        blockedSession,
+        "segment-1",
+        segment1Url,
+        proxyBaseUrl,
+        CancellationToken.None));
+    var secondFailure = CaptureFailureAsync(service.DownloadProxyResourceAsync(
+        blockedSession,
+        "segment-2",
+        segment2Url,
+        proxyBaseUrl,
+        CancellationToken.None));
+    var concurrentFailures = Task.WhenAll(firstFailure, secondFailure).GetAwaiter().GetResult();
+
+    AssertTrue(
+        concurrentFailures.All(error => error is InvalidOperationException),
+        "Both queued segment requests should surface the failed Alloha recovery.");
+    AssertEqual(2, initialResourceRequests, "Both already-started segment requests may observe the original 403.");
+    AssertEqual(1, iframeRequests, "Concurrent segment failures should share one Alloha session refresh attempt.");
+    AssertEqual(1, bnsiRequests, "Concurrent segment failures should not duplicate Alloha BNSI resolution.");
+    AssertEqual(1, failedManifestRequests, "Concurrent segment failures should not duplicate the failing manifest probe.");
+    AssertTrue(
+        Volatile.Read(ref blockedSession.ProxyResourceRefreshBlockedUntilUtcTicks) > DateTime.UtcNow.Ticks,
+        "A failed recovery should start the per-session cooldown.");
+
+    AssertThrows<InvalidOperationException>(() => service.DownloadProxyResourceAsync(
+            blockedSession,
+            "segment-3",
+            segment3Url,
+            proxyBaseUrl,
+            CancellationToken.None)
+        .GetAwaiter()
+        .GetResult(),
+        "A new segment request in the failed session should fail before repeating upstream work.");
+
+    AssertEqual(2, initialResourceRequests, "Cooldown should reject new segment requests before another upstream resource call.");
+    AssertEqual(1, iframeRequests, "Cooldown should suppress another session refresh attempt.");
+
+    var freshSession = CreateSession("fresh-refresh-session");
+    AssertThrows<InvalidOperationException>(() => service.DownloadProxyResourceAsync(
+            freshSession,
+            "segment-3",
+            segment3Url,
+            proxyBaseUrl,
+            CancellationToken.None)
+        .GetAwaiter()
+        .GetResult(),
+        "A fresh playback session should retain its independent recovery attempt.");
+
+    AssertEqual(3, initialResourceRequests, "A fresh session should not inherit another session's failed-resource cooldown.");
+    AssertEqual(2, iframeRequests, "A fresh session should be allowed one independent Alloha refresh attempt.");
+    AssertEqual(2, bnsiRequests, "A fresh session should independently resolve its Alloha source.");
+    AssertEqual(2, failedManifestRequests, "A fresh session should independently probe the resolved manifest.");
+
+    AllohaPlaybackSession CreateSession(string sessionId)
+    {
+        var session = new AllohaPlaybackSession
+        {
+            SessionId = sessionId,
+            ManifestUrl = oldMasterUrl,
+            ManifestText = "#EXTM3U",
+            RefererUrl = iframeUrl,
+            IframeUrl = iframeUrl,
+            SelectedVoiceName = "РуАниме / DEEP",
+            SelectedQuality = 1080,
+            Source = new YummyAllohaSource
+            {
+                MovieToken = "movie-token",
+                RequestToken = "req-token",
+                TranslationId = 222,
+                SeasonNumber = 1,
+                EpisodeNumber = 3,
+                Hidden = "translation,season,episode",
+                RefererUrl = iframeUrl
+            },
+            ExpiresAtUtc = DateTime.UtcNow.AddMinutes(10)
+        };
+
+        session.ProxyResources["segment-1"] = segment1Url;
+        session.ProxyResources["segment-2"] = segment2Url;
+        session.ProxyResources["segment-3"] = segment3Url;
+        session.ProxyResourceReferers["segment-1"] = oldMasterUrl;
+        session.ProxyResourceReferers["segment-2"] = oldMasterUrl;
+        session.ProxyResourceReferers["segment-3"] = oldMasterUrl;
+        return session;
+    }
+
+    static async Task<Exception?> CaptureFailureAsync(Task<AllohaProxyResource> request)
+    {
+        try
+        {
+            await request.ConfigureAwait(false);
+            return null;
+        }
+        catch (Exception ex)
+        {
+            return ex;
+        }
+    }
+}
+
 static void AllohaPlaybackService_DownloadProxyResourceRefreshesSegmentUsingParentChainAfter(
     HttpStatusCode initialStatusCode,
     string initialBody,
-    string recoveryLabel)
+    string recoveryLabel,
+    Exception? initialException = null)
 {
     var requests = new List<HttpRequestMessage>();
     const string proxyBaseUrl = "http://localhost:8096/YummyKodik/alloha-proxy";
@@ -4041,6 +7023,11 @@ static void AllohaPlaybackService_DownloadProxyResourceRefreshesSegmentUsingPare
 
         if (request.Method == HttpMethod.Get && url == oldSegmentUrl)
         {
+            if (initialException != null)
+            {
+                throw initialException;
+            }
+
             return new HttpResponseMessage(initialStatusCode)
             {
                 Content = new StringContent(initialBody)
@@ -4373,6 +7360,76 @@ static void YummyKodikLogger_SuppressesInformationBeforeInnerLogger()
     }
 }
 
+static void RefreshPerformanceSummary_IsVisibleWithoutInformationNoise()
+{
+    var cfg = new PluginConfiguration
+    {
+        MinimumLogLevel = "Warning",
+        EnablePerformanceDebugLogging = true
+    };
+    YummyKodikLogFilter.ConfigurationProvider = () => cfg;
+    var provider = new CaptureLoggerProvider();
+
+    try
+    {
+        using var factory = LoggerFactory.Create(builder =>
+        {
+            builder.SetMinimumLevel(LogLevel.Trace);
+            builder.AddProvider(provider);
+            builder.AddFilter("YummyKodik", YummyKodikLogFilter.ShouldLogPluginCategory);
+        });
+
+        var wrapped = new YummyKodikLogger(factory.CreateLogger("YummyKodik.Tasks.Refresh"), "YummyKodik.Tasks.Refresh");
+        wrapped.LogInformation("ordinary information must remain hidden");
+
+        var run = new RefreshRunMetrics(cfg.EnablePerformanceDebugLogging);
+        run.AddDuration("phase.strm_snapshot", TimeSpan.FromMilliseconds(3));
+        run.AddDuration("phase.runtime_backfill.pre", TimeSpan.FromMilliseconds(4));
+        run.AddDuration("phase.runtime_publish.pre", TimeSpan.FromMilliseconds(5));
+        run.AddDuration("phase.title_keys", TimeSpan.FromMilliseconds(6));
+        run.AddDuration("phase.stale_cleanup", TimeSpan.FromMilliseconds(7));
+        run.AddDuration("phase.titles", TimeSpan.FromMilliseconds(8));
+        run.AddDuration("phase.runtime_backfill.post", TimeSpan.FromMilliseconds(9));
+        run.AddDuration("phase.readiness_merge", TimeSpan.FromMilliseconds(10));
+        run.AddCount("kodik.http_requests", 11);
+        run.AddCount("kodik.search.cache_hits", 12);
+        run.AddCount("skip.files_checked", 13);
+        run.AddCount("io.strm_updated", 2);
+        run.AddCount("titles.total", 4);
+        run.AddCount("titles.finished", 4);
+        run.AddCount("titles.unhandled_failed", 1);
+
+        var title = new RefreshPerformanceMetrics(cfg.EnablePerformanceDebugLogging, run);
+        title.AddCount("skip.PerVoiceAfterCatalog.Matched");
+        title.LogSummary(wrapped, "Frieren", "frieren");
+        run.LogSummary(wrapped);
+
+        AssertFalse(
+            provider.Events.Any(x => x.Message.Contains("ordinary information", StringComparison.Ordinal)),
+            "Enabling perf summaries must not enable ordinary Information noise.");
+        var summaries = provider.Events
+            .Where(x => x.Message.Contains("[YummyKodik][perf]", StringComparison.Ordinal))
+            .ToArray();
+        AssertEqual(2, summaries.Length, "Enabled performance logging should expose title and run summaries through the Warning minimum.");
+        var runSummary = summaries.Single(x => x.Message.Contains("Run ", StringComparison.Ordinal));
+        AssertTrue(runSummary.Message.Contains("kodikHttpRequests=11", StringComparison.Ordinal), "Run summary should expose actual instrumented KodikClient HTTP requests.");
+        AssertTrue(runSummary.Message.Contains("cacheHits=12", StringComparison.Ordinal), "Run summary should expose cache hits.");
+        AssertTrue(runSummary.Message.Contains("filesChecked=13", StringComparison.Ordinal), "Run summary should expose actually hashed files.");
+        AssertTrue(runSummary.Message.Contains("filesChanged=2", StringComparison.Ordinal), "Run summary should aggregate file change operations.");
+        AssertTrue(runSummary.Message.Contains("phase.readiness_merge=10ms", StringComparison.Ordinal), "Run summary should contain common phase timings.");
+        AssertTrue(runSummary.Message.Contains("skip.PerVoiceAfterCatalog.Matched=1", StringComparison.Ordinal), "Title skip decisions should aggregate into the run summary.");
+
+        var beforeDisabled = provider.Events.Count;
+        new RefreshPerformanceMetrics(enabled: false).LogSummary(wrapped, "Disabled", "disabled");
+        new RefreshRunMetrics(enabled: false).LogSummary(wrapped);
+        AssertEqual(beforeDisabled, provider.Events.Count, "Disabled performance logging should emit no summaries.");
+    }
+    finally
+    {
+        YummyKodikLogFilter.ConfigurationProvider = static () => null;
+    }
+}
+
 static void JellyfinWebIndexPatcher_InsertsManagedBootstrapBeforeHeadClose()
 {
     const string html = "<!doctype html>\r\n<html><head><title>Test</title></head><body></body></html>";
@@ -4420,6 +7477,32 @@ static void JellyfinWebIndexPatcher_DoesNotDuplicateBootstrap()
 
     AssertFalse(changed, "Managed bootstrap should not be duplicated when it is already current.");
     AssertEqual(original, patchedHtml, "Unchanged bootstrap should leave index.html intact.");
+}
+
+static void SeriesTranslationScript_AcceptsJellyfinPascalCaseTranslationOptions()
+{
+    using var stream = typeof(NfoBuilder).Assembly.GetManifestResourceStream(
+        "YummyKodik.Web.seriesTranslation.js");
+    AssertTrue(stream is not null, "The embedded translation widget script should exist.");
+
+    using var reader = new StreamReader(stream!);
+    var script = reader.ReadToEnd();
+
+    AssertTrue(
+        script.Contains("readValue(t, \"id\", \"Id\")", StringComparison.Ordinal),
+        "The widget should accept Jellyfin's PascalCase translation Id.");
+    AssertTrue(
+        script.Contains("readValue(t, \"name\", \"Name\")", StringComparison.Ordinal),
+        "The widget should accept Jellyfin's PascalCase translation Name.");
+    AssertTrue(
+        script.Contains("readValue(t, \"type\", \"Type\")", StringComparison.Ordinal),
+        "The widget should accept Jellyfin's PascalCase translation Type.");
+    AssertTrue(
+        script.Contains("ykRequest: Date.now().toString()", StringComparison.Ordinal),
+        "Translation API requests should bypass stale browser responses.");
+    AssertTrue(
+        script.Contains("\"✓ \" + item.label", StringComparison.Ordinal),
+        "The selected widget voice should have an explicit visual marker.");
 }
 
 static YummyAnimeResponse BuildSecondSeasonAnime()
@@ -4618,7 +7701,7 @@ static (string SeriesRoot, RefreshStateSeasonInput Input, Dictionary<int, HashSe
         seasonNumber,
         expectedAvailableEpisodes,
         createStrmPerVoiceTranslation,
-        fingerprint ?? RefreshStateManager.BuildFingerprint(BuildRefreshStateFingerprintInput(seasonNumber: seasonNumber)));
+        fingerprint: fingerprint ?? RefreshStateManager.BuildFingerprint(BuildRefreshStateFingerprintInput(seasonNumber: seasonNumber)));
 
     return (seriesRoot, input, expectedEpisodeFileBaseNames);
 }
@@ -4627,14 +7710,17 @@ static RefreshStateSeasonInput BuildRefreshStateSeasonInput(
     int seasonNumber = 1,
     int expectedAvailableEpisodes = 1,
     bool createStrmPerVoiceTranslation = false,
-    string? fingerprint = null)
+    int preferredQuality = 1080,
+    string? fingerprint = null,
+    string cleanKey = "frieren")
 {
     return new RefreshStateSeasonInput
     {
         SeasonKey = RefreshStateManager.BuildSeasonKey(seasonNumber),
         SeasonNumber = seasonNumber,
-        CleanKey = "frieren",
+        CleanKey = cleanKey,
         CreateStrmPerVoiceTranslation = createStrmPerVoiceTranslation,
+        PreferredQuality = preferredQuality,
         Fingerprint = fingerprint ?? RefreshStateManager.BuildFingerprint(BuildRefreshStateFingerprintInput(seasonNumber: seasonNumber)),
         ExpectedAvailableEpisodes = expectedAvailableEpisodes
     };
@@ -4642,8 +7728,9 @@ static RefreshStateSeasonInput BuildRefreshStateSeasonInput(
 
 static RefreshStateFingerprintInput BuildRefreshStateFingerprintInput(
     string mode = "single-file",
-    string serverBaseUrl = "https://jellyfin.test",
+    string streamGatewayBaseUrl = "http://127.0.0.1:8096",
     string preferredTranslationFilter = "anilibria",
+    int preferredQuality = 1080,
     string seriesTitle = "Frieren",
     int seasonNumber = 1,
     int expectedAvailableEpisodes = 1,
@@ -4652,8 +7739,9 @@ static RefreshStateFingerprintInput BuildRefreshStateFingerprintInput(
     return new RefreshStateFingerprintInput
     {
         Mode = mode,
-        ServerBaseUrl = serverBaseUrl,
+        StreamGatewayBaseUrl = streamGatewayBaseUrl,
         PreferredTranslationFilter = preferredTranslationFilter,
+        PreferredQuality = preferredQuality,
         CleanKey = "frieren",
         RawTitle = seasonNumber == 1 ? "Frieren" : "Frieren 2",
         SeriesTitle = seriesTitle,
@@ -4701,6 +7789,65 @@ static void InvokeRefreshFileWriterWriteTextAtomically(string path, string conte
     task.GetAwaiter().GetResult();
 }
 
+static StaleReleaseCleanupResult RunStaleReleaseCleanup(string outputRoot, IEnumerable<string> currentKeys)
+{
+    var normalizedKeys = new HashSet<string>(currentKeys, StringComparer.OrdinalIgnoreCase);
+    return StaleReleaseCleanupService.CleanupAsync(
+            outputRoot,
+            normalizedKeys,
+            NullLogger.Instance,
+            CancellationToken.None)
+        .GetAwaiter()
+        .GetResult();
+}
+
+static void WriteCleanupState(string seriesRoot, params (string SeasonKey, string CleanKey)[] seasons)
+{
+    var payload = new
+    {
+        schemaVersion = RefreshStateManager.SchemaVersion,
+        seasons = seasons.ToDictionary(
+            season => season.SeasonKey,
+            season => new { cleanKey = season.CleanKey },
+            StringComparer.Ordinal)
+    };
+
+    File.WriteAllText(
+        Path.Combine(seriesRoot, RefreshStateManager.StateFileName),
+        JsonSerializer.Serialize(payload));
+}
+
+static string WriteManagedCleanupSeason(string seriesRoot, int seasonNumber, string cleanKey)
+{
+    var seasonKey = RefreshStateManager.BuildSeasonKey(seasonNumber);
+    var seasonDir = Path.Combine(seriesRoot, seasonKey);
+    var fileBaseName = $"S{seasonNumber:00}E01";
+    Directory.CreateDirectory(seasonDir);
+    File.WriteAllText(Path.Combine(seriesRoot, "tvshow.nfo"), NfoBuilder.BuildSeriesNfo("Cleanup series", "Plot"));
+    File.WriteAllText(Path.Combine(seasonDir, fileBaseName + ".strm"), "http://127.0.0.1:8096/YummyKodik/stream?provider=cvh&animeId=1&ep=1" + Environment.NewLine);
+    File.WriteAllText(Path.Combine(seasonDir, fileBaseName + ".nfo"), NfoBuilder.BuildEpisodeNfo(1, seasonNumber, "Cleanup series", "Plot"));
+
+    var expectedFiles = new Dictionary<int, HashSet<string>>
+    {
+        [1] = new(StringComparer.OrdinalIgnoreCase) { fileBaseName }
+    };
+    var input = BuildRefreshStateSeasonInput(
+        seasonNumber: seasonNumber,
+        expectedAvailableEpisodes: 1,
+        fingerprint: RefreshStateManager.BuildFingerprint(BuildRefreshStateFingerprintInput(seasonNumber: seasonNumber)),
+        cleanKey: cleanKey);
+
+    var written = RefreshStateManager.WriteSeasonStateAsync(
+            seriesRoot,
+            input,
+            expectedFiles,
+            CancellationToken.None)
+        .GetAwaiter()
+        .GetResult();
+    AssertTrue(written, "Complete generated season artifacts should produce cleanup state.");
+    return seasonDir;
+}
+
 static void UpdateMax(ref int target, int value)
 {
     while (true)
@@ -4724,6 +7871,22 @@ static void AssertEqual<T>(T expected, T actual, string message)
     {
         throw new InvalidOperationException($"{message} Expected '{expected}', got '{actual}'.");
     }
+}
+
+static bool WaitUntil(Func<bool> condition, int timeoutMs)
+{
+    var deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
+    while (DateTime.UtcNow < deadline)
+    {
+        if (condition())
+        {
+            return true;
+        }
+
+        Thread.Sleep(20);
+    }
+
+    return condition();
 }
 
 static void AssertTrue(bool value, string message)

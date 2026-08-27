@@ -8,8 +8,9 @@ namespace YummyKodik.Alloha;
 
 internal sealed class AllohaWebSocketStreamTokenResolver
 {
-    private static readonly TimeSpan ConnectTimeout = TimeSpan.FromSeconds(15);
-    private static readonly TimeSpan ReceiveTimeout = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan ConnectTimeout = TimeSpan.FromSeconds(4);
+    private static readonly TimeSpan ReceiveTimeout = TimeSpan.FromSeconds(2);
+    private const int ReceiveAttempts = 3;
 
     private const string AllohaOrigin = "https://alloha.yani.tv";
     private const string BrowserUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36";
@@ -58,7 +59,7 @@ internal sealed class AllohaWebSocketStreamTokenResolver
             await socket.SendAsync(Encoding.UTF8.GetBytes(payload), WebSocketMessageType.Text, true, cancellationToken)
                 .ConfigureAwait(false);
 
-            for (var attempt = 0; attempt < 4; attempt++)
+            for (var attempt = 0; attempt < ReceiveAttempts; attempt++)
             {
                 string? message;
                 using (var receiveCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))

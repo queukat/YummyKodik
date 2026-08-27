@@ -82,14 +82,34 @@ internal sealed class YummyEpisodeArtifactGenerator
             return false;
         }
 
+        var voiceName = context.Refresh.VideoCatalog.PickPreferredVoiceName(
+                provider.Value,
+                episodeNumber,
+                explicitVoiceName: string.Empty,
+                savedVoiceName: string.Empty,
+                preferredFilter: context.PreferredTranslationFilter,
+                out _)
+            ?? string.Empty;
         var url = RefreshPathUtilities.BuildProviderStreamUrl(
             context.Refresh.Files.BaseUrl,
             provider.Value,
             context.Refresh.TitleInfo.Anime.AnimeId,
             episodeNumber) + RefreshConstants.HlsFormatQuerySuffix;
-        await _artifactWriter.WriteEpisodeArtifactsAsync(writeContext, baseName, url, episodeNumber, cancellationToken)
+        var durationSeconds = YummyEpisodeRuntimeResolver.ResolveDurationSeconds(
+            context.Refresh.VideoCatalog,
+            provider.Value,
+            episodeNumber,
+            voiceName);
+        await _artifactWriter.WriteEpisodeArtifactsAsync(
+                writeContext,
+                baseName,
+                url,
+                episodeNumber,
+                durationSeconds,
+                cancellationToken)
             .ConfigureAwait(false);
         EpisodeArtifactMaintenance.TrackExpectedEpisodeArtifact(context.State.ExpectedEpisodeFileBaseNames, episodeNumber, baseName);
+        TrackMediaSegments(context, baseName, episodeNumber, provider.Value, voiceName);
         return true;
     }
 
@@ -109,16 +129,36 @@ internal sealed class YummyEpisodeArtifactGenerator
             return false;
         }
 
+        var voiceName = context.Refresh.VideoCatalog.PickPreferredVoiceName(
+                provider.Value,
+                episodeNumber,
+                explicitVoiceName: string.Empty,
+                savedVoiceName: string.Empty,
+                preferredFilter: context.PreferredTranslationFilter,
+                out _)
+            ?? string.Empty;
         var url = RefreshPathUtilities.BuildProviderStreamUrl(
             context.Refresh.Files.BaseUrl,
             provider.Value,
             context.Refresh.TitleInfo.Anime.AnimeId,
             episodeNumber) + RefreshConstants.HlsFormatQuerySuffix;
         var fileBaseName = baseName + " - Auto";
-        await _artifactWriter.WriteEpisodeArtifactsAsync(writeContext, fileBaseName, url, episodeNumber, cancellationToken)
+        var durationSeconds = YummyEpisodeRuntimeResolver.ResolveDurationSeconds(
+            context.Refresh.VideoCatalog,
+            provider.Value,
+            episodeNumber,
+            voiceName);
+        await _artifactWriter.WriteEpisodeArtifactsAsync(
+                writeContext,
+                fileBaseName,
+                url,
+                episodeNumber,
+                durationSeconds,
+                cancellationToken)
             .ConfigureAwait(false);
         EpisodeArtifactMaintenance.TrackExpectedEpisodeArtifact(context.State.ExpectedEpisodeFileBaseNames, episodeNumber, fileBaseName);
         EpisodeArtifactMaintenance.TrackExpectedEpisodeTranslation(context.State.ExpectedEpisodeTranslationKeys, episodeNumber, "Auto");
+        TrackMediaSegments(context, fileBaseName, episodeNumber, provider.Value, voiceName);
         return true;
     }
 
@@ -180,11 +220,93 @@ internal sealed class YummyEpisodeArtifactGenerator
             voiceName,
             chosenEntry) + RefreshConstants.HlsFormatQuerySuffix;
 
-        await _artifactWriter.WriteEpisodeArtifactsAsync(writeContext, fileBaseName, url, episodeNumber, cancellationToken)
+        var durationSeconds = chosenEntry.DurationSeconds > 0
+            ? chosenEntry.DurationSeconds
+            : YummyEpisodeRuntimeResolver.ResolveDurationSeconds(
+                context.Refresh.VideoCatalog,
+                provider.Value,
+                episodeNumber,
+                voiceName);
+        await _artifactWriter.WriteEpisodeArtifactsAsync(
+                writeContext,
+                fileBaseName,
+                url,
+                episodeNumber,
+                durationSeconds,
+                cancellationToken)
             .ConfigureAwait(false);
         EpisodeArtifactMaintenance.TrackExpectedEpisodeArtifact(context.State.ExpectedEpisodeFileBaseNames, episodeNumber, fileBaseName);
         EpisodeArtifactMaintenance.TrackExpectedEpisodeTranslation(context.State.ExpectedEpisodeTranslationKeys, episodeNumber, suffix);
+        TrackMediaSegments(context, fileBaseName, episodeNumber, provider.Value, voiceName);
         return true;
+    }
+
+    private static void TrackMediaSegments(
+        YummyEpisodeGenerationContext context,
+        string fileBaseName,
+        int episodeNumber,
+        YummyVideoProviderKind provider,
+        string voiceName)
+    {
+        var skipEntry = context.Refresh.VideoCatalog.FindPreferredEntryWithSkipsAcrossProviders(
+            episodeNumber,
+            voiceName,
+            BuildSegmentProviderOrder(provider));
+        var segments = BuildMediaSegments(skipEntry?.Skips);
+        if (segments.Length == 0)
+        {
+            return;
+        }
+
+        context.State.MediaSegmentEntriesByFileBaseName[fileBaseName] = new RefreshStateMediaSegmentEntry
+        {
+            FileBaseName = fileBaseName,
+            EpisodeNumber = episodeNumber,
+            Provider = provider.ToString(),
+            VoiceName = voiceName,
+            SourceProvider = skipEntry?.Provider.ToString() ?? string.Empty,
+            SourceVoiceName = skipEntry?.DisplayVoiceName ?? string.Empty,
+            Segments = segments
+        };
+    }
+
+    private static YummyVideoProviderKind[] BuildSegmentProviderOrder(YummyVideoProviderKind provider)
+    {
+        return RefreshConstants.PreferredYummyProviderOrder
+            .Prepend(provider)
+            .Distinct()
+            .ToArray();
+    }
+
+    private static RefreshStateMediaSegment[] BuildMediaSegments(YummyVideoSkips? skips)
+    {
+        if (skips == null)
+        {
+            return Array.Empty<RefreshStateMediaSegment>();
+        }
+
+        var result = new List<RefreshStateMediaSegment>(2);
+        if (skips.Opening != null && skips.Opening.Length > 0)
+        {
+            result.Add(new RefreshStateMediaSegment
+            {
+                Type = "Intro",
+                StartTicks = TimeSpan.FromSeconds(Math.Max(0, skips.Opening.Time)).Ticks,
+                EndTicks = TimeSpan.FromSeconds(Math.Max(0, skips.Opening.Time) + skips.Opening.Length).Ticks
+            });
+        }
+
+        if (skips.Ending != null && skips.Ending.Length > 0)
+        {
+            result.Add(new RefreshStateMediaSegment
+            {
+                Type = "Outro",
+                StartTicks = TimeSpan.FromSeconds(Math.Max(0, skips.Ending.Time)).Ticks,
+                EndTicks = TimeSpan.FromSeconds(Math.Max(0, skips.Ending.Time) + skips.Ending.Length).Ticks
+            });
+        }
+
+        return result.ToArray();
     }
 
     private static string BuildSafeVoiceSuffix(string voiceName)

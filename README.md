@@ -30,13 +30,14 @@ YummyKodik is a Jellyfin plugin that builds a local anime library from YummyAnim
 
 - Creates a local Jellyfin TV library layout with `tvshow.nfo`, `Season XX/*.nfo`, and `Season XX/*.strm`.
 - Reads anime from manually configured Yummy slugs or from a Yummy user list.
+- Can optionally remove plugin-managed releases that disappear from a successfully fetched Yummy user list.
 - Combines episode availability from three provider families under the hood: Alloha, CVH, and Kodik.
 - Generates as many episode files as it can from all available provider data, instead of assuming one player has complete coverage.
 - Uses the requested quality as a preference, then asks the selected provider for the best matching HLS stream.
 - Falls back to another provider when an episode is missing, a selected provider has fewer episodes, or playback resolution fails.
 - Resolves and caches a Kodik token automatically, with an optional manual token override.
 - Adds intro/outro media segments from Yummy/Kodik skip timings for Jellyfin clients that support skip actions.
-- Injects a small Jellyfin Web series-page widget where each user can choose a preferred voice translation or return to auto mode.
+- Injects a small Jellyfin Web series-page widget for choosing the series-wide voice translation or returning to auto mode.
 - Can create one episode file per episode, or one episode file per voice translation.
 
 ## Provider Blending
@@ -51,7 +52,7 @@ During refresh, the plugin asks Yummy for provider metadata and builds a combine
 
 The result is that normal setup has no provider picker to babysit. You configure the anime source and desired quality, then let the plugin do the coverage work across all three providers. If episode 4 exists only in Kodik, refresh can still create the episode file even when Alloha has fewer episodes. If playback for a generated Alloha or CVH URL fails at runtime, the stream endpoint tries neighboring providers before giving up.
 
-Voice selection follows the same idea. The plugin first honors an explicit per-user choice from the Jellyfin Web widget, then `Preferred translation filter`, then automatic fallback. In per-voice mode it creates separate files for available voice translations; in normal mode it keeps one episode file and resolves the best voice when you press play.
+Voice selection follows the same idea. The plugin first honors an explicit series-wide choice from the Jellyfin Web widget, then `Preferred translation filter`, then automatic fallback. In per-voice mode it creates separate files for available voice translations; in normal mode it keeps one episode file and resolves the best voice when you press play.
 
 ## Jellyfin Web Voice Widget
 
@@ -61,11 +62,11 @@ At startup, the plugin tries to patch Jellyfin Web `index.html` with a small boo
 /web/ConfigurationPage?name=seriesTranslation.js&v=<plugin-version>
 ```
 
-That script adds an `Озвучка` row to supported series details pages. The widget asks the plugin for available voices, shows `Авто` plus the combined Alloha/CVH voice list, and saves the choice through `YummyKodik/setTranslation`.
+That script adds an `Озвучка` row to supported series details pages. The widget shows `Авто` plus the normalized union of voices available from managed Jellyfin versions and the provider catalog, including Kodik-only coverage.
 
-The saved value is per Jellyfin user and per Yummy series, so different users can choose different voices for the same anime. In normal single-file mode, this is how `SxxEyy.strm` can still play a chosen voice without creating separate episode files. Changing the voice in the widget does not require a library refresh; the next playback request reads the saved preference and resolves the best matching provider.
+An explicit choice becomes the library-wide primary voice for that series. Jellyfin `Next` and autoplay then advance by episode in the chosen voice wherever it exists, while unmatched episodes use the normal safe fallback. Because Jellyfin stores the primary version globally, simultaneous independent voice locks for different users are not supported.
 
-If the selected voice exists only in a neighboring provider, playback can move from the generated provider URL to that provider instead of silently playing another voice. Choosing `Авто` clears the saved preference and returns to `Preferred translation filter` plus automatic fallback.
+Changing the voice does not require a library refresh. If the selected voice exists only in a neighboring provider, playback can move to that provider instead of silently playing another voice. Choosing `Авто` clears the explicit selection and returns to `Preferred translation filter` plus automatic fallback. While a voice is explicitly selected, Jellyfin's native version selector is informational; choose `Авто` before making a one-off native version choice.
 
 If Jellyfin Web `index.html` is not writable or not found, the widget is skipped. Playback still works through generated files, `Preferred translation filter`, and per-voice files if that mode is enabled.
 
@@ -104,7 +105,7 @@ Download `YummyKodik_<version>.zip` from GitHub Releases and extract the files d
 Windows service or tray install:
 
 ```powershell
-$version = "1.1.2.0"
+$version = "1.2.0.0"
 $plugins = "$env:ProgramData\Jellyfin\Server\plugins"
 New-Item -ItemType Directory -Force "$plugins\YummyKodik_$version"
 Expand-Archive ".\YummyKodik_$version.zip" "$plugins\YummyKodik_$version" -Force
@@ -113,7 +114,7 @@ Expand-Archive ".\YummyKodik_$version.zip" "$plugins\YummyKodik_$version" -Force
 Windows portable install:
 
 ```powershell
-$version = "1.1.2.0"
+$version = "1.2.0.0"
 $plugins = "$env:LOCALAPPDATA\jellyfin\plugins"
 New-Item -ItemType Directory -Force "$plugins\YummyKodik_$version"
 Expand-Archive ".\YummyKodik_$version.zip" "$plugins\YummyKodik_$version" -Force
@@ -122,7 +123,7 @@ Expand-Archive ".\YummyKodik_$version.zip" "$plugins\YummyKodik_$version" -Force
 Docker install by copying an already extracted package:
 
 ```powershell
-$version = "1.1.2.0"
+$version = "1.2.0.0"
 docker exec jellyfin mkdir -p /config/plugins/YummyKodik_$version
 docker cp .\artifacts\package\. jellyfin:/config/plugins/YummyKodik_$version/
 docker restart jellyfin
@@ -131,7 +132,7 @@ docker restart jellyfin
 Docker install from a zip inside the container:
 
 ```bash
-version=1.1.2.0
+version=1.2.0.0
 mkdir -p "/config/plugins/YummyKodik_$version"
 unzip "YummyKodik_$version.zip" -d "/config/plugins/YummyKodik_$version"
 ```
@@ -155,7 +156,6 @@ Main settings:
 - `Alloha API token`: optional token for extra Alloha catalog lookup.
 - `Alloha API base URL`: defaults to `https://api.alloha.tv`.
 - `Output root path`: path on the Jellyfin server where generated files are written.
-- `Jellyfin server base URL`: base URL inserted into generated `.strm` files.
 - `Preferred translation filter`: preferred voice tokens separated by `|`, for example `anilibria|aniliberty|shiza`.
 - `Create separate STRM for each voice translation`: changes library layout from one file per episode to one file per voice.
 - `Preferred quality`: target quality, usually `720` or `1080`; providers may return the nearest available stream.
@@ -167,6 +167,7 @@ Optional settings:
 - `Enable Kodik HTTP request debug logs`: noisy HTTP request/response diagnostics for Kodik troubleshooting.
 - `Enable refresh performance diagnostics`: logs refresh stage timings and file-operation counters.
 - `Use user list subscription`: pulls anime from `/users/{id}/lists/{list_id}`.
+- `Удалять релизы, отсутствующие в списке Yummy`: removes stale plugin-managed seasons after a successful complete list fetch. Manual slugs and directories with unknown or modified files are preserved.
 - `Yummy user ID` and `Yummy list ID`: identify the Yummy list to sync.
 - `Yummy access token`: bearer token for private Yummy endpoints.
 - `Yummy login` and `Yummy password`: fallback login flow if no access token is provided.
@@ -185,12 +186,13 @@ User list mode:
 - Turn on `Use user list subscription`.
 - Set `Yummy user ID`, `Yummy list ID`, and either `Yummy access token` or login/password.
 - Manual slugs are still honored, so you can combine both sources.
+- Optionally enable stale-release deletion. Cleanup is skipped whenever the list request fails or its response is incomplete.
 
 Single episode file mode:
 
 - Leave `Create separate STRM for each voice translation` off.
 - The plugin creates `SxxEyy.strm`.
-- Playback picks a voice using the per-user saved choice, then `Preferred translation filter`, then provider fallback.
+- Playback picks a voice using the explicit series selection, then `Preferred translation filter`, then provider fallback.
 
 Per-voice file mode:
 
@@ -201,9 +203,9 @@ Per-voice file mode:
 Translation widget mode:
 
 - The plugin patches Jellyfin Web `index.html` at startup to load `seriesTranslation.js`.
-- On a supported series details page, the widget shows `Auto` and the combined available Alloha/CVH voice choices.
-- Choosing a voice saves a per-user, per-Yummy-series preference that normal single-file playback uses on the next play.
-- Choosing `Auto` clears the saved preference and returns to automatic selection.
+- On a supported series details page, the widget shows `Auto` and the normalized available voice choices across managed versions and providers.
+- Choosing a voice makes it the series-wide primary and keeps `Next`/autoplay on that voice where it is available.
+- Choosing `Auto` clears the explicit selection and returns to automatic selection.
 - No library refresh is required after changing the widget choice.
 
 ## Docker Notes
@@ -214,41 +216,11 @@ Use container paths in plugin settings. A Windows path such as `D:\video\YummyKo
 /media/yummykodik
 ```
 
-Mount that path from the host, then point a Jellyfin `Shows` library at the same container path.
-
-`Jellyfin server base URL` must be reachable from the Jellyfin container and from playback clients. On Docker Desktop, this often works well:
-
-```text
-http://host.docker.internal:8096
-```
-
-or, if Jellyfin is published on host port `8099`:
-
-```text
-http://host.docker.internal:8099
-```
-
-A trailing slash is safe. The plugin trims it before generating paths, so this:
-
-```text
-http://host.docker.internal:8099/
-```
-
-generates:
-
-```text
-http://host.docker.internal:8099/YummyKodik/stream?...
-```
-
-not:
-
-```text
-http://host.docker.internal:8099//YummyKodik/stream?...
-```
+Mount that path from the host, then point a Jellyfin `Shows` library at the same container path. Generated stream URLs use Jellyfin's process-local gateway, so no client-facing server URL is required in plugin settings.
 
 ## Refresh And Playback
 
-After changing slugs, user-list settings, `Output root path`, `Jellyfin server base URL`, or per-voice mode:
+After changing slugs, user-list settings, `Output root path`, or per-voice mode:
 
 1. Save the plugin configuration.
 2. Run `Dashboard -> Scheduled Tasks -> YummyKodik library refresh`.
@@ -279,13 +251,13 @@ dotnet run --project .\YummyKodik.Tests\YummyKodik.Tests.csproj -c Release
 Create a local release ZIP on Windows:
 
 ```powershell
-.\scripts\package.ps1 -Version 1.1.2.0
+.\scripts\package.ps1 -Version 1.2.0.0
 ```
 
 Create a local release ZIP on Linux/macOS:
 
 ```bash
-bash ./scripts/package.sh 1.1.2.0
+bash ./scripts/package.sh 1.2.0.0
 ```
 
 This produces:
@@ -300,8 +272,8 @@ The release workflow runs on version tags and publishes the ZIP, MD5 checksum, G
 Recommended tag format follows the existing release convention:
 
 ```bash
-git tag 1.1.2.0
-git push origin 1.1.2.0
+git tag 1.2.0.0
+git push origin 1.2.0.0
 ```
 
 Tags with a leading `v` also work because the workflow normalizes versions.
@@ -318,7 +290,7 @@ Verified:
 
 - The plugin loads as `Active`.
 - The refresh task generates one series and five aired episode `.strm` files.
-- A trailing slash in `ServerBaseUrl` does not produce a double slash in generated URLs.
+- Generated stream URLs use Jellyfin's process-local gateway address and do not depend on a client-facing server URL.
 - The generated Alloha stream returns an HLS master playlist.
 - A nested playlist returns `200 application/vnd.apple.mpegurl`.
 - The first proxied `.ts` segment returns `200 video/MP2T`.

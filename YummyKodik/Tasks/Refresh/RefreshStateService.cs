@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using YummyKodik.Configuration;
+using YummyKodik.Kodik;
 using YummyKodik.Util;
 using YummyKodik.Yummy;
 
@@ -19,10 +20,11 @@ internal sealed class RefreshStateService
         {
             try
             {
-                var canSkip = await RefreshStateManager
-                    .CanSkipSingleFileRefreshAsync(refresh.Files.SeriesRoot, refreshStateInput, cancellationToken)
+                var decision = await RefreshStateManager
+                    .EvaluateSingleFileRefreshAsync(refresh.Files.SeriesRoot, refreshStateInput, cancellationToken)
                     .ConfigureAwait(false);
-                if (!canSkip)
+                ObserveDecision(perf, decision);
+                if (!decision.ShouldSkip)
                 {
                     return false;
                 }
@@ -53,6 +55,26 @@ internal sealed class RefreshStateService
         RefreshPerformanceMetrics perf,
         CancellationToken cancellationToken)
     {
+        await WriteAsync(
+                logger,
+                refresh,
+                refreshStateInput,
+                state,
+                kodikValidation: null,
+                perf,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    public async Task WriteAsync(
+        ILogger logger,
+        YummyRefreshInfo refresh,
+        RefreshStateSeasonInput refreshStateInput,
+        EpisodeGenerationState state,
+        RefreshStateKodikValidation? kodikValidation,
+        RefreshPerformanceMetrics perf,
+        CancellationToken cancellationToken)
+    {
         using (perf.Measure("stage.refresh.state.write"))
         {
             try
@@ -62,10 +84,16 @@ internal sealed class RefreshStateService
                         refresh.Files.SeriesRoot,
                         refreshStateInput,
                         state.ExpectedEpisodeFileBaseNames,
+                        state.MediaSegmentEntriesByFileBaseName,
+                        kodikValidation,
                         cancellationToken)
                     .ConfigureAwait(false);
 
                 perf.AddCount(written ? "state.written" : "state.write_skipped_incomplete_files");
+                if (written)
+                {
+                    perf.AddCount("io.state_updated");
+                }
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
             {
@@ -78,6 +106,131 @@ internal sealed class RefreshStateService
         }
     }
 
+    public async Task<bool> TrySkipPerVoiceDeepRefreshAsync(
+        ILogger logger,
+        YummyRefreshInfo refresh,
+        RefreshStateSeasonInput refreshStateInput,
+        string kodikCatalogSignature,
+        RefreshPerformanceMetrics perf,
+        CancellationToken cancellationToken)
+    {
+        using (perf.Measure("stage.refresh.state.per_voice_check"))
+        {
+            try
+            {
+                var decision = await RefreshStateManager
+                    .EvaluatePerVoiceDeepRefreshAsync(
+                        refresh.Files.SeriesRoot,
+                        refreshStateInput,
+                        kodikCatalogSignature,
+                        DateTimeOffset.UtcNow,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                ObserveDecision(perf, decision);
+                if (!decision.ShouldSkip)
+                {
+                    return false;
+                }
+
+                perf.AddCount("state.per_voice_deep_skip");
+                logger.LogInformation(
+                    "[YummyKodik] Skipping deep per-voice refresh for '{Title}' because Yummy inputs, Kodik catalog, and generated files are unchanged.",
+                    refresh.TitleInfo.Title);
+                return true;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
+            {
+                perf.AddCount("state.per_voice_check_failed");
+                logger.LogDebug(
+                    ex,
+                    "[YummyKodik] Per-voice refresh state check failed for '{Title}', running deep validation.",
+                    refresh.TitleInfo.Title);
+                return false;
+            }
+        }
+    }
+
+    public async Task<bool> TrySkipPerVoiceKodikLookupAsync(
+        ILogger logger,
+        YummyRefreshInfo refresh,
+        RefreshStateSeasonInput refreshStateInput,
+        RefreshPerformanceMetrics perf,
+        CancellationToken cancellationToken)
+    {
+        using (perf.Measure("stage.refresh.state.per_voice_kodik_lookup_check"))
+        {
+            try
+            {
+                var decision = await RefreshStateManager
+                    .EvaluatePerVoiceKodikLookupAsync(
+                        refresh.Files.SeriesRoot,
+                        refreshStateInput,
+                        DateTimeOffset.UtcNow,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                ObserveDecision(perf, decision);
+                if (!decision.ShouldSkip)
+                {
+                    return false;
+                }
+
+                perf.AddCount("state.per_voice_kodik_lookup_skip");
+                logger.LogInformation(
+                    "[YummyKodik] Skipping '{Title}' before Kodik lookup because high-quality inputs and verified fallback files are unchanged.",
+                    refresh.TitleInfo.Title);
+                return true;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
+            {
+                perf.AddCount("state.per_voice_kodik_lookup_check_failed");
+                logger.LogDebug(
+                    ex,
+                    "[YummyKodik] Pre-Kodik per-voice state check failed for '{Title}', continuing refresh.",
+                    refresh.TitleInfo.Title);
+                return false;
+            }
+        }
+    }
+
+    public static string BuildKodikCatalogSignature(KodikLookupResult lookup)
+    {
+        ArgumentNullException.ThrowIfNull(lookup);
+
+        return RefreshStateManager.BuildKodikCatalogSignature(new RefreshStateKodikCatalogInput
+        {
+            IdType = lookup.IdType.ToString(),
+            Id = lookup.Id,
+            SeriesCount = lookup.Info.SeriesCount,
+            Translations = lookup.Info.Translations
+                .Select(BuildKodikTranslationInput)
+                .ToArray()
+        });
+    }
+
+    private static RefreshStateKodikTranslationInput BuildKodikTranslationInput(KodikTranslation translation)
+    {
+        return new RefreshStateKodikTranslationInput
+        {
+            Id = translation.Id,
+            Type = translation.Type,
+            Name = translation.Name,
+            MaxEpisode = translation.MaxEpisode,
+            AvailableEpisodes = translation.AvailableEpisodes
+                .Where(episode => episode > 0)
+                .Distinct()
+                .OrderBy(episode => episode)
+                .ToArray()
+        };
+    }
+
+    private static void ObserveDecision(RefreshPerformanceMetrics perf, RefreshSkipDecision decision)
+    {
+        perf.AddCount($"skip.{decision.Path}.{decision.Reason}");
+        perf.AddCount("skip.files_checked", decision.ManagedFilesChecked);
+        perf.AddCount("skip.files_expected", decision.ManagedFilesExpected);
+        perf.AddCount("skip.unexpected_artifacts", decision.UnexpectedArtifactCount);
+    }
+
     public RefreshStateSeasonInput BuildSeasonInput(PluginConfiguration cfg, YummyRefreshInfo refresh)
     {
         var seasonKey = RefreshStateManager.BuildSeasonKey(refresh.TitleInfo.SeasonNumber);
@@ -87,6 +240,7 @@ internal sealed class RefreshStateService
             SeasonNumber = refresh.TitleInfo.SeasonNumber,
             CleanKey = refresh.TitleInfo.CleanKey,
             CreateStrmPerVoiceTranslation = cfg.CreateStrmPerVoiceTranslation,
+            PreferredQuality = cfg.PreferredQuality > 0 ? cfg.PreferredQuality : 720,
             Fingerprint = BuildRefreshFingerprint(cfg, refresh, seasonKey),
             ExpectedAvailableEpisodes = refresh.Availability.ExpectedAvailableEpisodes
         };
@@ -101,8 +255,9 @@ internal sealed class RefreshStateService
         return RefreshStateManager.BuildFingerprint(new RefreshStateFingerprintInput
         {
             Mode = BuildRefreshStateMode(cfg.CreateStrmPerVoiceTranslation),
-            ServerBaseUrl = cfg.ServerBaseUrl,
+            StreamGatewayBaseUrl = refresh.Files.BaseUrl,
             PreferredTranslationFilter = cfg.PreferredTranslationFilter,
+            PreferredQuality = cfg.PreferredQuality > 0 ? cfg.PreferredQuality : 720,
             CleanKey = refresh.TitleInfo.CleanKey,
             RawTitle = refresh.TitleInfo.RawTitle,
             SeriesTitle = refresh.TitleInfo.Title,

@@ -30,7 +30,16 @@ internal sealed class SeriesMetadataWriter
         {
             using (perf.Measure("stage.poster"))
             {
-                await EnsurePosterAsync(refresh.TitleInfo.Anime, refresh.Files.SeriesRoot, posterHttp, cancellationToken).ConfigureAwait(false);
+                var posterCreated = await EnsurePosterAsync(
+                        refresh.TitleInfo.Anime,
+                        refresh.Files.SeriesRoot,
+                        posterHttp,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                if (posterCreated)
+                {
+                    perf.AddCount("io.poster_created");
+                }
             }
         }
         catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or IOException)
@@ -42,7 +51,7 @@ internal sealed class SeriesMetadataWriter
         }
     }
 
-    private static async Task EnsurePosterAsync(
+    private static async Task<bool> EnsurePosterAsync(
         YummyAnimeResponse anime,
         string seriesRoot,
         HttpClient http,
@@ -51,13 +60,13 @@ internal sealed class SeriesMetadataWriter
         var posterPath = Path.Combine(seriesRoot, "poster.jpg");
         if (File.Exists(posterPath))
         {
-            return;
+            return false;
         }
 
         var url = YummyClient.PickBestPosterUrl(anime);
         if (string.IsNullOrEmpty(url))
         {
-            return;
+            return false;
         }
 
         var resp = await http.GetAsync(url, cancellationToken).ConfigureAwait(false);
@@ -82,6 +91,7 @@ internal sealed class SeriesMetadataWriter
             }
 
             File.Move(tempPath, posterPath, overwrite: true);
+            return true;
         }
         finally
         {

@@ -130,8 +130,12 @@ namespace YummyKodik.Yummy
             }
 
             var wrapper = JsonSerializer.Deserialize<YummyUserListWrapper>(content, CaseInsensitiveJsonOptions);
+            if (wrapper?.Response == null)
+            {
+                throw new InvalidOperationException("Yummy user-list response does not contain a 'response' array.");
+            }
 
-            return wrapper?.Response ?? new List<YummyUserListItem>(0);
+            return wrapper.Response;
         }
 
         /// <summary>

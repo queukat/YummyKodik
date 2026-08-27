@@ -6,11 +6,51 @@ using System.Text.Json.Serialization;
 
 namespace YummyKodik.Tasks;
 
+internal enum RefreshSkipPath
+{
+    SingleFileBeforeKodik,
+    PerVoiceBeforeKodik,
+    PerVoiceAfterCatalog
+}
+
+internal enum RefreshSkipReason
+{
+    Matched,
+    NotApplicableMode,
+    PreferredQualityRequiresLookup,
+    StateMissing,
+    StateUnreadable,
+    StateVersionMismatch,
+    SeasonMissing,
+    ModeMismatch,
+    FingerprintMismatch,
+    ExpectedEpisodeCountMismatch,
+    CoverageIncomplete,
+    CatalogSignatureMissing,
+    CatalogSignatureMismatch,
+    DeepValidationMissing,
+    DeepValidationFromFuture,
+    DeepValidationExpired,
+    ManagedFilesMissingOrInvalid,
+    ManagedFileHashMismatch,
+    UnexpectedArtifacts
+}
+
+internal readonly record struct RefreshSkipDecision(
+    RefreshSkipPath Path,
+    bool ShouldSkip,
+    RefreshSkipReason Reason,
+    int ManagedFilesExpected = 0,
+    int ManagedFilesChecked = 0,
+    int UnexpectedArtifactCount = 0);
+
 public static class RefreshStateManager
 {
     public const int SchemaVersion = 1;
-    public const int GenerationContractVersion = 1;
+    public const int GenerationContractVersion = 3;
     public const string StateFileName = ".yummykodik.refresh-state.json";
+    public const int KodikKnownMaximumQuality = 720;
+    public static readonly TimeSpan PerVoiceDeepValidationInterval = TimeSpan.FromHours(24);
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -33,8 +73,9 @@ public static class RefreshStateManager
         {
             ["generationContractVersion"] = input.GenerationContractVersion,
             ["mode"] = Normalize(input.Mode),
-            ["serverBaseUrl"] = NormalizeBaseUrl(input.ServerBaseUrl),
+            ["streamGatewayBaseUrl"] = NormalizeBaseUrl(input.StreamGatewayBaseUrl),
             ["preferredTranslationFilter"] = Normalize(input.PreferredTranslationFilter),
+            ["preferredQuality"] = input.PreferredQuality,
             ["cleanKey"] = Normalize(input.CleanKey),
             ["rawTitle"] = Normalize(input.RawTitle),
             ["seriesTitle"] = Normalize(input.SeriesTitle),
@@ -59,6 +100,40 @@ public static class RefreshStateManager
         return "sha256:" + ComputeSha256Hex(json);
     }
 
+    public static string BuildKodikCatalogSignature(RefreshStateKodikCatalogInput input)
+    {
+        ArgumentNullException.ThrowIfNull(input);
+
+        var translations = (input.Translations ?? Array.Empty<RefreshStateKodikTranslationInput>())
+            .Select(translation => new SortedDictionary<string, object?>(StringComparer.Ordinal)
+            {
+                ["id"] = Normalize(translation.Id),
+                ["type"] = Normalize(translation.Type),
+                ["name"] = Normalize(translation.Name),
+                ["maxEpisode"] = translation.MaxEpisode,
+                ["availableEpisodes"] = NormalizeEpisodes(translation.AvailableEpisodes)
+            })
+            .OrderBy(translation => translation["id"]?.ToString(), StringComparer.Ordinal)
+            .ThenBy(translation => translation["type"]?.ToString(), StringComparer.Ordinal)
+            .ThenBy(translation => translation["name"]?.ToString(), StringComparer.Ordinal)
+            .ThenBy(translation => translation["maxEpisode"])
+            .ThenBy(
+                translation => string.Join(",", (int[])(translation["availableEpisodes"] ?? Array.Empty<int>())),
+                StringComparer.Ordinal)
+            .ToArray();
+
+        var payload = new SortedDictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["idType"] = Normalize(input.IdType),
+            ["id"] = Normalize(input.Id),
+            ["seriesCount"] = input.SeriesCount,
+            ["translations"] = translations
+        };
+
+        var json = JsonSerializer.Serialize(payload, JsonOptions);
+        return "sha256:" + ComputeSha256Hex(json);
+    }
+
     public static string HashSecret(string? value)
     {
         var normalized = Normalize(value);
@@ -70,51 +145,293 @@ public static class RefreshStateManager
         RefreshStateSeasonInput input,
         CancellationToken cancellationToken)
     {
+        var decision = await EvaluateSingleFileRefreshAsync(seriesRoot, input, cancellationToken).ConfigureAwait(false);
+        return decision.ShouldSkip;
+    }
+
+    internal static async Task<RefreshSkipDecision> EvaluateSingleFileRefreshAsync(
+        string seriesRoot,
+        RefreshStateSeasonInput input,
+        CancellationToken cancellationToken)
+    {
         ArgumentNullException.ThrowIfNull(input);
+        const RefreshSkipPath path = RefreshSkipPath.SingleFileBeforeKodik;
 
         if (input.CreateStrmPerVoiceTranslation)
         {
-            return false;
+            return Reject(path, RefreshSkipReason.NotApplicableMode);
         }
 
-        var state = await TryReadStateAsync(seriesRoot, cancellationToken).ConfigureAwait(false);
-        if (state == null ||
-            state.SchemaVersion != SchemaVersion ||
-            state.GenerationContractVersion != GenerationContractVersion ||
-            state.Seasons == null ||
+        var stateRead = await ReadStateForDecisionAsync(seriesRoot, cancellationToken).ConfigureAwait(false);
+        if (stateRead.State == null)
+        {
+            return Reject(path, stateRead.Reason);
+        }
+
+        var state = stateRead.State;
+        if (state.SchemaVersion != SchemaVersion || state.GenerationContractVersion != GenerationContractVersion)
+        {
+            return Reject(path, RefreshSkipReason.StateVersionMismatch);
+        }
+
+        if (state.Seasons == null ||
             !state.Seasons.TryGetValue(input.SeasonKey, out var season) ||
             season == null)
         {
-            return false;
+            return Reject(path, RefreshSkipReason.SeasonMissing);
         }
 
-        if (!string.Equals(season.Mode, RefreshStateMode.SingleFile, StringComparison.Ordinal) ||
-            !string.Equals(season.Fingerprint, input.Fingerprint, StringComparison.Ordinal) ||
-            season.ExpectedAvailableEpisodes != input.ExpectedAvailableEpisodes ||
-            !CoversExpectedEpisodes(season.CoveredEpisodes, input.ExpectedAvailableEpisodes))
+        var inputDecision = ValidateSeasonInputs(path, season, input, RefreshStateMode.SingleFile);
+        if (inputDecision.HasValue)
         {
-            return false;
+            return inputDecision.Value;
         }
 
-        if (!await ManagedFilesMatchAsync(seriesRoot, season.ManagedFiles, cancellationToken).ConfigureAwait(false))
+        return await ValidateManagedFilesAndArtifactsAsync(
+                path,
+                seriesRoot,
+                input,
+                season,
+                input.ExpectedAvailableEpisodes,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    public static Task<bool> CanSkipPerVoiceDeepRefreshAsync(
+        string seriesRoot,
+        RefreshStateSeasonInput input,
+        string kodikCatalogSignature,
+        CancellationToken cancellationToken)
+    {
+        return CanSkipPerVoiceDeepRefreshAsync(
+            seriesRoot,
+            input,
+            kodikCatalogSignature,
+            DateTimeOffset.UtcNow,
+            cancellationToken);
+    }
+
+    public static Task<bool> CanSkipPerVoiceKodikLookupAsync(
+        string seriesRoot,
+        RefreshStateSeasonInput input,
+        CancellationToken cancellationToken)
+    {
+        return CanSkipPerVoiceKodikLookupAsync(
+            seriesRoot,
+            input,
+            DateTimeOffset.UtcNow,
+            cancellationToken);
+    }
+
+    public static async Task<bool> CanSkipPerVoiceKodikLookupAsync(
+        string seriesRoot,
+        RefreshStateSeasonInput input,
+        DateTimeOffset nowUtc,
+        CancellationToken cancellationToken)
+    {
+        var decision = await EvaluatePerVoiceKodikLookupAsync(seriesRoot, input, nowUtc, cancellationToken)
+            .ConfigureAwait(false);
+        return decision.ShouldSkip;
+    }
+
+    internal static async Task<RefreshSkipDecision> EvaluatePerVoiceKodikLookupAsync(
+        string seriesRoot,
+        RefreshStateSeasonInput input,
+        DateTimeOffset nowUtc,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(input);
+        const RefreshSkipPath path = RefreshSkipPath.PerVoiceBeforeKodik;
+
+        if (!input.CreateStrmPerVoiceTranslation)
         {
-            return false;
+            return Reject(path, RefreshSkipReason.NotApplicableMode);
         }
 
-        var expectedEpisodeFileBaseNames = BuildExpectedEpisodeFileBaseNames(input, season.ManagedFiles);
-        var unexpectedArtifacts = EpisodeArtifactMaintenance.FindUnexpectedEpisodeArtifacts(
-            Path.Combine(seriesRoot, input.SeasonKey),
-            input.SeasonNumber,
-            expectedEpisodeFileBaseNames,
-            input.ExpectedAvailableEpisodes);
+        if (input.PreferredQuality <= KodikKnownMaximumQuality)
+        {
+            return Reject(path, RefreshSkipReason.PreferredQualityRequiresLookup);
+        }
 
-        return unexpectedArtifacts.Count == 0;
+        var stateRead = await ReadStateForDecisionAsync(seriesRoot, cancellationToken).ConfigureAwait(false);
+        if (stateRead.State == null)
+        {
+            return Reject(path, stateRead.Reason);
+        }
+
+        var state = stateRead.State;
+        if (state.SchemaVersion != SchemaVersion || state.GenerationContractVersion != GenerationContractVersion)
+        {
+            return Reject(path, RefreshSkipReason.StateVersionMismatch);
+        }
+
+        if (state.Seasons == null ||
+            !state.Seasons.TryGetValue(input.SeasonKey, out var season) ||
+            season == null)
+        {
+            return Reject(path, RefreshSkipReason.SeasonMissing);
+        }
+
+        var inputDecision = ValidateSeasonInputs(path, season, input, RefreshStateMode.PerVoice);
+        if (inputDecision.HasValue)
+        {
+            return inputDecision.Value;
+        }
+
+        if (string.IsNullOrWhiteSpace(season.KodikCatalogSignature))
+        {
+            return Reject(path, RefreshSkipReason.CatalogSignatureMissing);
+        }
+
+        var validationDecision = ValidateDeepValidation(path, season, nowUtc);
+        if (validationDecision.HasValue)
+        {
+            return validationDecision.Value;
+        }
+
+        var maxExpectedEpisodeNumber = Math.Max(
+            input.ExpectedAvailableEpisodes,
+            season.CoveredEpisodes.DefaultIfEmpty().Max());
+        return await ValidateManagedFilesAndArtifactsAsync(
+                path,
+                seriesRoot,
+                input,
+                season,
+                maxExpectedEpisodeNumber,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    public static async Task<bool> CanSkipPerVoiceDeepRefreshAsync(
+        string seriesRoot,
+        RefreshStateSeasonInput input,
+        string kodikCatalogSignature,
+        DateTimeOffset nowUtc,
+        CancellationToken cancellationToken)
+    {
+        var decision = await EvaluatePerVoiceDeepRefreshAsync(
+                seriesRoot,
+                input,
+                kodikCatalogSignature,
+                nowUtc,
+                cancellationToken)
+            .ConfigureAwait(false);
+        return decision.ShouldSkip;
+    }
+
+    internal static async Task<RefreshSkipDecision> EvaluatePerVoiceDeepRefreshAsync(
+        string seriesRoot,
+        RefreshStateSeasonInput input,
+        string kodikCatalogSignature,
+        DateTimeOffset nowUtc,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(input);
+        const RefreshSkipPath path = RefreshSkipPath.PerVoiceAfterCatalog;
+
+        if (!input.CreateStrmPerVoiceTranslation)
+        {
+            return Reject(path, RefreshSkipReason.NotApplicableMode);
+        }
+
+        if (string.IsNullOrWhiteSpace(kodikCatalogSignature))
+        {
+            return Reject(path, RefreshSkipReason.CatalogSignatureMissing);
+        }
+
+        var stateRead = await ReadStateForDecisionAsync(seriesRoot, cancellationToken).ConfigureAwait(false);
+        if (stateRead.State == null)
+        {
+            return Reject(path, stateRead.Reason);
+        }
+
+        var state = stateRead.State;
+        if (state.SchemaVersion != SchemaVersion || state.GenerationContractVersion != GenerationContractVersion)
+        {
+            return Reject(path, RefreshSkipReason.StateVersionMismatch);
+        }
+
+        if (state.Seasons == null ||
+            !state.Seasons.TryGetValue(input.SeasonKey, out var season) ||
+            season == null)
+        {
+            return Reject(path, RefreshSkipReason.SeasonMissing);
+        }
+
+        var inputDecision = ValidateSeasonInputs(path, season, input, RefreshStateMode.PerVoice);
+        if (inputDecision.HasValue)
+        {
+            return inputDecision.Value;
+        }
+
+        if (string.IsNullOrWhiteSpace(season.KodikCatalogSignature))
+        {
+            return Reject(path, RefreshSkipReason.CatalogSignatureMissing);
+        }
+
+        if (!string.Equals(season.KodikCatalogSignature, kodikCatalogSignature, StringComparison.Ordinal))
+        {
+            return Reject(path, RefreshSkipReason.CatalogSignatureMismatch);
+        }
+
+        var validationDecision = ValidateDeepValidation(path, season, nowUtc);
+        if (validationDecision.HasValue)
+        {
+            return validationDecision.Value;
+        }
+
+        var maxExpectedEpisodeNumber = Math.Max(
+            input.ExpectedAvailableEpisodes,
+            season.CoveredEpisodes.DefaultIfEmpty().Max());
+        return await ValidateManagedFilesAndArtifactsAsync(
+                path,
+                seriesRoot,
+                input,
+                season,
+                maxExpectedEpisodeNumber,
+                cancellationToken)
+            .ConfigureAwait(false);
     }
 
     public static async Task<bool> WriteSeasonStateAsync(
         string seriesRoot,
         RefreshStateSeasonInput input,
         IReadOnlyDictionary<int, HashSet<string>> expectedEpisodeFileBaseNames,
+        CancellationToken cancellationToken)
+    {
+        return await WriteSeasonStateAsync(
+                seriesRoot,
+                input,
+                expectedEpisodeFileBaseNames,
+                mediaSegmentEntriesByFileBaseName: null,
+                kodikValidation: null,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    public static async Task<bool> WriteSeasonStateAsync(
+        string seriesRoot,
+        RefreshStateSeasonInput input,
+        IReadOnlyDictionary<int, HashSet<string>> expectedEpisodeFileBaseNames,
+        IReadOnlyDictionary<string, RefreshStateMediaSegmentEntry>? mediaSegmentEntriesByFileBaseName,
+        CancellationToken cancellationToken)
+    {
+        return await WriteSeasonStateAsync(
+                seriesRoot,
+                input,
+                expectedEpisodeFileBaseNames,
+                mediaSegmentEntriesByFileBaseName,
+                kodikValidation: null,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    public static async Task<bool> WriteSeasonStateAsync(
+        string seriesRoot,
+        RefreshStateSeasonInput input,
+        IReadOnlyDictionary<int, HashSet<string>> expectedEpisodeFileBaseNames,
+        IReadOnlyDictionary<string, RefreshStateMediaSegmentEntry>? mediaSegmentEntriesByFileBaseName,
+        RefreshStateKodikValidation? kodikValidation,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(input);
@@ -151,6 +468,9 @@ public static class RefreshStateManager
                 .OrderBy(ep => ep)
                 .ToArray(),
             ManagedFiles = managedFiles,
+            MediaSegments = BuildMediaSegmentEntries(expectedEpisodeFileBaseNames, mediaSegmentEntriesByFileBaseName),
+            KodikCatalogSignature = Normalize(kodikValidation?.CatalogSignature),
+            KodikDeepValidatedAtUtc = kodikValidation?.DeepValidatedAtUtc,
             UpdatedAtUtc = DateTimeOffset.UtcNow
         };
 
@@ -159,6 +479,59 @@ public static class RefreshStateManager
         var json = JsonSerializer.Serialize(state, JsonOptions);
         await WriteTextAtomicallyAsync(statePath, json + Environment.NewLine, cancellationToken).ConfigureAwait(false);
         return true;
+    }
+
+    public static async Task<RefreshStateMediaSegmentEntry?> TryReadMediaSegmentEntryForPathAsync(
+        string episodeFilePath,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(episodeFilePath))
+        {
+            return null;
+        }
+
+        try
+        {
+            var fullPath = Path.GetFullPath(episodeFilePath);
+            var seasonDir = Path.GetDirectoryName(fullPath);
+            if (string.IsNullOrWhiteSpace(seasonDir))
+            {
+                return null;
+            }
+
+            var seriesRoot = Path.GetDirectoryName(seasonDir);
+            if (string.IsNullOrWhiteSpace(seriesRoot))
+            {
+                return null;
+            }
+
+            var seasonKey = Path.GetFileName(seasonDir);
+            var fileBaseName = Path.GetFileNameWithoutExtension(fullPath);
+            if (string.IsNullOrWhiteSpace(seasonKey) || string.IsNullOrWhiteSpace(fileBaseName))
+            {
+                return null;
+            }
+
+            var state = await TryReadStateAsync(seriesRoot, cancellationToken).ConfigureAwait(false);
+            if (state == null ||
+                state.SchemaVersion != SchemaVersion ||
+                state.GenerationContractVersion != GenerationContractVersion ||
+                state.Seasons == null ||
+                !state.Seasons.TryGetValue(seasonKey, out var season) ||
+                season?.MediaSegments == null ||
+                season.MediaSegments.Length == 0)
+            {
+                return null;
+            }
+
+            return season.MediaSegments.FirstOrDefault(entry =>
+                string.Equals(entry.FileBaseName, fileBaseName, StringComparison.OrdinalIgnoreCase) &&
+                entry.Segments is { Length: > 0 });
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or ArgumentException)
+        {
+            return null;
+        }
     }
 
     private static async Task<RefreshStateFile?> TryReadStateAsync(
@@ -180,6 +553,154 @@ public static class RefreshStateManager
         {
             return null;
         }
+    }
+
+    private static async Task<StateReadDecision> ReadStateForDecisionAsync(
+        string seriesRoot,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var path = ResolveStatePath(seriesRoot);
+            if (!File.Exists(path))
+            {
+                return new StateReadDecision(null, RefreshSkipReason.StateMissing);
+            }
+
+            var json = await File.ReadAllTextAsync(path, cancellationToken).ConfigureAwait(false);
+            var state = JsonSerializer.Deserialize<RefreshStateFile>(json, JsonOptions);
+            return state == null
+                ? new StateReadDecision(null, RefreshSkipReason.StateUnreadable)
+                : new StateReadDecision(state, RefreshSkipReason.Matched);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
+        {
+            return new StateReadDecision(null, RefreshSkipReason.StateUnreadable);
+        }
+    }
+
+    private static RefreshSkipDecision? ValidateSeasonInputs(
+        RefreshSkipPath path,
+        RefreshStateSeason season,
+        RefreshStateSeasonInput input,
+        string expectedMode)
+    {
+        if (!string.Equals(season.Mode, expectedMode, StringComparison.Ordinal))
+        {
+            return Reject(path, RefreshSkipReason.ModeMismatch);
+        }
+
+        if (!string.Equals(season.Fingerprint, input.Fingerprint, StringComparison.Ordinal))
+        {
+            return Reject(path, RefreshSkipReason.FingerprintMismatch);
+        }
+
+        if (season.ExpectedAvailableEpisodes != input.ExpectedAvailableEpisodes)
+        {
+            return Reject(path, RefreshSkipReason.ExpectedEpisodeCountMismatch);
+        }
+
+        if (!CoversExpectedEpisodes(season.CoveredEpisodes, input.ExpectedAvailableEpisodes))
+        {
+            return Reject(path, RefreshSkipReason.CoverageIncomplete);
+        }
+
+        return null;
+    }
+
+    private static RefreshSkipDecision? ValidateDeepValidation(
+        RefreshSkipPath path,
+        RefreshStateSeason season,
+        DateTimeOffset nowUtc)
+    {
+        if (!season.KodikDeepValidatedAtUtc.HasValue)
+        {
+            return Reject(path, RefreshSkipReason.DeepValidationMissing);
+        }
+
+        if (season.KodikDeepValidatedAtUtc.Value > nowUtc)
+        {
+            return Reject(path, RefreshSkipReason.DeepValidationFromFuture);
+        }
+
+        if (nowUtc - season.KodikDeepValidatedAtUtc.Value >= PerVoiceDeepValidationInterval)
+        {
+            return Reject(path, RefreshSkipReason.DeepValidationExpired);
+        }
+
+        return null;
+    }
+
+    private static async Task<RefreshSkipDecision> ValidateManagedFilesAndArtifactsAsync(
+        RefreshSkipPath path,
+        string seriesRoot,
+        RefreshStateSeasonInput input,
+        RefreshStateSeason season,
+        int maxExpectedEpisodeNumber,
+        CancellationToken cancellationToken)
+    {
+        var managedFiles = await CheckManagedFilesAsync(seriesRoot, season.ManagedFiles, cancellationToken)
+            .ConfigureAwait(false);
+        if (!managedFiles.Matches)
+        {
+            return new RefreshSkipDecision(
+                path,
+                false,
+                managedFiles.Reason,
+                managedFiles.Expected,
+                managedFiles.Checked);
+        }
+
+        var expectedEpisodeFileBaseNames = BuildExpectedEpisodeFileBaseNames(input, season.ManagedFiles);
+        var unexpectedArtifacts = EpisodeArtifactMaintenance.FindUnexpectedEpisodeArtifacts(
+            Path.Combine(seriesRoot, input.SeasonKey),
+            input.SeasonNumber,
+            expectedEpisodeFileBaseNames,
+            maxExpectedEpisodeNumber);
+        if (unexpectedArtifacts.Count > 0)
+        {
+            return new RefreshSkipDecision(
+                path,
+                false,
+                RefreshSkipReason.UnexpectedArtifacts,
+                managedFiles.Expected,
+                managedFiles.Checked,
+                unexpectedArtifacts.Count);
+        }
+
+        return new RefreshSkipDecision(
+            path,
+            true,
+            RefreshSkipReason.Matched,
+            managedFiles.Expected,
+            managedFiles.Checked);
+    }
+
+    private static RefreshSkipDecision Reject(RefreshSkipPath path, RefreshSkipReason reason)
+    {
+        return new RefreshSkipDecision(path, false, reason);
+    }
+
+    private static RefreshStateMediaSegmentEntry[] BuildMediaSegmentEntries(
+        IReadOnlyDictionary<int, HashSet<string>> expectedEpisodeFileBaseNames,
+        IReadOnlyDictionary<string, RefreshStateMediaSegmentEntry>? mediaSegmentEntriesByFileBaseName)
+    {
+        if (mediaSegmentEntriesByFileBaseName == null || mediaSegmentEntriesByFileBaseName.Count == 0)
+        {
+            return Array.Empty<RefreshStateMediaSegmentEntry>();
+        }
+
+        var expectedFileBaseNames = expectedEpisodeFileBaseNames
+            .SelectMany(x => x.Value)
+            .Where(x => !string.IsNullOrWhiteSpace(x))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        return mediaSegmentEntriesByFileBaseName
+            .Where(x => expectedFileBaseNames.Contains(x.Key) && x.Value.Segments is { Length: > 0 })
+            .Select(x => x.Value)
+            .OrderBy(x => x.EpisodeNumber)
+            .ThenBy(x => x.FileBaseName, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
     }
 
     private static async Task<RefreshStateManagedFile[]?> BuildManagedFilesAsync(
@@ -228,16 +749,21 @@ public static class RefreshStateManager
         }
     }
 
-    private static async Task<bool> ManagedFilesMatchAsync(
+    private static async Task<ManagedFileCheckResult> CheckManagedFilesAsync(
         string seriesRoot,
         IReadOnlyList<RefreshStateManagedFile>? managedFiles,
         CancellationToken cancellationToken)
     {
         if (managedFiles == null || managedFiles.Count == 0)
         {
-            return false;
+            return new ManagedFileCheckResult(
+                false,
+                RefreshSkipReason.ManagedFilesMissingOrInvalid,
+                managedFiles?.Count ?? 0,
+                0);
         }
 
+        var checkedCount = 0;
         foreach (var file in managedFiles)
         {
             if (string.IsNullOrWhiteSpace(file.RelativePath) ||
@@ -245,18 +771,35 @@ public static class RefreshStateManager
                 !TryResolveManagedPath(seriesRoot, file.RelativePath, out var fullPath) ||
                 !File.Exists(fullPath))
             {
-                return false;
+                return new ManagedFileCheckResult(
+                    false,
+                    RefreshSkipReason.ManagedFilesMissingOrInvalid,
+                    managedFiles.Count,
+                    checkedCount);
             }
 
             var currentHash = await ComputeFileSha256HexAsync(fullPath, cancellationToken).ConfigureAwait(false);
+            checkedCount++;
             if (!string.Equals(currentHash, file.Sha256, StringComparison.OrdinalIgnoreCase))
             {
-                return false;
+                return new ManagedFileCheckResult(
+                    false,
+                    RefreshSkipReason.ManagedFileHashMismatch,
+                    managedFiles.Count,
+                    checkedCount);
             }
         }
 
-        return true;
+        return new ManagedFileCheckResult(true, RefreshSkipReason.Matched, managedFiles.Count, checkedCount);
     }
+
+    private readonly record struct StateReadDecision(RefreshStateFile? State, RefreshSkipReason Reason);
+
+    private readonly record struct ManagedFileCheckResult(
+        bool Matches,
+        RefreshSkipReason Reason,
+        int Expected,
+        int Checked);
 
     private static Dictionary<int, HashSet<string>> BuildExpectedEpisodeFileBaseNames(
         RefreshStateSeasonInput input,
@@ -480,6 +1023,9 @@ public static class RefreshStateManager
         public int ExpectedAvailableEpisodes { get; set; }
         public int[] CoveredEpisodes { get; set; } = Array.Empty<int>();
         public RefreshStateManagedFile[] ManagedFiles { get; set; } = Array.Empty<RefreshStateManagedFile>();
+        public RefreshStateMediaSegmentEntry[] MediaSegments { get; set; } = Array.Empty<RefreshStateMediaSegmentEntry>();
+        public string KodikCatalogSignature { get; set; } = string.Empty;
+        public DateTimeOffset? KodikDeepValidatedAtUtc { get; set; }
         public DateTimeOffset UpdatedAtUtc { get; set; }
     }
 
@@ -496,6 +1042,7 @@ public sealed class RefreshStateSeasonInput
     public int SeasonNumber { get; init; }
     public string CleanKey { get; init; } = string.Empty;
     public bool CreateStrmPerVoiceTranslation { get; init; }
+    public int PreferredQuality { get; init; }
     public string Fingerprint { get; init; } = string.Empty;
     public int ExpectedAvailableEpisodes { get; init; }
 }
@@ -504,8 +1051,9 @@ public sealed class RefreshStateFingerprintInput
 {
     public int GenerationContractVersion { get; init; } = RefreshStateManager.GenerationContractVersion;
     public string Mode { get; init; } = string.Empty;
-    public string ServerBaseUrl { get; init; } = string.Empty;
+    public string StreamGatewayBaseUrl { get; init; } = string.Empty;
     public string PreferredTranslationFilter { get; init; } = string.Empty;
+    public int PreferredQuality { get; init; }
     public string CleanKey { get; init; } = string.Empty;
     public string RawTitle { get; init; } = string.Empty;
     public string SeriesTitle { get; init; } = string.Empty;
@@ -531,4 +1079,46 @@ public sealed class RefreshStateManagedFile
     public string RelativePath { get; init; } = string.Empty;
     public string Sha256 { get; init; } = string.Empty;
     public string Kind { get; init; } = string.Empty;
+}
+
+public sealed class RefreshStateKodikCatalogInput
+{
+    public string IdType { get; init; } = string.Empty;
+    public string Id { get; init; } = string.Empty;
+    public int SeriesCount { get; init; }
+    public IReadOnlyList<RefreshStateKodikTranslationInput> Translations { get; init; } =
+        Array.Empty<RefreshStateKodikTranslationInput>();
+}
+
+public sealed class RefreshStateKodikTranslationInput
+{
+    public string Id { get; init; } = string.Empty;
+    public string Type { get; init; } = string.Empty;
+    public string Name { get; init; } = string.Empty;
+    public int MaxEpisode { get; init; }
+    public IReadOnlyList<int> AvailableEpisodes { get; init; } = Array.Empty<int>();
+}
+
+public sealed class RefreshStateKodikValidation
+{
+    public string CatalogSignature { get; init; } = string.Empty;
+    public DateTimeOffset DeepValidatedAtUtc { get; init; }
+}
+
+public sealed class RefreshStateMediaSegmentEntry
+{
+    public string FileBaseName { get; init; } = string.Empty;
+    public int EpisodeNumber { get; init; }
+    public string Provider { get; init; } = string.Empty;
+    public string VoiceName { get; init; } = string.Empty;
+    public string SourceProvider { get; init; } = string.Empty;
+    public string SourceVoiceName { get; init; } = string.Empty;
+    public RefreshStateMediaSegment[] Segments { get; init; } = Array.Empty<RefreshStateMediaSegment>();
+}
+
+public sealed class RefreshStateMediaSegment
+{
+    public string Type { get; init; } = string.Empty;
+    public long StartTicks { get; init; }
+    public long EndTicks { get; init; }
 }

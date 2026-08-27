@@ -1,6 +1,7 @@
 ﻿// File: Kodik/KodikClient.cs
 
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
@@ -41,19 +42,63 @@ namespace YummyKodik.Kodik
         private readonly string _token;
         private readonly ILogger? _logger;
         private readonly Func<bool> _isHttpLogEnabled;
+        private readonly Action<string, long>? _metricSink;
+        private readonly bool _enableRunCache;
+        private readonly CancellationToken _cacheCancellationToken;
+        private readonly ConcurrentDictionary<SearchCacheKey, Lazy<Task<List<KodikSearchResult>>>> _searchCache = new();
+        private readonly ConcurrentDictionary<string, Lazy<Task<string>>> _postPathCache =
+            new(StringComparer.OrdinalIgnoreCase);
         private int _cryptStep = UnknownCryptStep;
 
         public KodikClient(HttpClient httpClient, string token, ILogger? logger = null)
+            : this(httpClient, token, logger, CreateDefaultHttpLogSwitch(), null, false, CancellationToken.None)
+        {
+        }
+
+        public KodikClient(HttpClient httpClient, string token, ILogger? logger, Func<bool> isHttpLogEnabled)
+            : this(httpClient, token, logger, isHttpLogEnabled, null, false, CancellationToken.None)
+        {
+        }
+
+        internal KodikClient(
+            HttpClient httpClient,
+            string token,
+            Action<string, long> metricSink,
+            CancellationToken cacheCancellationToken = default,
+            ILogger? logger = null)
+            : this(
+                httpClient,
+                token,
+                logger,
+                CreateDefaultHttpLogSwitch(),
+                metricSink,
+                true,
+                cacheCancellationToken)
+        {
+        }
+
+        private KodikClient(
+            HttpClient httpClient,
+            string token,
+            ILogger? logger,
+            Func<bool> isHttpLogEnabled,
+            Action<string, long>? metricSink,
+            bool enableRunCache,
+            CancellationToken cacheCancellationToken)
         {
             _httpClient = httpClient ?? throw new ArgumentNullException(nameof(httpClient));
             _token = token ?? throw new ArgumentNullException(nameof(token));
+            _logger = logger;
+            _isHttpLogEnabled = isHttpLogEnabled ?? throw new ArgumentNullException(nameof(isHttpLogEnabled));
+            _metricSink = metricSink;
+            _enableRunCache = enableRunCache;
+            _cacheCancellationToken = cacheCancellationToken;
+        }
 
-            // Default to plugin logger so call sites do not need to pass it explicitly.
-            _logger = logger ?? Plugin.Instance?.Logger;
-
-            // Config-driven toggle for request/response logs.
+        private static Func<bool> CreateDefaultHttpLogSwitch()
+        {
             // Read dynamically so changes in plugin settings apply without restart.
-            _isHttpLogEnabled = () =>
+            return () =>
             {
                 try
                 {
@@ -64,14 +109,6 @@ namespace YummyKodik.Kodik
                     return false;
                 }
             };
-        }
-
-        public KodikClient(HttpClient httpClient, string token, ILogger? logger, Func<bool> isHttpLogEnabled)
-        {
-            _httpClient = httpClient ?? throw new ArgumentNullException(nameof(httpClient));
-            _token = token ?? throw new ArgumentNullException(nameof(token));
-            _logger = logger;
-            _isHttpLogEnabled = isHttpLogEnabled ?? throw new ArgumentNullException(nameof(isHttpLogEnabled));
         }
 
         /// <summary>
@@ -1458,15 +1495,28 @@ namespace YummyKodik.Kodik
         {
             var postPath = await GetPostLinkFromScriptsAsync(scriptUrls, cancellationToken).ConfigureAwait(false);
             var payload = BuildVideoLinksPayload(videoType, videoHash, videoId, urlParams);
-            var postUrl = KodikPlayerBaseUrl + postPath;
-            var jsonString = await PostVideoLinksAsync(postUrl, payload, cancellationToken).ConfigureAwait(false);
-            var (dataUrl, maxQuality) = ResolveVideoLinkData(jsonString);
-            var finalUrl = NormalizeVideoDataUrl(dataUrl);
+            try
+            {
+                var postUrl = KodikPlayerBaseUrl + postPath.Path;
+                var jsonString = await PostVideoLinksAsync(postUrl, payload, cancellationToken).ConfigureAwait(false);
+                var (dataUrl, maxQuality) = ResolveVideoLinkData(jsonString);
+                var finalUrl = NormalizeVideoDataUrl(dataUrl);
 
-            EnsureVideoLinkQuality(maxQuality, jsonString);
+                EnsureVideoLinkQuality(maxQuality, jsonString);
 
-            _logger?.LogDebug("Video link selected. maxQ={MaxQ} urlSnippet={Url}", maxQuality, Short(finalUrl, 250));
-            return (finalUrl, maxQuality);
+                _logger?.LogDebug("Video link selected. maxQ={MaxQ} urlSnippet={Url}", maxQuality, Short(finalUrl, 250));
+                return (finalUrl, maxQuality);
+            }
+            catch (Exception ex) when (ShouldInvalidatePostPath(ex, cancellationToken))
+            {
+                if (_postPathCache.TryRemove(
+                        new KeyValuePair<string, Lazy<Task<string>>>(postPath.ScriptUrl, postPath.Registration)))
+                {
+                    AddMetric("kodik.script.cache_evictions");
+                }
+
+                throw;
+            }
         }
 
         private static Dictionary<string, string> BuildVideoLinksPayload(
@@ -1631,24 +1681,86 @@ namespace YummyKodik.Kodik
             }
         }
 
-        private async Task<string> GetPostLinkFromScriptsAsync(IReadOnlyList<string> scriptUrls, CancellationToken cancellationToken)
+        private async Task<CachedPostPath> GetPostLinkFromScriptsAsync(
+            IReadOnlyList<string> scriptUrls,
+            CancellationToken cancellationToken)
         {
             Exception? last = null;
+            var failedCachedUrls = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var normalizedUrls = scriptUrls
+                .Where(raw => !string.IsNullOrWhiteSpace(raw))
+                .Select(EnsureAbsoluteKodikResourceUrl)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
 
-            foreach (var raw in scriptUrls)
+            // Prefer an already proven candidate even when it appears after an unrelated script tag.
+            foreach (var url in normalizedUrls)
             {
-                if (string.IsNullOrWhiteSpace(raw))
+                if (!_enableRunCache || !_postPathCache.TryGetValue(url, out var cached))
+                {
+                    continue;
+                }
+
+                AddMetric("kodik.script.cache_hits");
+                try
+                {
+                    var path = await cached.Value.WaitAsync(cancellationToken).ConfigureAwait(false);
+                    return new CachedPostPath(url, path, cached);
+                }
+                catch (Exception ex) when (!cancellationToken.IsCancellationRequested &&
+                                           ex is KodikException or HttpRequestException or TaskCanceledException)
+                {
+                    last = ex;
+                    failedCachedUrls.Add(url);
+                    if (_postPathCache.TryRemove(new KeyValuePair<string, Lazy<Task<string>>>(url, cached)))
+                    {
+                        AddMetric("kodik.script.cache_evictions");
+                    }
+                }
+            }
+
+            foreach (var url in normalizedUrls)
+            {
+                if (failedCachedUrls.Contains(url))
                 {
                     continue;
                 }
 
                 try
                 {
-                    return await GetPostLinkAsync(raw, cancellationToken).ConfigureAwait(false);
+                    if (!_enableRunCache)
+                    {
+                        var uncachedPath = await GetPostLinkAsync(url, cancellationToken).ConfigureAwait(false);
+                        return new CachedPostPath(
+                            url,
+                            uncachedPath,
+                            new Lazy<Task<string>>(() => Task.FromResult(uncachedPath)));
+                    }
+
+                    var candidate = new Lazy<Task<string>>(
+                        () => GetPostLinkAsync(url, _cacheCancellationToken),
+                        LazyThreadSafetyMode.ExecutionAndPublication);
+                    var registration = _postPathCache.GetOrAdd(url, candidate);
+                    AddMetric(
+                        ReferenceEquals(registration, candidate)
+                            ? "kodik.script.cache_misses"
+                            : "kodik.script.cache_hits");
+
+                    var path = await registration.Value.WaitAsync(cancellationToken).ConfigureAwait(false);
+                    return new CachedPostPath(url, path, registration);
                 }
-                catch (Exception ex) when (ex is KodikException or HttpRequestException or TaskCanceledException)
+                catch (Exception ex) when (!cancellationToken.IsCancellationRequested &&
+                                           ex is KodikException or HttpRequestException or TaskCanceledException)
                 {
                     last = ex;
+                    if (_enableRunCache && _postPathCache.TryGetValue(url, out var failed) &&
+                        failed.IsValueCreated && (failed.Value.IsFaulted || failed.Value.IsCanceled))
+                    {
+                        if (_postPathCache.TryRemove(new KeyValuePair<string, Lazy<Task<string>>>(url, failed)))
+                        {
+                            AddMetric("kodik.script.cache_evictions");
+                        }
+                    }
                 }
             }
 
@@ -2025,6 +2137,8 @@ namespace YummyKodik.Kodik
 
         private void LogHttpRequest(string method, string url, Dictionary<string, string>? form)
         {
+            AddMetric("kodik.http_requests");
+
             if (_logger == null || !_isHttpLogEnabled())
             {
                 return;
@@ -2054,6 +2168,11 @@ namespace YummyKodik.Kodik
                 method,
                 safeUrl,
                 Short(formDump, HttpLogFormMaxLen));
+        }
+
+        private void AddMetric(string key, long delta = 1)
+        {
+            _metricSink?.Invoke(key, delta);
         }
 
         private void LogHttpResponse(string method, string url, HttpResponseMessage response, string body)
@@ -2094,7 +2213,66 @@ namespace YummyKodik.Kodik
                 RegexTimeout);
         }
 
-        private async Task<List<KodikSearchResult>> SearchAsync(string id, KodikIdType idType, CancellationToken cancellationToken)
+        private async Task<List<KodikSearchResult>> SearchAsync(
+            string id,
+            KodikIdType idType,
+            CancellationToken cancellationToken)
+        {
+            if (!_enableRunCache)
+            {
+                return await FetchSearchAsync(id, idType, cancellationToken).ConfigureAwait(false);
+            }
+
+            var key = new SearchCacheKey(idType, id.Trim());
+            Lazy<Task<List<KodikSearchResult>>> registration;
+            if (_searchCache.TryGetValue(key, out var cached))
+            {
+                registration = cached;
+                AddMetric("kodik.search.cache_hits");
+            }
+            else
+            {
+                var candidate = new Lazy<Task<List<KodikSearchResult>>>(
+                    () => FetchSearchAsync(key.Id, key.IdType, _cacheCancellationToken),
+                    LazyThreadSafetyMode.ExecutionAndPublication);
+                registration = _searchCache.GetOrAdd(key, candidate);
+                AddMetric(
+                    ReferenceEquals(registration, candidate)
+                        ? "kodik.search.cache_misses"
+                        : "kodik.search.cache_hits");
+            }
+
+            try
+            {
+                return await registration.Value.WaitAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch
+            {
+                if (registration.IsValueCreated &&
+                    (registration.Value.IsFaulted || registration.Value.IsCanceled))
+                {
+                    if (_searchCache.TryRemove(
+                            new KeyValuePair<SearchCacheKey, Lazy<Task<List<KodikSearchResult>>>>(key, registration)))
+                    {
+                        AddMetric("kodik.search.cache_evictions");
+                    }
+                }
+
+                throw;
+            }
+        }
+
+        private static bool ShouldInvalidatePostPath(Exception ex, CancellationToken cancellationToken)
+        {
+            return !cancellationToken.IsCancellationRequested &&
+                   ex is not KodikTokenException &&
+                   ex is KodikException or HttpRequestException or TaskCanceledException or JsonException;
+        }
+
+        private async Task<List<KodikSearchResult>> FetchSearchAsync(
+            string id,
+            KodikIdType idType,
+            CancellationToken cancellationToken)
         {
             var payload = new Dictionary<string, string>(StringComparer.Ordinal)
             {
@@ -2348,6 +2526,13 @@ namespace YummyKodik.Kodik
             [JsonPropertyName("results")]
             public List<KodikSearchResult>? Results { get; set; }
         }
+
+        private readonly record struct SearchCacheKey(KodikIdType IdType, string Id);
+
+        private readonly record struct CachedPostPath(
+            string ScriptUrl,
+            string Path,
+            Lazy<Task<string>> Registration);
 
         private sealed class KodikSearchResult
         {
