@@ -1,7 +1,7 @@
 # AGENTS.md — YummyKodik
 
 ## Project context
-YummyKodik targets .NET 10 and Jellyfin 12. It generates a TV-show-like STRM/NFO library from YummyAnime metadata and streams episodes through Jellyfin using Alloha, CVH, and Kodik-backed providers. Release `1.2.1.0` targets Jellyfin 12; `1.2.0.0` remains available for Jellyfin 10.11.
+YummyKodik targets .NET 10 and Jellyfin 12. It generates a TV-show-like STRM/NFO library from YummyAnime metadata and streams episodes through Jellyfin using Alloha, CVH, and Kodik-backed providers. The default `main` branch and release `2.0.0.0` target Jellyfin 12. Branch `jellyfin-10.11` and release `1.2.1.0` carry the same improvements for Jellyfin 10.11.
 
 ## Project parameters
 - Repository root: `C:\Users\User\RiderProjects\YummyKodik`
