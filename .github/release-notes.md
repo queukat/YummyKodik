@@ -1,7 +1,7 @@
-- Выбранная озвучка сохраняется при переходе к следующей серии, в том числе при выборе через стандартный список версий Jellyfin.
-- При медленной загрузке плеер заранее накапливает запас видео и показывает ход буферизации.
-- Улучшено восстановление воспроизведения после временных сбоев загрузки.
-- Снижена лишняя нагрузка при обновлении библиотеки.
-- Исправлены ошибки с отображением сведений о сериях и вариантов озвучки.
+- Your selected voice track stays selected when moving to the next episode, including choices made through Jellyfin's standard version selector.
+- On slow connections, the player buffers video ahead of playback and shows buffering progress.
+- Improved playback recovery after temporary loading failures.
+- Reduced unnecessary load during library refreshes.
+- Fixed issues with episode information and available voice tracks.
 
-Для установки требуется Jellyfin 10.11.
+Requires Jellyfin 10.11.
