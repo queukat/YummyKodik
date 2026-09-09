@@ -118,5 +118,6 @@ Do not overwrite `AllohaApiToken.txt` or `meta.json` during local replacement. `
 - Tests cover state skip, stale extra artifacts, parallelism limit, thread-safe Shikimori cache, and run gate.
 
 ## Release notes
+- Keep public release notes and changelogs in English, consistent with the README and previous releases, regardless of the conversation language.
 - `.github/release-notes.md` is the single source for the Jellyfin changelog and GitHub release notes.
 - Write only user-visible changes in plain language. Omit implementation details, internal counters, test counts, benchmark reports and engineering disclaimers. State required Jellyfin compatibility.
