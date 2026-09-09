@@ -47,7 +47,8 @@ internal readonly record struct RefreshSkipDecision(
 public static class RefreshStateManager
 {
     public const int SchemaVersion = 1;
-    public const int GenerationContractVersion = 3;
+    // Regenerate legacy NFOs whose XML declaration did not match their UTF-8 bytes.
+    public const int GenerationContractVersion = 4;
     public const string StateFileName = ".yummykodik.refresh-state.json";
     public const int KodikKnownMaximumQuality = 720;
     public static readonly TimeSpan PerVoiceDeepValidationInterval = TimeSpan.FromHours(24);
@@ -479,6 +480,124 @@ public static class RefreshStateManager
         var json = JsonSerializer.Serialize(state, JsonOptions);
         await WriteTextAtomicallyAsync(statePath, json + Environment.NewLine, cancellationToken).ConfigureAwait(false);
         return true;
+    }
+
+    public static async Task<int> ReconcileManagedFileHashesAsync(
+        string outputRoot,
+        IReadOnlyCollection<string> changedPaths,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(changedPaths);
+
+        if (string.IsNullOrWhiteSpace(outputRoot) || changedPaths.Count == 0)
+        {
+            return 0;
+        }
+
+        var root = Path.GetFullPath(outputRoot);
+        var rootWithSeparator = root.EndsWith(Path.DirectorySeparatorChar)
+            ? root
+            : root + Path.DirectorySeparatorChar;
+        var changedPathsBySeriesRoot = new Dictionary<string, HashSet<string>>(
+            StringComparer.OrdinalIgnoreCase);
+
+        foreach (var changedPath in changedPaths)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (string.IsNullOrWhiteSpace(changedPath))
+            {
+                continue;
+            }
+
+            var fullPath = Path.GetFullPath(changedPath);
+            if (!fullPath.StartsWith(rootWithSeparator, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var seasonDirectory = Path.GetDirectoryName(fullPath);
+            var seriesRoot = string.IsNullOrWhiteSpace(seasonDirectory)
+                ? null
+                : Path.GetDirectoryName(seasonDirectory);
+            if (string.IsNullOrWhiteSpace(seriesRoot) ||
+                !seriesRoot.StartsWith(rootWithSeparator, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var relativePath = NormalizeRelativePath(Path.GetRelativePath(seriesRoot, fullPath));
+            if (!changedPathsBySeriesRoot.TryGetValue(seriesRoot, out var seriesPaths))
+            {
+                seriesPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                changedPathsBySeriesRoot[seriesRoot] = seriesPaths;
+            }
+
+            seriesPaths.Add(relativePath);
+        }
+
+        var updatedCount = 0;
+        foreach (var (seriesRoot, changedRelativePaths) in changedPathsBySeriesRoot)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var state = await TryReadStateAsync(seriesRoot, cancellationToken).ConfigureAwait(false);
+            if (state == null ||
+                state.SchemaVersion != SchemaVersion ||
+                state.GenerationContractVersion != GenerationContractVersion ||
+                state.Seasons == null)
+            {
+                continue;
+            }
+
+            var stateChanged = false;
+            foreach (var season in state.Seasons.Values)
+            {
+                if (season?.ManagedFiles == null)
+                {
+                    continue;
+                }
+
+                for (var index = 0; index < season.ManagedFiles.Length; index++)
+                {
+                    var managedFile = season.ManagedFiles[index];
+                    var relativePath = NormalizeRelativePath(managedFile.RelativePath);
+                    if (!changedRelativePaths.Contains(relativePath) ||
+                        !TryResolveManagedPath(seriesRoot, relativePath, out var fullPath) ||
+                        !File.Exists(fullPath))
+                    {
+                        continue;
+                    }
+
+                    var currentHash = await ComputeFileSha256HexAsync(fullPath, cancellationToken)
+                        .ConfigureAwait(false);
+                    if (string.Equals(currentHash, managedFile.Sha256, StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+
+                    season.ManagedFiles[index] = new RefreshStateManagedFile
+                    {
+                        RelativePath = relativePath,
+                        Sha256 = currentHash,
+                        Kind = managedFile.Kind
+                    };
+                    updatedCount++;
+                    stateChanged = true;
+                }
+            }
+
+            if (!stateChanged)
+            {
+                continue;
+            }
+
+            var statePath = ResolveStatePath(seriesRoot);
+            var json = JsonSerializer.Serialize(state, JsonOptions);
+            await WriteTextAtomicallyAsync(statePath, json + Environment.NewLine, cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        return updatedCount;
     }
 
     public static async Task<RefreshStateMediaSegmentEntry?> TryReadMediaSegmentEntryForPathAsync(

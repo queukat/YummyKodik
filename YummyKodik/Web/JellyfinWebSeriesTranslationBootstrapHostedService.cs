@@ -52,7 +52,7 @@ public sealed class JellyfinWebSeriesTranslationBootstrapHostedService : IHosted
             var indexPath = ResolveWebIndexPath();
             if (string.IsNullOrWhiteSpace(indexPath))
             {
-                _logger.LogDebug("[YummyKodik] Jellyfin Web index.html was not found. Translation widget bootstrap was skipped.");
+                _logger.LogDebug("[YummyKodik] Jellyfin Web index.html was not found. Web helper bootstrap was skipped.");
                 return;
             }
 
@@ -61,19 +61,21 @@ public sealed class JellyfinWebSeriesTranslationBootstrapHostedService : IHosted
             var buildId = typeof(Plugin).Assembly.ManifestModule.ModuleVersionId.ToString("N");
             var scriptVersion = Uri.EscapeDataString($"{version}-{buildId}");
             var scriptUrl = $"/web/ConfigurationPage?name=seriesTranslation.js&v={scriptVersion}";
+            var playbackBufferScriptUrl = $"/web/ConfigurationPage?name=playbackBuffer.js&v={scriptVersion}";
 
-            if (!JellyfinWebIndexPatcher.TryInjectSeriesTranslationScript(html, scriptUrl, out var patchedHtml))
+            if (!JellyfinWebIndexPatcher.TryInjectSeriesTranslationScript(
+                    html, scriptUrl, out var patchedHtml, playbackBufferScriptUrl))
             {
-                _logger.LogDebug("[YummyKodik] Jellyfin Web already includes the translation widget bootstrap.");
+                _logger.LogDebug("[YummyKodik] Jellyfin Web already includes the current web helper bootstrap.");
                 return;
             }
 
             File.WriteAllText(indexPath, patchedHtml, new UTF8Encoding(false));
-            _logger.LogInformation("[YummyKodik] Injected translation widget bootstrap into Jellyfin Web: {IndexPath}", indexPath);
+            _logger.LogInformation("[YummyKodik] Injected translation and playback buffering bootstrap into Jellyfin Web: {IndexPath}", indexPath);
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "[YummyKodik] Failed to inject translation widget bootstrap into Jellyfin Web.");
+            _logger.LogWarning(ex, "[YummyKodik] Failed to inject web helper bootstrap into Jellyfin Web.");
         }
     }
 }

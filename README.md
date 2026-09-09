@@ -10,8 +10,8 @@
 [![Release](https://img.shields.io/github/v/release/queukat/YummyKodik?display_name=tag)](https://github.com/queukat/YummyKodik/releases)
 [![Last Commit](https://img.shields.io/github/last-commit/queukat/YummyKodik)](https://github.com/queukat/YummyKodik/commits/main)
 [![Issues](https://img.shields.io/github/issues/queukat/YummyKodik)](https://github.com/queukat/YummyKodik/issues)
-![Jellyfin 10.11](https://img.shields.io/badge/Jellyfin-10.11-00A4DC)
-![.NET 9](https://img.shields.io/badge/.NET-9.0-512BD4)
+![Jellyfin 12](https://img.shields.io/badge/Jellyfin-12-00A4DC)
+![.NET 10](https://img.shields.io/badge/.NET-10.0-512BD4)
 ![Library STRM+NFO](https://img.shields.io/badge/Library-STRM%20%2B%20NFO-orange)
 ![Playback HLS](https://img.shields.io/badge/Playback-HLS-2ea44f)
 ![Segments Intro/Outro](https://img.shields.io/badge/Segments-Intro%20%2F%20Outro-blue)
@@ -72,7 +72,7 @@ If Jellyfin Web `index.html` is not writable or not found, the widget is skipped
 
 ## Requirements
 
-- Jellyfin `10.11.x`. The plugin is built against `10.11.0` for Docker/base-image compatibility.
+- Jellyfin `12`. For Jellyfin `10.11.x`, use plugin release `1.2.0.0`.
 - A writable folder visible to the Jellyfin server for generated `.strm` and `.nfo` files.
 - A Jellyfin library pointing at that generated folder, usually with content type `Shows`.
 - A Yummy public token from `https://site.yummyani.me/dev/applications`.
@@ -105,7 +105,7 @@ Download `YummyKodik_<version>.zip` from GitHub Releases and extract the files d
 Windows service or tray install:
 
 ```powershell
-$version = "1.2.0.0"
+$version = "1.2.1.0"
 $plugins = "$env:ProgramData\Jellyfin\Server\plugins"
 New-Item -ItemType Directory -Force "$plugins\YummyKodik_$version"
 Expand-Archive ".\YummyKodik_$version.zip" "$plugins\YummyKodik_$version" -Force
@@ -114,7 +114,7 @@ Expand-Archive ".\YummyKodik_$version.zip" "$plugins\YummyKodik_$version" -Force
 Windows portable install:
 
 ```powershell
-$version = "1.2.0.0"
+$version = "1.2.1.0"
 $plugins = "$env:LOCALAPPDATA\jellyfin\plugins"
 New-Item -ItemType Directory -Force "$plugins\YummyKodik_$version"
 Expand-Archive ".\YummyKodik_$version.zip" "$plugins\YummyKodik_$version" -Force
@@ -123,7 +123,7 @@ Expand-Archive ".\YummyKodik_$version.zip" "$plugins\YummyKodik_$version" -Force
 Docker install by copying an already extracted package:
 
 ```powershell
-$version = "1.2.0.0"
+$version = "1.2.1.0"
 docker exec jellyfin mkdir -p /config/plugins/YummyKodik_$version
 docker cp .\artifacts\package\. jellyfin:/config/plugins/YummyKodik_$version/
 docker restart jellyfin
@@ -132,7 +132,7 @@ docker restart jellyfin
 Docker install from a zip inside the container:
 
 ```bash
-version=1.2.0.0
+version=1.2.1.0
 mkdir -p "/config/plugins/YummyKodik_$version"
 unzip "YummyKodik_$version.zip" -d "/config/plugins/YummyKodik_$version"
 ```
@@ -251,13 +251,13 @@ dotnet run --project .\YummyKodik.Tests\YummyKodik.Tests.csproj -c Release
 Create a local release ZIP on Windows:
 
 ```powershell
-.\scripts\package.ps1 -Version 1.2.0.0
+.\scripts\package.ps1 -Version 1.2.1.0
 ```
 
 Create a local release ZIP on Linux/macOS:
 
 ```bash
-bash ./scripts/package.sh 1.2.0.0
+bash ./scripts/package.sh 1.2.1.0
 ```
 
 This produces:
@@ -272,15 +272,15 @@ The release workflow runs on version tags and publishes the ZIP, MD5 checksum, G
 Recommended tag format follows the existing release convention:
 
 ```bash
-git tag 1.2.0.0
-git push origin 1.2.0.0
+git tag 1.2.1.0
+git push origin 1.2.1.0
 ```
 
 Tags with a leading `v` also work because the workflow normalizes versions.
 
-## Docker Smoke Test
+## Previous Docker Smoke Test
 
-The package was smoke-tested against `jellyfin/jellyfin:10.11.0` with a single configured slug:
+Release `1.2.0.0` was smoke-tested against `jellyfin/jellyfin:10.11.0` with a single configured slug:
 
 ```text
 fermerskaya-zhizn-v-inom-mire-2

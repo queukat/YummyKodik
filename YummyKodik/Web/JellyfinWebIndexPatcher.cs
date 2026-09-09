@@ -8,7 +8,11 @@ public static class JellyfinWebIndexPatcher
     public const string StartMarker = "<!-- YummyKodik: seriesTranslation bootstrap start -->";
     public const string EndMarker = "<!-- YummyKodik: seriesTranslation bootstrap end -->";
 
-    public static bool TryInjectSeriesTranslationScript(string html, string scriptUrl, out string patchedHtml)
+    public static bool TryInjectSeriesTranslationScript(
+        string html,
+        string scriptUrl,
+        out string patchedHtml,
+        string? playbackBufferScriptUrl = null)
     {
         patchedHtml = html ?? string.Empty;
         if (string.IsNullOrWhiteSpace(html) || string.IsNullOrWhiteSpace(scriptUrl))
@@ -17,7 +21,7 @@ public static class JellyfinWebIndexPatcher
         }
 
         var newline = DetectNewline(html);
-        var snippet = BuildManagedSnippet(scriptUrl, newline);
+        var snippet = BuildManagedSnippet(scriptUrl, newline, playbackBufferScriptUrl);
 
         var startIndex = html.IndexOf(StartMarker, StringComparison.Ordinal);
         var endIndex = html.IndexOf(EndMarker, StringComparison.Ordinal);
@@ -50,13 +54,19 @@ public static class JellyfinWebIndexPatcher
         return true;
     }
 
-    public static string BuildManagedSnippet(string scriptUrl, string newline = "\n")
+    public static string BuildManagedSnippet(
+        string scriptUrl,
+        string newline = "\n",
+        string? playbackBufferScriptUrl = null)
     {
         var encodedUrl = WebUtility.HtmlEncode(scriptUrl);
+        var playbackScript = string.IsNullOrWhiteSpace(playbackBufferScriptUrl)
+            ? string.Empty
+            : $"<script defer=\"defer\" src=\"{WebUtility.HtmlEncode(playbackBufferScriptUrl)}\"></script>{newline}";
         return string.Join(
             newline,
             StartMarker,
-            $"<script defer=\"defer\" src=\"{encodedUrl}\"></script>",
+            $"{playbackScript}<script defer=\"defer\" src=\"{encodedUrl}\"></script>",
             EndMarker);
     }
 

@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using YummyKodik.Configuration;
@@ -289,6 +290,11 @@ internal sealed class RefreshStateService
         YummyRefreshInfo refresh)
     {
         var items = new List<string>();
+        if (cfg.CreateStrmPerVoiceTranslation)
+        {
+            items.AddRange(BuildYummyKodikAvailabilityFingerprintItems(refresh.TitleInfo.Anime));
+        }
+
         foreach (var episodeNumber in refresh.Availability.YummySupportedEpisodes
                      .Where(ep => ep > 0)
                      .Distinct()
@@ -329,6 +335,55 @@ internal sealed class RefreshStateService
         }
 
         return items;
+    }
+
+    internal static IReadOnlyList<string> BuildYummyKodikAvailabilityFingerprintItems(YummyAnimeResponse? anime)
+    {
+        if (anime?.Videos == null || anime.Videos.Count == 0)
+        {
+            return Array.Empty<string>();
+        }
+
+        var items = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var video in anime.Videos)
+        {
+            if (video?.Data?.PlayerId != (int)YummyVideoProviderKind.Kodik ||
+                !int.TryParse(video.Number, NumberStyles.Integer, CultureInfo.InvariantCulture, out var episodeNumber) ||
+                episodeNumber <= 0)
+            {
+                continue;
+            }
+
+            var rawDubbing = (video.Data.Dubbing ?? string.Empty).Trim();
+            var (translationType, translationName) = NormalizeYummyKodikTranslation(rawDubbing);
+            var translationKey = TranslationNameKeyNormalizer.Normalize(translationName);
+            if (translationKey.Length == 0)
+            {
+                continue;
+            }
+
+            items.Add($"ep:{episodeNumber}:yummy-kodik:{translationType}:{translationKey}");
+        }
+
+        return items.OrderBy(x => x, StringComparer.Ordinal).ToArray();
+    }
+
+    private static (string Type, string Name) NormalizeYummyKodikTranslation(string rawDubbing)
+    {
+        const string voicePrefix = "Озвучка ";
+        const string subtitlesPrefix = "Субтитры ";
+
+        if (rawDubbing.StartsWith(voicePrefix, StringComparison.OrdinalIgnoreCase))
+        {
+            return ("voice", rawDubbing.Substring(voicePrefix.Length).Trim());
+        }
+
+        if (rawDubbing.StartsWith(subtitlesPrefix, StringComparison.OrdinalIgnoreCase))
+        {
+            return ("subtitles", rawDubbing.Substring(subtitlesPrefix.Length).Trim());
+        }
+
+        return ("unknown", rawDubbing);
     }
 
     private static void AddProviderSourceFingerprintItems(

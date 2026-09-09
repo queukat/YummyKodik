@@ -44,40 +44,13 @@ NAME="YummyKodik"
 CATEGORY="General"
 DESCRIPTION="Creates Jellyfin anime series cards from YummyAnime and streams episodes from Alloha, CVH, and Kodik-backed sources."
 OVERVIEW="Builds a local STRM/NFO library from YummyAnime and plays episodes via Alloha, CVH, and Kodik-backed sources."
-TARGET_ABI="10.11.0.0"
+TARGET_ABI="12.0.0.0"
 
 SOURCE_URL="https://github.com/${OWNER}/${REPO}/releases/download/${TAG}/${ZIP}"
-if [[ -n "$CHANGELOG_FILE" ]]; then
-  CHANGELOG="$(cat "$CHANGELOG_FILE")"
-else
-  CHANGELOG="What changed:
-- Made library refresh faster while keeping external API pressure conservative. Refresh workers can process different titles in parallel, but the default limit remains 2.
-- Added a single-run gate so a second refresh exits quickly instead of doing duplicate work.
-- Added per-series filesystem locks so season folder migration, cleanup, STRM/NFO writes, and state writes are serialized for the same series root.
-- Split the refresh flow into smaller services for title loading, metadata writing, episode generation, Kodik supplementing, state checks, and cleanup.
-- Added refresh state files for safe single-file skips. State is multi-season, written atomically, and never stores raw provider tokens, cookies, bearer tokens, or secret-bearing URLs.
-- Added strict skip validation. The plugin now checks fingerprints, covered episodes, managed file hashes, missing files, and stale episode-shaped artifacts before skipping a title.
-- Kept per-voice mode conservative. It still runs full provider lookup so new voice translation files can appear even when episode counts do not change.
-- Made corrupt, missing, stale, or ambiguous refresh state fall back to a full refresh instead of failing or skipping too aggressively.
-- Improved stale artifact cleanup for generated episode STRM/NFO files, including zero-episode and future-episode cases.
-- Improved legacy season folder and episode filename migration under the series-root lock.
-- Fixed atomic text writes so existing read-only generated STRM/NFO files can be replaced during refresh.
-- Made Shikimori layout caching safe for concurrent refresh workers.
-- Made shared Kodik token and lookup paths safer under parallel refresh and runtime playback.
-- Delayed Kodik client initialization until a title actually needs Kodik supplement data.
-- Added refresh performance diagnostics for slow-stage and file-operation troubleshooting.
-- Added a configurable Minimum plugin log level. The default is Warning, so normal refresh and playback no longer spam Jellyfin with informational YummyKodik logs.
-- Fixed a logging startup regression by avoiding global ILogger replacement and filtering only YummyKodik loggers.
-- Improved Alloha/CVH/Kodik fallback handling, voice matching, playlist proxy recovery, and token refresh behavior used by runtime playback.
-- Added regression coverage for refresh state skips, stale artifacts, parallelism, run gate behavior, thread-safe Shikimori cache, atomic file replacement, and plugin log filtering.
-
-After updating:
-- Restart Jellyfin.
-- Verify Output root path and Jellyfin server base URL.
-- Leave Minimum plugin log level at Warning for quiet normal operation, or lower it to Information/Debug/Trace only while diagnosing an issue.
-- In Docker, use container paths such as /media/yummykodik.
-- Run Scheduled Tasks -> YummyKodik library refresh and scan the Jellyfin library."
+if [[ -z "$CHANGELOG_FILE" ]]; then
+  CHANGELOG_FILE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/.github/release-notes.md"
 fi
+CHANGELOG="$(cat "$CHANGELOG_FILE")"
 IMAGE_URL="https://raw.githubusercontent.com/${OWNER}/${REPO}/main/YummyKodik/Assets/logo.png"
 TS="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 

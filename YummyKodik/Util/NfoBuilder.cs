@@ -22,7 +22,8 @@ namespace YummyKodik.Util
             };
 
             var sb = new StringBuilder();
-            using (var writer = XmlWriter.Create(sb, settings))
+            using var textWriter = new Utf8StringWriter(sb);
+            using (var writer = XmlWriter.Create(textWriter, settings))
             {
                 writer.WriteStartDocument();
                 writer.WriteStartElement("tvshow");
@@ -52,7 +53,8 @@ namespace YummyKodik.Util
             };
 
             var sb = new StringBuilder();
-            using (var writer = XmlWriter.Create(sb, settings))
+            using var textWriter = new Utf8StringWriter(sb);
+            using (var writer = XmlWriter.Create(textWriter, settings))
             {
                 writer.WriteStartDocument();
                 writer.WriteStartElement("episodedetails");
@@ -144,7 +146,8 @@ namespace YummyKodik.Util
 
             var settings = CreateXmlWriterSettings();
             var sb = new StringBuilder();
-            using (var writer = XmlWriter.Create(sb, settings))
+            using var textWriter = new Utf8StringWriter(sb);
+            using (var writer = XmlWriter.Create(textWriter, settings))
             {
                 document.Save(writer);
             }
@@ -267,6 +270,12 @@ namespace YummyKodik.Util
                 Encoding = new UTF8Encoding(false),
                 Indent = true
             };
+        }
+
+        // The returned text is persisted as UTF-8; StringBuilder's default writer declares UTF-16.
+        private sealed class Utf8StringWriter(StringBuilder builder) : StringWriter(builder, CultureInfo.InvariantCulture)
+        {
+            public override Encoding Encoding => System.Text.Encoding.UTF8;
         }
     }
 }

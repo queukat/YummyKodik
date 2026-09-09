@@ -63,6 +63,11 @@ public sealed class YummyKodikMediaSegmentProvider : IMediaSegmentProvider
         return ValueTask.FromResult(supported);
     }
 
+    public Task CleanupExtractedData(Guid itemId, CancellationToken cancellationToken)
+    {
+        return Task.CompletedTask;
+    }
+
     public async Task<IReadOnlyList<MediaSegmentDto>> GetMediaSegments(
         MediaSegmentGenerationRequest request,
         CancellationToken cancellationToken)

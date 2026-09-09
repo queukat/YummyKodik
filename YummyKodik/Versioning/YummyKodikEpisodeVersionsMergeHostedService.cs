@@ -1,6 +1,7 @@
 ﻿// File: Versioning/YummyKodikEpisodeVersionsMergeHostedService.cs
 
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
@@ -11,6 +12,7 @@ using System.Threading.Tasks;
 using Jellyfin.Data.Enums;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.TV;
+using MediaBrowser.Controller.Dto;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.IO;
@@ -46,6 +48,7 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
     private readonly ILogger<YummyKodikEpisodeVersionsMergeHostedService> _logger;
 
     private readonly SemaphoreSlim _mergeLock = new(1, 1);
+    private readonly ConcurrentQueue<string> _prioritySeriesDirectories = new();
 
     private Timer? _mergeDebounceTimer;
     private Timer? _scanPollTimer;
@@ -112,8 +115,12 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
         return Task.CompletedTask;
     }
 
-    public void RequestTranslationPreferenceMerge()
+    public void RequestTranslationPreferenceMerge(string? seriesDirectory = null)
     {
+        if (!string.IsNullOrWhiteSpace(seriesDirectory))
+        {
+            _prioritySeriesDirectories.Enqueue(NormalizeDir(seriesDirectory));
+        }
         RequestMerge(TimeSpan.FromSeconds(1), "TranslationPreferenceChanged");
     }
 
@@ -350,9 +357,11 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
         }
     }
 
-    private async Task MergeAllEligibleEpisodesAsync(string reason)
+    private Task MergeAllEligibleEpisodesAsync(string reason)
+        => MergeAllEligibleEpisodesAsync(reason, Plugin.Instance.Configuration);
+
+    internal async Task MergeAllEligibleEpisodesAsync(string reason, PluginConfiguration cfg)
     {
-        var cfg = Plugin.Instance.Configuration;
         var root = (cfg.OutputRootPath ?? string.Empty).Trim();
 
         if (string.IsNullOrWhiteSpace(root))
@@ -374,6 +383,9 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
         var allEpisodes = _libraryManager.GetItemList(new InternalItemsQuery
         {
             IncludeItemTypes = new[] { BaseItemKind.Episode },
+            // Jellyfin 12 treats linked alternate versions as owned items and hides them by default.
+            IncludeOwnedItems = true,
+            GroupByPresentationUniqueKey = false,
             Recursive = true
         })
         .OfType<Episode>()
@@ -385,6 +397,7 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
 
         if (allEpisodes.Count == 0)
         {
+            _prioritySeriesDirectories.Clear();
             return;
         }
 
@@ -410,6 +423,7 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
 
         if (groups.Count == 0)
         {
+            _prioritySeriesDirectories.Clear();
             _logger.LogDebug("[YummyKodik] No duplicate episodes to merge. reason={Reason}", reason);
             return;
         }
@@ -423,10 +437,25 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
             reason,
             preferredTokens.Length);
 
-        var merged = 0;
+        var mergedGroups = new HashSet<EpisodeGroupKey>();
 
         foreach (var g in groups)
         {
+            // Keep the existing merge owner/lock, but apply an interactive choice
+            // before continuing the bulk pass. Include already visited groups:
+            // their preference may have changed while another title was saved.
+            while (_prioritySeriesDirectories.TryDequeue(out var priorityDirectory))
+            {
+                foreach (var priorityGroup in groups.Where(group => IsUnderRoot(priorityDirectory, group.Key.SeasonDir)))
+                {
+                    if (await MergeEpisodeGroupAsync(priorityGroup.Items.Cast<Video>().ToList(), cfg, preferredTokens,
+                            forceReload: true).ConfigureAwait(false))
+                    {
+                        mergedGroups.Add(priorityGroup.Key);
+                    }
+                }
+            }
+
             // Episode inherits Video, we work with Video API for versions.
             var videos = g.Items.OfType<Video>().ToList();
             if (videos.Count < 2)
@@ -437,18 +466,19 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
             var changed = await MergeEpisodeGroupAsync(videos, cfg, preferredTokens).ConfigureAwait(false);
             if (changed)
             {
-                merged++;
+                mergedGroups.Add(g.Key);
             }
         }
 
         _logger.LogInformation(
             "[YummyKodik] Auto-merge finished: mergedGroups={Merged}/{Total} reason={Reason}",
-            merged,
+            mergedGroups.Count,
             groups.Count,
             reason);
     }
 
-    private static async Task<bool> MergeEpisodeGroupAsync(List<Video> items, PluginConfiguration cfg, string[] preferredTokens)
+    private async Task<bool> MergeEpisodeGroupAsync(List<Video> items, PluginConfiguration cfg, string[] preferredTokens,
+        bool forceReload = false)
     {
         var list = BuildMergeCandidates(items);
         if (list.Count < 2)
@@ -462,23 +492,65 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
             return false;
         }
 
-        var desiredPrimaryId = primary.Id.ToString("N", CultureInfo.InvariantCulture);
+        var desiredPrimaryId = primary.Id;
         var desiredAlternates = BuildDesiredAlternates(list, primary.Id);
 
-        if (desiredAlternates.Count == 0)
+        // An explicit choice can revisit a group already changed earlier in this pass.
+        // Its old inventory cannot establish a no-op for that newer request.
+        if (!forceReload && IsEpisodeGroupAlreadyMerged(primary, list, desiredPrimaryId, desiredAlternates))
         {
             return false;
         }
 
-        if (IsEpisodeGroupAlreadyMerged(primary, list, desiredPrimaryId, desiredAlternates))
+        // The inventory may be minutes old. Re-read complete records from the repository,
+        // not GetItemById's cache, before persisting anything derived from that inventory.
+        var fresh = _libraryManager.GetItemList(new InternalItemsQuery
         {
+            ItemIds = list.Select(item => item.Id).ToArray(),
+            IncludeItemTypes = new[] { BaseItemKind.Episode },
+            IncludeOwnedItems = true,
+            GroupByPresentationUniqueKey = false,
+            DtoOptions = new DtoOptions(true)
+        }).OfType<Video>().ToList();
+        if (fresh.Count != list.Count || fresh.Any(item => !list.Any(previous =>
+                previous.Id == item.Id &&
+                string.Equals(previous.Path, item.Path, StringComparison.OrdinalIgnoreCase) &&
+                previous.IndexNumber == item.IndexNumber &&
+                (previous as Episode)?.IndexNumberEnd == (item as Episode)?.IndexNumberEnd &&
+                previous.ParentIndexNumber == item.ParentIndexNumber &&
+                item.IndexNumber.HasValue && item.ParentIndexNumber.HasValue &&
+                File.Exists(item.Path))))
+        {
+            // A scan moved, removed or has not finished indexing a member. Its completion
+            // owns the next merge; never write incomplete metadata back over that scan.
             return false;
         }
 
-        var childrenChanged = await UpdateChildVersionsAsync(list, primary.Id, desiredPrimaryId).ConfigureAwait(false);
-        var primaryChanged = await UpdatePrimaryVersionAsync(primary, desiredAlternates).ConfigureAwait(false);
+        primary = PickPrimaryByPreferredFilter(fresh, cfg, preferredTokens);
+        if (primary == null)
+        {
+            return false;
+        }
+        desiredAlternates = BuildDesiredAlternates(fresh, primary.Id);
+        var changed = fresh.Where(item => item.Id != primary.Id)
+            .Where(item => UpdateChildVersionLinks(item, primary.Id))
+            .Cast<BaseItem>().ToList();
+        if (UpdatePrimaryVersionLinks(primary, desiredAlternates))
+        {
+            changed.Add(primary);
+        }
 
-        return childrenChanged || primaryChanged;
+        foreach (var parentGroup in changed.GroupBy(item => item.ParentId))
+        {
+            var parent = parentGroup.Key == Guid.Empty ? null : _libraryManager.GetItemById(parentGroup.Key);
+            // Version links are not downloaded/edited title metadata. The Video wrapper
+            // recursively saves local alternates; the host batch API preserves persistence
+            // and ItemUpdated events without that cascade or a metadata-saver rewrite.
+            await _libraryManager.UpdateItemsAsync(parentGroup.ToArray(), parent!, ItemUpdateType.None,
+                CancellationToken.None).ConfigureAwait(false);
+        }
+
+        return changed.Count > 0;
     }
 
     private static List<Video> BuildMergeCandidates(IEnumerable<Video> items)
@@ -493,9 +565,14 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
     private static List<LinkedChild> BuildDesiredAlternates(List<Video> items, Guid primaryId)
     {
         var seenPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        // Jellyfin persists a child as local OR linked, preferring local when both are
+        // supplied. Requesting it again as linked would therefore never reach a no-op.
+        var localPaths = new HashSet<string>(
+            items.Single(item => item.Id == primaryId).LocalAlternateVersions,
+            StringComparer.OrdinalIgnoreCase);
         var desiredAlternates = new List<LinkedChild>(items.Count - 1);
 
-        foreach (var item in items.Where(v => v.Id != primaryId))
+        foreach (var item in items.Where(v => v.Id != primaryId && !localPaths.Contains(v.Path)))
         {
             AddDesiredAlternate(item, seenPaths, desiredAlternates);
         }
@@ -513,18 +590,19 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
 
         desiredAlternates.Add(new LinkedChild
         {
-            Path = path,
-            ItemId = item.Id
+            ItemId = item.Id,
+            Type = LinkedChildType.LinkedAlternateVersion
         });
     }
 
     private static bool IsEpisodeGroupAlreadyMerged(
         Video primary,
         IReadOnlyList<Video> items,
-        string desiredPrimaryId,
+        Guid desiredPrimaryId,
         IReadOnlyList<LinkedChild> desiredAlternates)
     {
-        return string.IsNullOrEmpty(primary.PrimaryVersionId)
+        return !primary.PrimaryVersionId.HasValue
+               && primary.OwnerId == Guid.Empty
                && LinkedChildrenSetEquals(primary.LinkedAlternateVersions, desiredAlternates)
                && AreChildVersionsAlreadyMerged(items, primary.Id, desiredPrimaryId);
     }
@@ -532,45 +610,24 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
     private static bool AreChildVersionsAlreadyMerged(
         IEnumerable<Video> items,
         Guid primaryId,
-        string desiredPrimaryId)
+        Guid desiredPrimaryId)
     {
         return items
             .Where(v => v.Id != primaryId)
             .All(v => IsChildVersionAlreadyMerged(v, desiredPrimaryId));
     }
 
-    private static bool IsChildVersionAlreadyMerged(Video child, string desiredPrimaryId)
+    private static bool IsChildVersionAlreadyMerged(Video child, Guid desiredPrimaryId)
     {
-        return string.Equals(child.PrimaryVersionId ?? string.Empty, desiredPrimaryId, StringComparison.OrdinalIgnoreCase)
+        return child.PrimaryVersionId == desiredPrimaryId
                && (child.LinkedAlternateVersions == null || child.LinkedAlternateVersions.Length == 0);
     }
 
-    private static async Task<bool> UpdateChildVersionsAsync(
-        IEnumerable<Video> items,
-        Guid primaryId,
-        string desiredPrimaryId)
-    {
-        var anyChanged = false;
-
-        foreach (var child in items.Where(v => v.Id != primaryId))
-        {
-            if (!UpdateChildVersionLinks(child, desiredPrimaryId))
-            {
-                continue;
-            }
-
-            await child.UpdateToRepositoryAsync(ItemUpdateType.MetadataEdit, CancellationToken.None).ConfigureAwait(false);
-            anyChanged = true;
-        }
-
-        return anyChanged;
-    }
-
-    private static bool UpdateChildVersionLinks(Video child, string desiredPrimaryId)
+    private static bool UpdateChildVersionLinks(Video child, Guid desiredPrimaryId)
     {
         var changed = false;
 
-        if (!string.Equals(child.PrimaryVersionId ?? string.Empty, desiredPrimaryId, StringComparison.OrdinalIgnoreCase))
+        if (child.PrimaryVersionId != desiredPrimaryId)
         {
             child.SetPrimaryVersionId(desiredPrimaryId);
             changed = true;
@@ -585,24 +642,21 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
         return changed;
     }
 
-    private static async Task<bool> UpdatePrimaryVersionAsync(Video primary, IReadOnlyList<LinkedChild> desiredAlternates)
-    {
-        if (!UpdatePrimaryVersionLinks(primary, desiredAlternates))
-        {
-            return false;
-        }
-
-        await primary.UpdateToRepositoryAsync(ItemUpdateType.MetadataEdit, CancellationToken.None).ConfigureAwait(false);
-        return true;
-    }
-
     private static bool UpdatePrimaryVersionLinks(Video primary, IReadOnlyList<LinkedChild> desiredAlternates)
     {
         var changed = false;
 
-        if (!string.IsNullOrEmpty(primary.PrimaryVersionId))
+        if (primary.PrimaryVersionId.HasValue)
         {
             primary.SetPrimaryVersionId(null);
+            changed = true;
+        }
+
+        // Jellyfin's scanner may have marked this alternate as owned. Clearing
+        // PrimaryVersionId alone leaves it hidden from normal episode queries.
+        if (primary.OwnerId != Guid.Empty)
+        {
+            primary.OwnerId = Guid.Empty;
             changed = true;
         }
 
@@ -718,7 +772,7 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
     private static Video? PickCurrentPrimary(IEnumerable<Video> ordered)
     {
         return ordered.FirstOrDefault(v =>
-            string.IsNullOrEmpty(v.PrimaryVersionId) &&
+            !v.PrimaryVersionId.HasValue &&
             v.LinkedAlternateVersions != null &&
             v.LinkedAlternateVersions.Length > 0);
     }
@@ -1002,15 +1056,18 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
 
         if (existing.Length != desired.Count)
         {
-            // We still compare as sets: quick exit on count mismatch is ok because both are unique-by-path in desired.
+            // We still compare as sets: quick exit on count mismatch is ok because desired ids are unique.
             // existing might contain duplicates, so set compare is needed.
         }
 
-        var a = new HashSet<string>(existing.Select(x => (x?.Path ?? string.Empty).Trim()), StringComparer.OrdinalIgnoreCase);
-        var b = new HashSet<string>(desired.Select(x => (x?.Path ?? string.Empty).Trim()), StringComparer.OrdinalIgnoreCase);
-
-        a.RemoveWhere(string.IsNullOrWhiteSpace);
-        b.RemoveWhere(string.IsNullOrWhiteSpace);
+        var a = existing
+            .Where(x => x?.ItemId.HasValue == true)
+            .Select(x => x!.ItemId!.Value)
+            .ToHashSet();
+        var b = desired
+            .Where(x => x?.ItemId.HasValue == true)
+            .Select(x => x!.ItemId!.Value)
+            .ToHashSet();
 
         return a.SetEquals(b);
     }

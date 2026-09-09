@@ -1,4 +1,4 @@
-﻿/* File: Web/seriesTranslation.js */
+/* File: Web/seriesTranslation.js */
 /* global ApiClient, Dashboard */
 
 (function () {
@@ -48,6 +48,65 @@
             ykRequest: Date.now().toString()
         });
         return requestJson(url);
+    }
+
+    // Widget and native version choices share one write queue: a slower catalog
+    // response must never overwrite a newer explicit choice.
+    let selectionSaveQueue = Promise.resolve();
+    function queueSelectionSave(operation) {
+        const result = selectionSaveQueue.then(operation);
+        selectionSaveQueue = result.catch(() => {});
+        return result;
+    }
+
+    function voiceKey(value) {
+        return String(value || "").normalize("NFKC").toLowerCase().replace(/[^\p{L}\p{N}]/gu, "");
+    }
+
+    async function saveNativeVersion(event) {
+        const select = event.target;
+        if (event.isTrusted === false || !isDetailsPage()
+            || !select || !select.matches("select.selectSource")
+            || !select.isConnected || !select.getClientRects().length) {
+            return;
+        }
+
+        const page = select.closest(".page");
+        if (page && (page.classList.contains("hide") || page.getAttribute("aria-hidden") === "true")) {
+            return;
+        }
+
+        // Capture the active item and option now; Jellyfin retains old details
+        // pages and can navigate away while the authenticated request is pending.
+        const seriesId = parseItemIdFromHash();
+        const option = select.selectedOptions[0];
+        const selectedVoice = option && voiceKey(option.textContent);
+        if (!seriesId || !select.value || !selectedVoice) return;
+
+        try {
+            const saved = await queueSelectionSave(async () => {
+                const data = await apiGetTranslations(seriesId);
+                if (!data.seriesKey || data.reason === "not-managed") return false;
+
+                const matches = normalizeTranslations(data.translations)
+                    .filter(item => voiceKey(item.label) === selectedVoice);
+                if (matches.length !== 1) return false;
+
+                await apiSetTranslation(seriesId, matches[0].id);
+                return true;
+            });
+            if (!saved) return;
+
+            if (isDetailsPage() && parseItemIdFromHash() === seriesId) {
+                const widget = document.getElementById(WIDGET_ID);
+                if (widget && widget._reload) await widget._reload();
+            }
+            // The selected version and widget already confirm the choice.
+            // Jellyfin 12 may turn a toast into a modal that interrupts Play.
+        } catch (e) {
+            console.error("[YummyKodik] native version preference failed:", e);
+            toast("Не удалось сохранить озвучку для следующих серий");
+        }
     }
 
     async function requestJson(url) {
@@ -154,7 +213,7 @@
         async function saveTranslation(translationId) {
             try {
                 setBusy(content, true);
-                await apiSetTranslation(model.seriesId, translationId);
+                await queueSelectionSave(() => apiSetTranslation(model.seriesId, translationId));
                 await reload();
                 toast(translationId ? "Озвучка сохранена" : "Автовыбор включён");
             } catch (e) {
@@ -365,6 +424,7 @@
 
     window.addEventListener("hashchange", scheduleInject);
     document.addEventListener("viewshow", scheduleInject);
+    document.addEventListener("change", saveNativeVersion, true);
     window.addEventListener("pageshow", scheduleInject);
 
     const observer = new MutationObserver(() => {

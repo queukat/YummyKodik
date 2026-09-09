@@ -16,7 +16,8 @@ internal static class EpisodeRuntimeBackfillService
     public static async Task<int> BackfillMissingAsync(
         string outputRoot,
         ILogger logger,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        ICollection<string>? updatedPaths = null)
     {
         ArgumentNullException.ThrowIfNull(logger);
 
@@ -115,6 +116,7 @@ internal static class EpisodeRuntimeBackfillService
                             artifactKind: "nfo.runtime",
                             cancellationToken)
                         .ConfigureAwait(false);
+                    updatedPaths?.Add(Path.GetFullPath(snapshot.Path));
                     updatedCount++;
                 }
                 catch (Exception ex) when (

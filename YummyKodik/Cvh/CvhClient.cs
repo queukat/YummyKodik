@@ -200,7 +200,8 @@ public sealed class CvhClient
         CvhPlaybackSession session,
         string resourceUrl,
         string proxyBaseUrl,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Func<string, ReadOnlyMemory<byte>, CancellationToken, Task>? writeContentAsync = null)
     {
         ArgumentNullException.ThrowIfNull(session);
 
@@ -212,33 +213,55 @@ public sealed class CvhClient
 
         using var request = CreateProxyResourceRequest(upstreamUrl, session.Source);
 
-        using var response = await SendWithCookiesAsync(request, session.Cookies, cancellationToken).ConfigureAwait(false);
-        var body = await response.Content.ReadAsByteArrayAsync(cancellationToken).ConfigureAwait(false);
+        using var response = await SendWithCookiesAsync(
+            request, session.Cookies, cancellationToken, HttpCompletionOption.ResponseHeadersRead).ConfigureAwait(false);
         var mediaType = response.Content.Headers.ContentType?.MediaType ?? string.Empty;
         if (!response.IsSuccessStatusCode)
         {
             throw new InvalidOperationException(
-                $"CVH proxy resource request failed. status={(int)response.StatusCode} url={upstreamUrl} body={TrimForLog(TryDecodeBody(body))}");
+                $"CVH proxy resource request failed. status={(int)response.StatusCode}");
         }
 
+        var contentType = string.IsNullOrWhiteSpace(mediaType) ? "application/octet-stream" : mediaType;
+        var contentForwarded = false;
+        async Task ForwardContentAsync(string type, ReadOnlyMemory<byte> bytes, CancellationToken ct)
+        {
+            contentForwarded = true;
+            await writeContentAsync!(type, bytes, ct).ConfigureAwait(false);
+        }
+
+        var body = await ProxyResponseBodyReader.ReadAsync(
+            response,
+            LooksLikeManifest(upstreamUrl, mediaType, []),
+            contentType,
+            maxRetainedBinaryBytes: 0,
+            cancellationToken,
+            writeContentAsync is null ? null : ForwardContentAsync).ConfigureAwait(false);
         session.ExpiresAtUtc = DateTime.UtcNow.Add(SessionTtl);
 
+        CvhProxyResource result;
         if (LooksLikeManifest(upstreamUrl, mediaType, body))
         {
             var manifestText = TryDecodeBody(body);
             var rewritten = RewriteManifestUrls(session, upstreamUrl, manifestText, proxyBaseUrl);
-            return new CvhProxyResource
+            result = new CvhProxyResource
             {
                 Content = Encoding.UTF8.GetBytes(rewritten),
                 ContentType = ResolveManifestContentType(mediaType)
             };
         }
 
-        return new CvhProxyResource
+        else
         {
-            Content = body,
-            ContentType = string.IsNullOrWhiteSpace(mediaType) ? "application/octet-stream" : mediaType
-        };
+            result = new CvhProxyResource { Content = body, ContentType = contentType };
+        }
+
+        if (writeContentAsync is not null && !contentForwarded)
+        {
+            await writeContentAsync(result.ContentType, result.Content, cancellationToken).ConfigureAwait(false);
+        }
+
+        return result;
     }
 
     public static string BuildManifestResponseBody(CvhPlaybackSession session, string proxyBaseUrl)
@@ -632,7 +655,8 @@ public sealed class CvhClient
     private async Task<HttpResponseMessage> SendWithCookiesAsync(
         HttpRequestMessage request,
         CvhCookieJar? cookies,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        HttpCompletionOption completionOption = HttpCompletionOption.ResponseContentRead)
     {
         ArgumentNullException.ThrowIfNull(request);
 
@@ -645,7 +669,7 @@ public sealed class CvhClient
             }
         }
 
-        var response = await _httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
+        var response = await _httpClient.SendAsync(request, completionOption, cancellationToken).ConfigureAwait(false);
         cookies?.Capture(response);
         return response;
     }
@@ -850,8 +874,8 @@ public sealed class CvhClient
             return true;
         }
 
-        var text = TryDecodeBody(body);
-        if (text.StartsWith("#EXTM3U", StringComparison.Ordinal))
+        var text = TryDecodeBody(body).TrimStart('\uFEFF', ' ', '\t', '\r', '\n');
+        if (text.StartsWith("#EXTM3U", StringComparison.OrdinalIgnoreCase))
         {
             return true;
         }

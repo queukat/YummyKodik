@@ -117,10 +117,17 @@ namespace YummyKodik.Tasks
 
                     using (runMetrics.Measure("phase.runtime_backfill.pre"))
                     {
+                        var updatedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                         var updated = await EpisodeRuntimeBackfillService
-                            .BackfillMissingAsync(root, _logger, cancellationToken)
+                            .BackfillMissingAsync(root, _logger, cancellationToken, updatedPaths)
                             .ConfigureAwait(false);
                         runMetrics.AddCount("runtime.backfill_updated", updated);
+                        var stateHashesUpdated = await ReconcileRuntimeBackfillStateAsync(
+                                root,
+                                updatedPaths,
+                                cancellationToken)
+                            .ConfigureAwait(false);
+                        runMetrics.AddCount("runtime.state_hashes_updated", stateHashesUpdated);
                     }
 
                     using (runMetrics.Measure("phase.runtime_publish.pre"))
@@ -174,10 +181,17 @@ namespace YummyKodik.Tasks
 
                     using (runMetrics.Measure("phase.runtime_backfill.post"))
                     {
+                        var updatedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                         var updated = await EpisodeRuntimeBackfillService
-                            .BackfillMissingAsync(root, _logger, cancellationToken)
+                            .BackfillMissingAsync(root, _logger, cancellationToken, updatedPaths)
                             .ConfigureAwait(false);
                         runMetrics.AddCount("runtime.backfill_updated", updated);
+                        var stateHashesUpdated = await ReconcileRuntimeBackfillStateAsync(
+                                root,
+                                updatedPaths,
+                                cancellationToken)
+                            .ConfigureAwait(false);
+                        runMetrics.AddCount("runtime.state_hashes_updated", stateHashesUpdated);
                     }
 
                     using (runMetrics.Measure("phase.readiness_merge"))
@@ -286,6 +300,33 @@ namespace YummyKodik.Tasks
                 _logger.LogWarning(
                     "[YummyKodik] Yummy user list is unavailable; added {Count} existing local title key(s) for provider-only fallback refresh.",
                     added);
+            }
+        }
+
+        private async Task<int> ReconcileRuntimeBackfillStateAsync(
+            string outputRoot,
+            IReadOnlyCollection<string> updatedPaths,
+            CancellationToken cancellationToken)
+        {
+            if (updatedPaths.Count == 0)
+            {
+                return 0;
+            }
+
+            try
+            {
+                return await RefreshStateManager
+                    .ReconcileManagedFileHashesAsync(outputRoot, updatedPaths, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception ex) when (
+                !cancellationToken.IsCancellationRequested &&
+                ex is IOException or UnauthorizedAccessException or ArgumentException)
+            {
+                _logger.LogWarning(
+                    ex,
+                    "[YummyKodik] Runtime NFO backfill succeeded, but its managed state hashes could not be reconciled. The next refresh will safely revalidate those titles.");
+                return 0;
             }
         }
 

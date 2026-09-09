@@ -4,10 +4,11 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 using Microsoft.Extensions.Logging;
+using YummyKodik.Util;
 
 namespace YummyKodik.Kodik;
 
-public sealed class KodikPlaybackService
+public sealed partial class KodikPlaybackService
 {
     private const int MaxCachedResourceBytes = 16 * 1024 * 1024;
     private const long MaxTotalCachedBytes = 192L * 1024 * 1024;
@@ -28,6 +29,7 @@ public sealed class KodikPlaybackService
 
     private static readonly TimeSpan SessionTtl = TimeSpan.FromHours(2);
     private static readonly TimeSpan ResourceCacheTtl = TimeSpan.FromMinutes(1);
+    private static readonly TimeSpan SegmentCacheTtl = TimeSpan.FromMinutes(3);
     private static readonly TimeSpan RegexTimeout = TimeSpan.FromSeconds(1);
     private static readonly ConcurrentDictionary<string, KodikPlaybackSession> SessionCache = new(StringComparer.Ordinal);
     private static readonly ConcurrentDictionary<string, CachedKodikProxyResource> ResourceCache = new(StringComparer.Ordinal);
@@ -125,7 +127,8 @@ public sealed class KodikPlaybackService
         string resourceId,
         string resourceUrl,
         string proxyBaseUrl,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Func<string, ReadOnlyMemory<byte>, CancellationToken, Task>? writeContentAsync = null)
     {
         ArgumentNullException.ThrowIfNull(session);
 
@@ -135,7 +138,19 @@ public sealed class KodikPlaybackService
             throw new InvalidOperationException("Kodik proxy resource url is empty.");
         }
 
-        var payload = await DownloadProxyResourcePayloadAsync(upstreamUrl, cancellationToken).ConfigureAwait(false);
+        var contentForwarded = false;
+        async Task ForwardContentAsync(string contentType, ReadOnlyMemory<byte> bytes, CancellationToken ct)
+        {
+            contentForwarded = true;
+            await writeContentAsync!(contentType, bytes, ct).ConfigureAwait(false);
+        }
+
+        var payload = await DownloadWithPrefetchAsync(
+            session,
+            resourceId,
+            upstreamUrl,
+            cancellationToken,
+            writeContentAsync is null ? null : ForwardContentAsync).ConfigureAwait(false);
         if (!payload.IsSuccessStatusCode)
         {
             throw new InvalidOperationException(
@@ -144,32 +159,54 @@ public sealed class KodikPlaybackService
 
         session.ExpiresAtUtc = DateTime.UtcNow.Add(SessionTtl);
 
+        KodikProxyResource result;
         if (LooksLikeManifest(upstreamUrl, payload.MediaType, payload.Body))
         {
             var manifestText = TryDecodeBody(payload.Body);
             var rewritten = RewriteManifestUrls(session, upstreamUrl, manifestText, proxyBaseUrl);
-            return new KodikProxyResource
+            QueuePrefetch(session);
+            result = new KodikProxyResource
             {
                 Content = Encoding.UTF8.GetBytes(rewritten),
                 ContentType = ResolveManifestContentType(payload.MediaType)
             };
         }
 
-        return new KodikProxyResource
+        else
         {
-            Content = payload.Body,
-            ContentType = ResolveBinaryContentType(upstreamUrl, payload.MediaType)
-        };
+            result = new KodikProxyResource
+            {
+                Content = payload.Body,
+                ContentType = ResolveBinaryContentType(upstreamUrl, payload.MediaType)
+            };
+        }
+
+        if (writeContentAsync is not null && !contentForwarded)
+        {
+            await writeContentAsync(result.ContentType, result.Content, cancellationToken).ConfigureAwait(false);
+        }
+
+        return result;
     }
 
     private async Task<CachedKodikProxyResource> DownloadProxyResourcePayloadAsync(
         string upstreamUrl,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Func<string, ReadOnlyMemory<byte>, CancellationToken, Task>? writeContentAsync,
+        bool requireCacheableLength = false)
     {
         if (TryGetCachedResource(upstreamUrl, out var cached))
         {
             _logger?.LogDebug("Kodik proxy cache hit. url={Url}", Short(upstreamUrl, 200));
             return cached;
+        }
+
+        var contentCommitted = false;
+        async Task ForwardContentAsync(string contentType, ReadOnlyMemory<byte> bytes, CancellationToken ct)
+        {
+            // A failed write may already have emitted bytes. Never replay a prefix into that response.
+            contentCommitted = true;
+            await writeContentAsync!(contentType, bytes, ct).ConfigureAwait(false);
         }
 
         for (var attempt = 1; attempt <= MaxProxyDownloadAttempts; attempt++)
@@ -180,16 +217,32 @@ public sealed class KodikPlaybackService
                 using var request = new HttpRequestMessage(HttpMethod.Get, upstreamUrl);
                 request.Headers.Accept.ParseAdd(ResolveAcceptHeader(upstreamUrl));
 
-                using var response = await _httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
-                var body = await response.Content.ReadAsByteArrayAsync(cancellationToken).ConfigureAwait(false);
+                using var response = await _httpClient.SendAsync(
+                    request, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
                 var mediaType = response.Content.Headers.ContentType?.MediaType ?? string.Empty;
+                if (response.IsSuccessStatusCode && requireCacheableLength &&
+                    (response.Content.Headers.ContentLength is not long length || length > MaxCachedResourceBytes))
+                {
+                    throw new PrefetchUnavailableException();
+                }
+                // Decide retries from headers; a slow error body must not consume the recovery window.
+                var body = response.IsSuccessStatusCode
+                    ? await ProxyResponseBodyReader.ReadAsync(
+                        response,
+                        LooksLikeManifest(upstreamUrl, mediaType, []),
+                        ResolveBinaryContentType(upstreamUrl, mediaType),
+                        MaxCachedResourceBytes,
+                        cancellationToken,
+                        writeContentAsync is null ? null : ForwardContentAsync).ConfigureAwait(false)
+                    : Array.Empty<byte>();
 
                 var downloaded = new CachedKodikProxyResource
                 {
                     StatusCode = response.StatusCode,
                     MediaType = mediaType,
                     Body = body,
-                    ExpiresAtUtc = DateTime.UtcNow.Add(ResourceCacheTtl),
+                    ExpiresAtUtc = DateTime.UtcNow.Add(
+                        LooksLikeManifest(upstreamUrl, mediaType, body) ? ResourceCacheTtl : SegmentCacheTtl),
                     LastAccessUtc = DateTime.UtcNow
                 };
 
@@ -214,7 +267,11 @@ public sealed class KodikPlaybackService
                     retryDelay.TotalMilliseconds,
                     Short(upstreamUrl, 200));
             }
-            catch (HttpRequestException ex) when (attempt < MaxProxyDownloadAttempts)
+            catch (Exception ex) when (
+                (ex is HttpRequestException or IOException) &&
+                !contentCommitted &&
+                !cancellationToken.IsCancellationRequested &&
+                attempt < MaxProxyDownloadAttempts)
             {
                 retryDelay = ResolveProxyTransportRetryDelay(attempt);
                 _logger?.LogDebug(
@@ -225,8 +282,9 @@ public sealed class KodikPlaybackService
                     retryDelay.TotalMilliseconds,
                     Short(upstreamUrl, 200));
             }
-            catch (TaskCanceledException ex) when (
+            catch (OperationCanceledException ex) when (
                 !cancellationToken.IsCancellationRequested &&
+                !contentCommitted &&
                 attempt < MaxProxyDownloadAttempts)
             {
                 retryDelay = ResolveProxyTransportRetryDelay(attempt);
@@ -376,6 +434,7 @@ public sealed class KodikPlaybackService
         }
 
         var lines = manifestText.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n');
+        RegisterPrefetchSegments(session, baseUri, lines);
         for (var i = 0; i < lines.Length; i++)
         {
             var line = lines[i];
@@ -495,7 +554,7 @@ public sealed class KodikPlaybackService
         }
 
         var text = TryDecodeBody(body);
-        return text.TrimStart().StartsWith("#EXTM3U", StringComparison.OrdinalIgnoreCase);
+        return text.TrimStart('\uFEFF', ' ', '\t', '\r', '\n').StartsWith("#EXTM3U", StringComparison.OrdinalIgnoreCase);
     }
 
     private static string ResolveManifestContentType(string mediaType)

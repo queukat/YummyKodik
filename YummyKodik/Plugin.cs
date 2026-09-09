@@ -1,4 +1,4 @@
-﻿// File: Plugin.cs
+// File: Plugin.cs
 
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -53,6 +53,12 @@ namespace YummyKodik
             {
                 Name = "seriesTranslation.js",
                 EmbeddedResourcePath = $"{GetType().Namespace}.Web.seriesTranslation.js"
+            };
+
+            yield return new PluginPageInfo
+            {
+                Name = "playbackBuffer.js",
+                EmbeddedResourcePath = $"{GetType().Namespace}.Web.playbackBuffer.js"
             };
         }
 

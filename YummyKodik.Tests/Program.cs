@@ -7,6 +7,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Xml.Linq;
 using Jellyfin.Database.Implementations.Enums;
+using MediaBrowser.Controller.Entities;
 using MediaBrowser.Model.Dto;
 using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.MediaSegments;
@@ -64,6 +65,18 @@ var tests = new (string Name, Action Run)[]
     ("KodikPlaybackService_UsesShortBackoffForTransportFailures", KodikPlaybackService_UsesShortBackoffForTransportFailures),
     ("KodikPlaybackService_RetriesTransientNotFoundSegments", KodikPlaybackService_RetriesTransientNotFoundSegments),
     ("KodikPlaybackService_BoundsPersistentTransientFailures", KodikPlaybackService_BoundsPersistentTransientFailures),
+    ("KodikStreaming_FirstChunkBeforeEofAndCompletedCache", KodikStreamingTests.FirstChunkBeforeEofAndCompletedCache),
+    ("KodikStreaming_PartialReadFailureDoesNotRetryOrCache", KodikStreamingTests.PartialReadFailureDoesNotRetryOrCache),
+    ("KodikStreaming_DownstreamWriteFailureDoesNotRetryOrCache", KodikStreamingTests.DownstreamWriteFailureDoesNotRetryOrCache),
+    ("KodikStreaming_CancellationDoesNotRetryOrCache", KodikStreamingTests.CancellationDoesNotRetryOrCache),
+    ("KodikStreaming_SniffedManifestIsFullyRewritten", KodikStreamingTests.SniffedManifestIsFullyRewritten),
+    ("KodikStreaming_OversizedResourceStreamsWithoutCaching", KodikStreamingTests.OversizedResourceStreamsWithoutCaching),
+    ("KodikStreaming_TruncatedContentLengthDoesNotCache", KodikStreamingTests.TruncatedContentLengthDoesNotCache),
+    ("KodikPrefetch_HasTwoBackgroundWorkers", KodikPrefetchTests.PrefetchHasTwoBackgroundWorkers),
+    ("KodikPrefetch_ForegroundJoinsWithoutDuplicateDownload", KodikPrefetchTests.ForegroundJoinsPrefetchWithoutDuplicateDownload),
+    ("KodikPrefetch_CanceledConsumerPreservesSharedDownload", KodikPrefetchTests.CanceledConsumerPreservesSharedDownload),
+    ("KodikPrefetch_SeekThenConsumerCancellationStopsObsoleteDownload", KodikPrefetchTests.SeekThenConsumerCancellationStopsObsoleteDownload),
+    ("KodikPrefetch_IneligibleRegisteredResourcesStreamDirectly", KodikPrefetchTests.IneligibleRegisteredResourcesStreamDirectly),
     ("KodikClient_GetAnimeInfoAsync_FallsBackToHtmlFindPlayerResponse", KodikClient_GetAnimeInfoAsync_FallsBackToHtmlFindPlayerResponse),
     ("KodikTokenResolver_DecodesOnlineModPayload", KodikTokenResolver_DecodesOnlineModPayload),
     ("KodikTitleResolver_NormalizesUnicodeWords", KodikTitleResolver_NormalizesUnicodeWords),
@@ -93,6 +106,7 @@ var tests = new (string Name, Action Run)[]
     ("NfoBuilder_BuildEpisodeNfo_WritesExactRuntime", NfoBuilder_BuildEpisodeNfo_WritesExactRuntime),
     ("NfoBuilder_EnsureEpisodeRuntime_BackfillsLegacyNfo", NfoBuilder_EnsureEpisodeRuntime_BackfillsLegacyNfo),
     ("EpisodeRuntimeBackfillService_BorrowsSiblingRuntime", EpisodeRuntimeBackfillService_BorrowsSiblingRuntime),
+    ("RefreshState_RuntimeBackfillReconcilesManagedNfoHash", RefreshState_RuntimeBackfillReconcilesManagedNfoHash),
     ("RewriteEpisodeFileSeasonPrefix_UsesSeasonZeroForSpecials", RewriteEpisodeFileSeasonPrefix_UsesSeasonZeroForSpecials),
     ("BuildSeriesFolderName_UsesProviderCompatibleShikimoriTag", BuildSeriesFolderName_UsesProviderCompatibleShikimoriTag),
     ("PrepareSeasonDirectory_MovesSeasonOneArtifactsOutOfMistakenSeasonTwoFolder", PrepareSeasonDirectory_MovesSeasonOneArtifactsOutOfMistakenSeasonTwoFolder),
@@ -111,6 +125,10 @@ var tests = new (string Name, Action Run)[]
     ("CvhClient_ThrowsMeaningfulErrorOnEmptyPlaylist", CvhClient_ThrowsMeaningfulErrorOnEmptyPlaylist),
     ("CvhClient_DownloadManifestAddsHeadersAndRewritesUrls", CvhClient_DownloadManifestAddsHeadersAndRewritesUrls),
     ("CvhClient_BuildManifestResponseBody_ProxiesNestedPlaylists", CvhClient_BuildManifestResponseBody_ProxiesNestedPlaylists),
+    ("CvhStreaming_FirstChunkArrivesBeforeEof", CvhStreamingTests.FirstChunkArrivesBeforeEof),
+    ("CvhStreaming_CookiesAndResourceHeadersArePreserved", CvhStreamingTests.CookiesAndResourceHeadersArePreserved),
+    ("CvhStreaming_SniffedManifestIsRewrittenBeforeWriting", CvhStreamingTests.SniffedManifestIsRewrittenBeforeWriting),
+    ("CvhStreaming_PartialFailureAndCancellationStopWrites", CvhStreamingTests.PartialFailureAndCancellationStopWrites),
     ("YummyVideoCatalog_ParsesAllohaProviders", YummyVideoCatalog_ParsesAllohaProviders),
     ("AllohaApiClient_ParsesSerialCatalogEntries", AllohaApiClient_ParsesSerialCatalogEntries),
     ("AllohaApiClient_ParsesEpisodesArrayCatalogEntries", AllohaApiClient_ParsesEpisodesArrayCatalogEntries),
@@ -151,6 +169,7 @@ var tests = new (string Name, Action Run)[]
     ("RefreshState_WritesAndReadsMediaSegmentsForEpisodeFile", RefreshState_WritesAndReadsMediaSegmentsForEpisodeFile),
     ("RefreshState_KodikCatalogSignatureIsOrderIndependent", RefreshState_KodikCatalogSignatureIsOrderIndependent),
     ("RefreshState_PerVoiceDeepSkipRequiresFreshMatchingCatalog", RefreshState_PerVoiceDeepSkipRequiresFreshMatchingCatalog),
+    ("RefreshState_NewYummyKodikVoiceInvalidatesPreLookupSkip", RefreshState_NewYummyKodikVoiceInvalidatesPreLookupSkip),
     ("RefreshState_PerVoiceDeepSkipRejectsDamagedOrUnexpectedFiles", RefreshState_PerVoiceDeepSkipRejectsDamagedOrUnexpectedFiles),
     ("RefreshState_SkipDecisionReportsReasonsAndFileCounts", RefreshState_SkipDecisionReportsReasonsAndFileCounts),
     ("ExistingLibraryFallbackRefreshInfoLoader_LoadsSnapshotFromRefreshState", ExistingLibraryFallbackRefreshInfoLoader_LoadsSnapshotFromRefreshState),
@@ -192,6 +211,16 @@ var tests = new (string Name, Action Run)[]
     ("KodikPlaybackSelector_ResolvesSavedVoiceNameToTranslationId", KodikPlaybackSelector_ResolvesSavedVoiceNameToTranslationId),
     ("EpisodeVersionsMerge_UsesSavedYummyVoicePreferenceForPrimary", EpisodeVersionsMerge_UsesSavedYummyVoicePreferenceForPrimary),
     ("EpisodeVersionsMerge_MatchesSavedKodikTranslationIdFromStrm", EpisodeVersionsMerge_MatchesSavedKodikTranslationIdFromStrm),
+    ("EpisodeVersionsMerge_ComparesJellyfin12LinksByItemId", EpisodeVersionsMerge_ComparesJellyfin12LinksByItemId),
+    ("EpisodeVersionsMerge_SavedVoiceReplacesAlreadyMergedPrimaryAcrossEpisodes", EpisodeVersionsMergeTests.SavedVoiceReplacesAlreadyMergedPrimaryAcrossEpisodes),
+    ("EpisodeVersionsMerge_PreferenceChangeRevisitsEarlierSeriesBeforeNextUnrelatedGroup", EpisodeVersionsMergeTests.PreferenceChangeRevisitsEarlierSeriesBeforeNextUnrelatedGroup),
+    ("EpisodeVersionsMerge_PrimaryWithStaleOwnerBecomesVisibleAndThenNoOp", EpisodeVersionsMergeTests.PrimaryWithStaleOwnerBecomesVisibleAndThenNoOp),
+    ("EpisodeVersionsMerge_LinkOnlyBatchUsesFreshMetadataAndDoesNotRecurse", EpisodeVersionsMergeTests.LinkOnlyBatchUsesFreshMetadataAndDoesNotRecurse),
+    ("EpisodeVersionsMerge_IncompleteConcurrentScanIsNotPersisted", EpisodeVersionsMergeTests.IncompleteConcurrentScanIsNotPersisted),
+    ("EpisodeVersionsMerge_NativeAlternatesAlreadyCoveringGroupAreNoOp", EpisodeVersionsMergeTests.NativeAlternatesAlreadyCoveringGroupAreNoOp),
+    ("NfoEncoding_SeriesNfoParsesFromUtf8Bytes", NfoEncodingTests.SeriesNfoParsesFromUtf8Bytes),
+    ("NfoEncoding_EpisodeNfoParsesFromUtf8Bytes", NfoEncodingTests.EpisodeNfoParsesFromUtf8Bytes),
+    ("NfoEncoding_RuntimeEnrichmentParsesFromUtf8BytesAndPreservesMetadata", NfoEncodingTests.RuntimeEnrichmentParsesFromUtf8BytesAndPreservesMetadata),
     ("PostRefreshMergeBarrier_MissingOrUnindexedEpisodeIsUnresolved", PostRefreshMergeBarrier_MissingOrUnindexedEpisodeIsUnresolved),
     ("PostRefreshMergeBarrier_NewEpisodeBeforeArtifactRefreshIsUnresolved", PostRefreshMergeBarrier_NewEpisodeBeforeArtifactRefreshIsUnresolved),
     ("PostRefreshMergeBarrier_LateRefreshedEpisodeIsReady", PostRefreshMergeBarrier_LateRefreshedEpisodeIsReady),
@@ -222,19 +251,27 @@ var tests = new (string Name, Action Run)[]
     ("JellyfinWebIndexPatcher_InsertsManagedBootstrapBeforeHeadClose", JellyfinWebIndexPatcher_InsertsManagedBootstrapBeforeHeadClose),
     ("JellyfinWebIndexPatcher_ReplacesExistingManagedBootstrap", JellyfinWebIndexPatcher_ReplacesExistingManagedBootstrap),
     ("JellyfinWebIndexPatcher_DoesNotDuplicateBootstrap", JellyfinWebIndexPatcher_DoesNotDuplicateBootstrap),
+    ("JellyfinWebIndexPatcher_UpgradesBothScriptsWithoutDuplicates", JellyfinWebIndexPatcher_UpgradesBothScriptsWithoutDuplicates),
     ("SeriesTranslationScript_AcceptsJellyfinPascalCaseTranslationOptions", SeriesTranslationScript_AcceptsJellyfinPascalCaseTranslationOptions)
 };
 
 var passed = 0;
+var selectedTests = args.Length == 2 && args[0] == "--filter"
+    ? tests.Where(test => test.Item1.Contains(args[1], StringComparison.OrdinalIgnoreCase)).ToArray()
+    : tests;
+if (selectedTests.Length == 0)
+{
+    throw new ArgumentException("No regression tests match the requested filter.");
+}
 
-foreach (var (name, run) in tests)
+foreach (var (name, run) in selectedTests)
 {
     run();
     Console.WriteLine($"PASS {name}");
     passed++;
 }
 
-Console.WriteLine($"Passed {passed}/{tests.Length} tests.");
+Console.WriteLine($"Passed {passed}/{selectedTests.Length} tests.");
 
 static async Task RunLiveAllohaProbe()
 {
@@ -933,12 +970,16 @@ static void EpisodeRuntimeBackfillService_BorrowsSiblingRuntime()
             otherEpisodePath,
             NfoBuilder.BuildEpisodeNfo(2, 1, "Test", "Plot"));
 
+        var updatedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var updated = EpisodeRuntimeBackfillService
-            .BackfillMissingAsync(tempRoot, NullLogger.Instance, CancellationToken.None)
+            .BackfillMissingAsync(tempRoot, NullLogger.Instance, CancellationToken.None, updatedPaths)
             .GetAwaiter()
             .GetResult();
 
         AssertEqual(1, updated, "Only the sibling version of the same episode should be backfilled.");
+        AssertTrue(
+            updatedPaths.SetEquals(new[] { Path.GetFullPath(missingPath) }),
+            "Runtime backfill should report only the NFO path it actually rewrote.");
         var enrichedXml = File.ReadAllText(missingPath);
         AssertTrue(
             NfoBuilder.TryGetExactEpisodeRuntimeSeconds(enrichedXml, out var durationSeconds),
@@ -960,6 +1001,78 @@ static void EpisodeRuntimeBackfillService_BorrowsSiblingRuntime()
         {
             Directory.Delete(tempRoot, recursive: true);
         }
+    }
+}
+
+static void RefreshState_RuntimeBackfillReconcilesManagedNfoHash()
+{
+    var tempRoot = Path.Combine(Path.GetTempPath(), "YummyKodikTests", Guid.NewGuid().ToString("N"));
+    var seriesRoot = Path.Combine(tempRoot, "Series");
+    var seasonDir = Path.Combine(seriesRoot, "Season 01");
+    const string knownBaseName = "S01E01 - Known";
+    const string missingBaseName = "S01E01 - Missing";
+    var missingNfoPath = Path.Combine(seasonDir, missingBaseName + ".nfo");
+
+    try
+    {
+        Directory.CreateDirectory(seasonDir);
+        File.WriteAllText(Path.Combine(seriesRoot, "tvshow.nfo"), NfoBuilder.BuildSeriesNfo("Test", "Plot"));
+        File.WriteAllText(Path.Combine(seasonDir, knownBaseName + ".strm"), "https://jellyfin.test/known");
+        File.WriteAllText(Path.Combine(seasonDir, missingBaseName + ".strm"), "https://jellyfin.test/missing");
+        File.WriteAllText(
+            Path.Combine(seasonDir, knownBaseName + ".nfo"),
+            NfoBuilder.BuildEpisodeNfo(1, 1, "Test", "Plot", durationSeconds: 1425));
+        File.WriteAllText(missingNfoPath, NfoBuilder.BuildEpisodeNfo(1, 1, "Test", "Plot"));
+
+        var input = BuildRefreshStateSeasonInput();
+        var expectedFiles = new Dictionary<int, HashSet<string>>
+        {
+            [1] = new(StringComparer.OrdinalIgnoreCase)
+            {
+                knownBaseName,
+                missingBaseName
+            }
+        };
+        var written = RefreshStateManager.WriteSeasonStateAsync(
+                seriesRoot,
+                input,
+                expectedFiles,
+                CancellationToken.None)
+            .GetAwaiter()
+            .GetResult();
+        AssertTrue(written, "The fixture state should be written before runtime backfill.");
+        AssertTrue(
+            RefreshStateManager.CanSkipSingleFileRefreshAsync(seriesRoot, input, CancellationToken.None)
+                .GetAwaiter()
+                .GetResult(),
+            "The fixture should initially match its managed hashes.");
+
+        var updatedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var updated = EpisodeRuntimeBackfillService
+            .BackfillMissingAsync(tempRoot, NullLogger.Instance, CancellationToken.None, updatedPaths)
+            .GetAwaiter()
+            .GetResult();
+        AssertEqual(1, updated, "Runtime backfill should rewrite the missing sibling NFO.");
+        AssertFalse(
+            RefreshStateManager.CanSkipSingleFileRefreshAsync(seriesRoot, input, CancellationToken.None)
+                .GetAwaiter()
+                .GetResult(),
+            "A runtime rewrite must make the old managed hash stale before reconciliation.");
+
+        var reconciled = RefreshStateManager
+            .ReconcileManagedFileHashesAsync(tempRoot, updatedPaths, CancellationToken.None)
+            .GetAwaiter()
+            .GetResult();
+        AssertEqual(1, reconciled, "Only the NFO rewritten by runtime backfill should receive a new managed hash.");
+        AssertTrue(
+            RefreshStateManager.CanSkipSingleFileRefreshAsync(seriesRoot, input, CancellationToken.None)
+                .GetAwaiter()
+                .GetResult(),
+            "Reconciled runtime NFO hashes should preserve the safe refresh skip path.");
+    }
+    finally
+    {
+        TryDeleteDirectory(tempRoot);
     }
 }
 
@@ -4597,6 +4710,160 @@ static void RefreshState_PerVoiceDeepSkipRequiresFreshMatchingCatalog()
     }
 }
 
+static void RefreshState_NewYummyKodikVoiceInvalidatesPreLookupSkip()
+{
+    var tempRoot = Path.Combine(Path.GetTempPath(), "YummyKodikTests", Guid.NewGuid().ToString("N"));
+
+    try
+    {
+        static YummyAnimeResponse BuildAnime(bool includeDreamCast, string iframeMarker, int duration)
+        {
+            var videos = new List<YummyVideoItem>
+            {
+                new()
+                {
+                    Number = "9",
+                    IframeUrl = "https://kodik.test/animevost/" + iframeMarker,
+                    Duration = duration,
+                    Data = new YummyVideoData
+                    {
+                        PlayerId = (int)YummyVideoProviderKind.Kodik,
+                        Player = "Плеер Kodik",
+                        Dubbing = "Озвучка AnimeVost"
+                    }
+                }
+            };
+
+            if (includeDreamCast)
+            {
+                videos.Add(new YummyVideoItem
+                {
+                    Number = "9",
+                    IframeUrl = "https://kodik.test/dream-cast/" + iframeMarker,
+                    Duration = duration,
+                    Data = new YummyVideoData
+                    {
+                        PlayerId = (int)YummyVideoProviderKind.Kodik,
+                        Player = "Плеер Kodik",
+                        Dubbing = "Озвучка Dream Cast"
+                    }
+                });
+            }
+
+            return new YummyAnimeResponse
+            {
+                AnimeId = 11237,
+                AnimeUrl = "taynaya-bitva-za-prestol-silneyshego-printsa-duraleya",
+                Title = "Тайная битва за престол сильнейшего принца-дуралея",
+                Videos = videos
+            };
+        }
+
+        static YummyRefreshInfo BuildRefresh(YummyAnimeResponse anime)
+        {
+            return new YummyRefreshInfo(
+                new YummyAnimeTitleInfo(anime, anime.AnimeUrl, anime.Title, anime.Title, 1),
+                YummyVideoCatalog.Create(anime),
+                new SeriesFileInfo("series", "season", "http://127.0.0.1:8096"),
+                new EpisodeAvailabilityInfo(new[] { 9 }, 9, Array.Empty<int>(), Array.Empty<int>(), new[] { 9 }));
+        }
+
+        var cfg = new PluginConfiguration
+        {
+            CreateStrmPerVoiceTranslation = true,
+            PreferredQuality = 1080
+        };
+        var baselineCoverage = RefreshStateService.BuildProviderCoverageFingerprintItems(
+            cfg,
+            BuildRefresh(BuildAnime(includeDreamCast: false, iframeMarker: "before", duration: 1420)));
+        var metadataOnlyCoverage = RefreshStateService.BuildProviderCoverageFingerprintItems(
+            cfg,
+            BuildRefresh(BuildAnime(includeDreamCast: false, iframeMarker: "after", duration: 1500)));
+        var changedCoverage = RefreshStateService.BuildProviderCoverageFingerprintItems(
+            cfg,
+            BuildRefresh(BuildAnime(includeDreamCast: true, iframeMarker: "after", duration: 1427)));
+
+        AssertEqual(
+            string.Join("|", baselineCoverage),
+            string.Join("|", metadataOnlyCoverage),
+            "Kodik iframe and duration churn must not invalidate the availability fingerprint.");
+        AssertFalse(
+            baselineCoverage.Any(x => x.Contains("dreamcast", StringComparison.Ordinal)),
+            "The baseline fingerprint must reproduce the catalog before Dream Cast episode 9 appeared.");
+        AssertTrue(
+            changedCoverage.Any(x => string.Equals(x, "ep:9:yummy-kodik:voice:dreamcast", StringComparison.Ordinal)),
+            "A new Yummy-advertised Kodik voice must enter the semantic refresh fingerprint.");
+
+        var baselineFingerprint = RefreshStateManager.BuildFingerprint(BuildRefreshStateFingerprintInput(
+            mode: "per-voice",
+            preferredQuality: 1080,
+            expectedAvailableEpisodes: 9,
+            providerCoverage: baselineCoverage));
+        var changedFingerprint = RefreshStateManager.BuildFingerprint(BuildRefreshStateFingerprintInput(
+            mode: "per-voice",
+            preferredQuality: 1080,
+            expectedAvailableEpisodes: 9,
+            providerCoverage: changedCoverage));
+        AssertFalse(
+            string.Equals(baselineFingerprint, changedFingerprint, StringComparison.Ordinal),
+            "New Kodik-only episode/voice availability must change the refresh fingerprint.");
+
+        var fixture = CreateRefreshStateFixture(
+            tempRoot,
+            expectedAvailableEpisodes: 9,
+            createStrmPerVoiceTranslation: true,
+            fingerprint: baselineFingerprint);
+        var validatedAtUtc = new DateTimeOffset(2026, 9, 1, 18, 46, 46, TimeSpan.Zero);
+        AssertTrue(
+            RefreshStateManager.WriteSeasonStateAsync(
+                    fixture.SeriesRoot,
+                    fixture.Input,
+                    fixture.ExpectedEpisodeFileBaseNames,
+                    mediaSegmentEntriesByFileBaseName: null,
+                    new RefreshStateKodikValidation
+                    {
+                        CatalogSignature = "sha256:catalog-before-dream-cast-episode-9",
+                        DeepValidatedAtUtc = validatedAtUtc
+                    },
+                    CancellationToken.None)
+                .GetAwaiter()
+                .GetResult(),
+            "The pre-change per-voice state should be valid for the fast-path transition regression.");
+
+        var unchangedDecision = RefreshStateManager.EvaluatePerVoiceKodikLookupAsync(
+                fixture.SeriesRoot,
+                fixture.Input,
+                validatedAtUtc.AddMinutes(17),
+                CancellationToken.None)
+            .GetAwaiter()
+            .GetResult();
+        AssertTrue(unchangedDecision.ShouldSkip, "An unchanged 1080p title should retain the pre-Kodik fast path.");
+
+        var changedInput = BuildRefreshStateSeasonInput(
+            expectedAvailableEpisodes: 9,
+            createStrmPerVoiceTranslation: true,
+            preferredQuality: 1080,
+            fingerprint: changedFingerprint,
+            cleanKey: fixture.Input.CleanKey);
+        var changedDecision = RefreshStateManager.EvaluatePerVoiceKodikLookupAsync(
+                fixture.SeriesRoot,
+                changedInput,
+                validatedAtUtc.AddMinutes(17),
+                CancellationToken.None)
+            .GetAwaiter()
+            .GetResult();
+        AssertFalse(changedDecision.ShouldSkip, "A newly advertised Kodik-only voice must force a fresh Kodik lookup.");
+        AssertEqual(
+            RefreshSkipReason.FingerprintMismatch,
+            changedDecision.Reason,
+            "The fast path should reject the changed title before redundant managed-file hashing.");
+    }
+    finally
+    {
+        TryDeleteDirectory(tempRoot);
+    }
+}
+
 static void RefreshState_PerVoiceDeepSkipRejectsDamagedOrUnexpectedFiles()
 {
     var tempRoot = Path.Combine(Path.GetTempPath(), "YummyKodikTests", Guid.NewGuid().ToString("N"));
@@ -6066,6 +6333,35 @@ static void EpisodeVersionsMerge_MatchesSavedKodikTranslationIdFromStrm()
     }
 }
 
+static void EpisodeVersionsMerge_ComparesJellyfin12LinksByItemId()
+{
+    var serviceType = typeof(YummyKodik.Versioning.YummyKodikEpisodeVersionsMergeHostedService);
+    var firstId = Guid.NewGuid();
+    var secondId = Guid.NewGuid();
+    var existing = new[]
+    {
+        new LinkedChild { ItemId = firstId, Type = LinkedChildType.LinkedAlternateVersion },
+        new LinkedChild { ItemId = secondId, Type = LinkedChildType.LinkedAlternateVersion }
+    };
+    var reordered = new[]
+    {
+        new LinkedChild { ItemId = secondId, Type = LinkedChildType.LinkedAlternateVersion },
+        new LinkedChild { ItemId = firstId, Type = LinkedChildType.LinkedAlternateVersion }
+    };
+    var different = new[]
+    {
+        new LinkedChild { ItemId = firstId, Type = LinkedChildType.LinkedAlternateVersion },
+        new LinkedChild { ItemId = Guid.NewGuid(), Type = LinkedChildType.LinkedAlternateVersion }
+    };
+
+    AssertTrue(
+        InvokeStatic<bool>(serviceType, "LinkedChildrenSetEquals", existing, reordered),
+        "Jellyfin 12 linked children should compare by ItemId regardless of order.");
+    AssertFalse(
+        InvokeStatic<bool>(serviceType, "LinkedChildrenSetEquals", existing, different),
+        "Different Jellyfin 12 linked child ids must not compare as the same version set.");
+}
+
 static void PostRefreshMergeBarrier_MissingOrUnindexedEpisodeIsUnresolved()
 {
     var refreshStartedUtc = new DateTime(2026, 7, 24, 12, 0, 0, DateTimeKind.Utc);
@@ -7477,6 +7773,36 @@ static void JellyfinWebIndexPatcher_DoesNotDuplicateBootstrap()
 
     AssertFalse(changed, "Managed bootstrap should not be duplicated when it is already current.");
     AssertEqual(original, patchedHtml, "Unchanged bootstrap should leave index.html intact.");
+}
+
+static void JellyfinWebIndexPatcher_UpgradesBothScriptsWithoutDuplicates()
+{
+    const string translationUrl = "/web/ConfigurationPage?name=seriesTranslation.js&v=build-new";
+    const string playbackUrl = "/web/ConfigurationPage?name=playbackBuffer.js&v=build-new";
+    var original = "<html><head>\r\n"
+        + JellyfinWebIndexPatcher.BuildManagedSnippet(
+            "/web/ConfigurationPage?name=seriesTranslation.js&v=build-old", "\r\n")
+        + "\r\n</head><body></body></html>";
+
+    var upgraded = JellyfinWebIndexPatcher.TryInjectSeriesTranslationScript(
+        original, translationUrl, out var patched, playbackUrl);
+    AssertTrue(upgraded, "An installed single-script bootstrap must upgrade in place to both web helpers.");
+    AssertFalse(patched.Contains("build-old", StringComparison.Ordinal), "The previous build key must be removed during upgrade.");
+    AssertTrue(patched.Contains("name=playbackBuffer.js&amp;v=build-new", StringComparison.Ordinal), "Playback buffering must have the current escaped build cache key.");
+    AssertTrue(patched.Contains("name=seriesTranslation.js&amp;v=build-new", StringComparison.Ordinal), "The translation script must share the current build cache key.");
+    AssertEqual(2, patched.Split("<script defer=\"defer\"", StringSplitOptions.None).Length - 1, "Both web helpers must load using defer.");
+    AssertTrue(patched.IndexOf("name=playbackBuffer.js", StringComparison.Ordinal)
+        < patched.IndexOf("name=seriesTranslation.js", StringComparison.Ordinal), "The playback hook should install before the translation helper.");
+
+    var repeated = JellyfinWebIndexPatcher.TryInjectSeriesTranslationScript(
+        patched, translationUrl, out var unchanged, playbackUrl);
+    AssertFalse(repeated, "Applying the same two-script bootstrap must be idempotent.");
+    AssertEqual(patched, unchanged, "An unchanged bootstrap must retain the exact existing HTML.");
+    AssertEqual(1, unchanged.Split("name=playbackBuffer.js", StringSplitOptions.None).Length - 1, "The playback helper must occur exactly once.");
+    AssertEqual(1, unchanged.Split("name=seriesTranslation.js", StringSplitOptions.None).Length - 1, "The translation helper must occur exactly once.");
+
+    using var embeddedPlayback = typeof(NfoBuilder).Assembly.GetManifestResourceStream("YummyKodik.Web.playbackBuffer.js");
+    AssertTrue(embeddedPlayback is not null, "The playback helper referenced by the bootstrap must be embedded in the plugin.");
 }
 
 static void SeriesTranslationScript_AcceptsJellyfinPascalCaseTranslationOptions()

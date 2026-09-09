@@ -31,7 +31,7 @@ jobs:
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: "9.0.x"
+          dotnet-version: "10.0.x"
 
       - name: Compute version from tag
         id: ver
@@ -113,30 +113,7 @@ jobs:
         id: notes
         shell: bash
         run: |
-          cat > release-notes.md <<'MARKDOWN'
-          ## What changed
-
-          - Added a complete series voice selector that includes translations available through Jellyfin versions and all supported providers, including Kodik-only coverage.
-          - A selected voice now stays active across episodes: Jellyfin `Next` and autoplay advance in that voice wherever it is available. `Auto` restores normal automatic selection.
-          - Improved playback recovery for Alloha, CVH, and Kodik streams, including temporary provider failures, expired stream resources, stalls, and quality fallback.
-          - Added more accurate episode runtimes and earlier intro/outro skip availability when provider metadata is available.
-          - Made repeated library refreshes substantially faster when titles and generated files are unchanged, while still rechecking provider coverage when needed.
-          - Improved mixed-provider libraries where one provider has only part of a season or a translation is available from a different provider.
-          - Added an optional safe cleanup setting for plugin-managed releases removed from a successfully fetched Yummy user list. It is disabled by default.
-
-          ## Compatibility
-
-          - Requires Jellyfin 10.11.x and .NET 9, unchanged from the previous release.
-          - Existing plugin configuration remains compatible. The old Jellyfin server base URL value is retained for compatibility but is no longer used or shown; generated streams now use Jellyfin's local gateway automatically.
-          - Voice selection is series-wide because Jellyfin stores the primary episode version globally. Different users cannot keep independent simultaneous voice locks for the same series.
-
-          ## After updating
-
-          - Replace or install the plugin files, then restart Jellyfin.
-          - Run `Scheduled Tasks -> YummyKodik library refresh` once. The first refresh can take longer because generated metadata and refresh state are upgraded.
-          - Scan the Jellyfin library that points at the generated folder after that refresh.
-          - Use `Auto` in the series voice selector before making a one-off choice through Jellyfin's native version selector.
-          MARKDOWN
+          cp .github/release-notes.md release-notes.md
 
           {
             echo "body<<EOF"
@@ -191,7 +168,7 @@ jobs:
           OWNER="${{ github.repository_owner }}"
           DESCRIPTION="Creates Jellyfin anime series cards from YummyAnime and streams episodes from Alloha, CVH, and Kodik-backed sources."
           OVERVIEW="Builds a local STRM/NFO library from YummyAnime and plays episodes via Alloha, CVH, and Kodik-backed sources."
-          TARGET_ABI="10.11.0.0"
+          TARGET_ABI="12.0.0.0"
 
           SOURCE_URL="https://github.com/${{ github.repository }}/releases/download/${TAG}/${ZIP}"
           CHANGELOG="$(cat release-notes.md)"

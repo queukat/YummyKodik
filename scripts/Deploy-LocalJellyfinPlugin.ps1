@@ -5,8 +5,26 @@ $serviceName = 'Jellyfin'
 $projectRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..') -ErrorAction Stop).Path
 $stagingDirectory = (Resolve-Path -LiteralPath (
     Join-Path $projectRoot 'publish\YummyKodik_1.0.0.0') -ErrorAction Stop).Path
-$pluginDirectory = (Resolve-Path -LiteralPath (
-    'C:\ProgramData\Jellyfin\Server\plugins\YummyKodik_1.1.2.0') -ErrorAction Stop).Path
+$pluginsRoot = 'C:\ProgramData\Jellyfin\Server\plugins'
+$pluginDirectory = Get-ChildItem -LiteralPath $pluginsRoot -Directory -ErrorAction Stop |
+    Where-Object { $_.Name.StartsWith('YummyKodik_', [StringComparison]::OrdinalIgnoreCase) } |
+    ForEach-Object {
+        $parsedVersion = $null
+        if ([Version]::TryParse($_.Name.Substring('YummyKodik_'.Length), [ref]$parsedVersion)) {
+            [pscustomobject]@{
+                Directory = $_
+                Version = $parsedVersion
+            }
+        }
+    } |
+    Sort-Object Version -Descending |
+    Select-Object -First 1 -ExpandProperty Directory
+
+if ($null -eq $pluginDirectory) {
+    throw "No installed YummyKodik_<version> plugin directory found under $pluginsRoot"
+}
+
+$pluginDirectory = $pluginDirectory.FullName
 $runtimeNames = @(
     'YummyKodik.dll'
     'YummyKodik.deps.json'
@@ -33,7 +51,8 @@ if (-not $isAdministrator) {
         ) `
         -WindowStyle Hidden `
         -Wait `
-        -PassThru
+        -PassThru `
+        -ErrorAction Stop
 
     exit $elevatedProcess.ExitCode
 }

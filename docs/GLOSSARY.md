@@ -23,4 +23,4 @@
 - **Stale release cleanup**: opt-in deletion limited to plugin-managed releases absent from a successfully fetched complete Yummy user list; manual, unknown, changed, or unproven content is retained.
 - **Voice catalog**: canonical, normalized union of voices represented by managed episode versions and provider catalog data for a series.
 - **Primary version**: the Jellyfin episode item presented in the normal season sequence; linked alternates are other voices of the same episode.
-- **Voice-selection contract**: an explicit widget choice is mirrored across the series' provider keys, becomes the library-wide primary request, and overrides an arbitrary linked-child `voice`/`tr` at the gateway on every episode; `Auto` releases that lock for normal/native selection.
+- **Voice-selection contract**: an explicit widget or native Version-dropdown choice is mirrored across the series' provider keys and becomes the library-wide primary request for following episodes; `Auto` restores preference/filter fallback. An explicit stream URL still selects that request's voice without saving a new preference.

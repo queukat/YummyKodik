@@ -1,4 +1,4 @@
-﻿// File: Api/YummyKodikStreamController.cs
+// File: Api/YummyKodikStreamController.cs
 
 using System;
 using System.Collections.Generic;
@@ -240,7 +240,7 @@ namespace YummyKodik.Api
                 var cfg = Plugin.Instance.Configuration;
                 var request = await ResolveSeriesFromJellyfinAsync(seriesId, cancellationToken).ConfigureAwait(false);
                 var seriesKey = BuildSeriesKey(request);
-                var managedStreams = GetManagedSeriesStreams(seriesId, cfg);
+                var managedStreams = GetManagedSeriesStreams(seriesId, cfg, out _);
                 var managedPreferenceKeys = BuildManagedPreferenceKeys(request, managedStreams);
 
                 if (TryMapCatalogProvider(request.Provider, out var catalogProvider, out var providerId) &&
@@ -384,7 +384,7 @@ namespace YummyKodik.Api
                 var request = await ResolveSeriesFromJellyfinAsync(seriesId, cancellationToken).ConfigureAwait(false);
                 var seriesKey = BuildSeriesKey(request);
                 var tid = (tr ?? string.Empty).Trim();
-                var managedStreams = GetManagedSeriesStreams(seriesId, cfg);
+                var managedStreams = GetManagedSeriesStreams(seriesId, cfg, out var seriesDirectory);
                 var managedPreferenceKeys = BuildManagedPreferenceKeys(request, managedStreams);
                 var selectedVoiceName = ResolveVoiceNameForSelection(tid, managedStreams);
 
@@ -398,9 +398,12 @@ namespace YummyKodik.Api
                     if (changed)
                     {
                         Plugin.Instance.SaveConfiguration();
-                        _episodeVersionsMergeService.RequestTranslationPreferenceMerge();
                     }
                 }
+
+                // Reapply an explicit choice even if it was already stored: a
+                // startup/refresh merge may still be working through other titles.
+                _episodeVersionsMergeService.RequestTranslationPreferenceMerge(seriesDirectory);
 
                 return Ok(new
                 {
@@ -1470,16 +1473,41 @@ namespace YummyKodik.Api
 
             try
             {
-                var response = await cvh
-                    .DownloadProxyResourceAsync(session, resourceUrl, BuildCvhProxyBaseUrl(), cancellationToken)
+                SetNoStoreCacheHeader();
+                await cvh
+                    .DownloadProxyResourceAsync(
+                        session,
+                        resourceUrl,
+                        BuildCvhProxyBaseUrl(),
+                        cancellationToken,
+                        async (contentType, bytes, ct) =>
+                        {
+                            if (!Response.HasStarted)
+                            {
+                                Response.ContentType = contentType;
+                            }
+
+                            await Response.Body.WriteAsync(bytes, ct).ConfigureAwait(false);
+                            await Response.Body.FlushAsync(ct).ConfigureAwait(false);
+                        })
                     .ConfigureAwait(false);
 
-                SetNoStoreCacheHeader();
-                return File(response.Content, response.ContentType);
+                return new EmptyResult();
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                HttpContext.Abort();
+                return new EmptyResult();
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "CVH proxy failed. sessionId={SessionId} resource={Resource}", sessionKey, resourceKey);
+                if (Response.HasStarted)
+                {
+                    HttpContext.Abort();
+                    return new EmptyResult();
+                }
+
                 return StatusCode(502, "Upstream error");
             }
         }
@@ -1518,16 +1546,43 @@ namespace YummyKodik.Api
             try
             {
                 var kodikProxy = new KodikPlaybackService(_httpClientFactory.CreateClient(HttpClientNames.Kodik), _logger);
-                var response = await kodikProxy
-                    .DownloadProxyResourceAsync(session, resourceKey, resourceUrl, BuildKodikProxyBaseUrl(), cancellationToken)
+                SetNoStoreCacheHeader();
+                await kodikProxy
+                    .DownloadProxyResourceAsync(
+                        session,
+                        resourceKey,
+                        resourceUrl,
+                        BuildKodikProxyBaseUrl(),
+                        cancellationToken,
+                        async (contentType, bytes, ct) =>
+                        {
+                            if (!Response.HasStarted)
+                            {
+                                Response.ContentType = contentType;
+                            }
+
+                            await Response.Body.WriteAsync(bytes, ct).ConfigureAwait(false);
+                            await Response.Body.FlushAsync(ct).ConfigureAwait(false);
+                        })
                     .ConfigureAwait(false);
 
-                SetNoStoreCacheHeader();
-                return File(response.Content, response.ContentType);
+                return new EmptyResult();
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                // A stopped player has already abandoned this response; do not turn it into an upstream error.
+                HttpContext.Abort();
+                return new EmptyResult();
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Kodik proxy failed. sessionId={SessionId} resource={Resource}", sessionKey, resourceKey);
+                if (Response.HasStarted)
+                {
+                    HttpContext.Abort();
+                    return new EmptyResult();
+                }
+
                 return StatusCode(502, "Upstream error");
             }
         }
@@ -1575,8 +1630,10 @@ namespace YummyKodik.Api
 
         private IReadOnlyList<ManagedSeriesStream> GetManagedSeriesStreams(
             string seriesId,
-            PluginConfiguration cfg)
+            PluginConfiguration cfg,
+            out string? seriesDirectory)
         {
+            seriesDirectory = null;
             if (!Guid.TryParse(seriesId, out var itemId) || itemId == Guid.Empty)
             {
                 return Array.Empty<ManagedSeriesStream>();
@@ -1588,13 +1645,14 @@ namespace YummyKodik.Api
             var seasonDirectory = string.IsNullOrWhiteSpace(representativePath)
                 ? null
                 : Path.GetDirectoryName(representativePath);
-            var seriesDirectory = string.IsNullOrWhiteSpace(seasonDirectory)
+            seriesDirectory = string.IsNullOrWhiteSpace(seasonDirectory)
                 ? null
                 : Directory.GetParent(seasonDirectory)?.FullName;
 
             if (string.IsNullOrWhiteSpace(seriesDirectory) ||
                 !IsPathWithinRoot(seriesDirectory, configuredRoot))
             {
+                seriesDirectory = null;
                 return Array.Empty<ManagedSeriesStream>();
             }
 
@@ -1602,6 +1660,8 @@ namespace YummyKodik.Api
             foreach (var episode in _libraryManager.GetItemList(new InternalItemsQuery
             {
                 IncludeItemTypes = new[] { BaseItemKind.Episode },
+                IncludeOwnedItems = true,
+                GroupByPresentationUniqueKey = false,
                 Recursive = true
             })
                      .OrderBy(x => x.IndexNumber ?? int.MaxValue)
