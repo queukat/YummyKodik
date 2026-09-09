@@ -2079,14 +2079,14 @@ static void KodikClient_RunScriptCacheSharesSuccessAndEvictsAfterPostFailure()
 
         if (request.Method == HttpMethod.Get && request.RequestUri!.AbsoluteUri == scriptUrl)
         {
-            scriptGets++;
+            Interlocked.Increment(ref scriptGets);
             await Task.Delay(40, cancellationToken).ConfigureAwait(false);
             return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(scriptBody) };
         }
 
         if (request.Method == HttpMethod.Post && request.RequestUri!.AbsoluteUri == "https://kodikplayer.com/ftor")
         {
-            videoPosts++;
+            Interlocked.Increment(ref videoPosts);
             return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(linksJson) };
         }
 
