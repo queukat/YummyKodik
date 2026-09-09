@@ -150,13 +150,10 @@ jobs:
 
           mkdir -p site
 
-          # Fetch previous manifest from gh-pages (if it exists) so we keep older versions.
-          OLD_URL="https://raw.githubusercontent.com/${{ github.repository }}/gh-pages/manifest.json"
-          if curl -fsSL "$OLD_URL" -o site/manifest.old.json; then
-            echo "Loaded existing manifest from gh-pages."
-          else
-            echo "[] " > site/manifest.old.json
-          fi
+          # Read the committed catalog directly; closely spaced releases must not
+          # overwrite one another through a stale public raw-content cache.
+          git fetch --no-tags origin gh-pages --depth=1
+          git show FETCH_HEAD:manifest.json > site/manifest.old.json
 
           jq \
             --arg guid "$GUID" \
