@@ -44,7 +44,7 @@ NAME="YummyKodik"
 CATEGORY="General"
 DESCRIPTION="Creates Jellyfin anime series cards from YummyAnime and streams episodes from Alloha, CVH, and Kodik-backed sources."
 OVERVIEW="Builds a local STRM/NFO library from YummyAnime and plays episodes via Alloha, CVH, and Kodik-backed sources."
-TARGET_ABI="12.0.0.0"
+TARGET_ABI="10.11.0.0"
 
 SOURCE_URL="https://github.com/${OWNER}/${REPO}/releases/download/${TAG}/${ZIP}"
 if [[ -z "$CHANGELOG_FILE" ]]; then

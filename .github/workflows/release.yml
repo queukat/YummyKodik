@@ -31,7 +31,7 @@ jobs:
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: "10.0.x"
+          dotnet-version: "9.0.x"
 
       - name: Compute version from tag
         id: ver
@@ -110,36 +110,10 @@ jobs:
           md5sum "artifacts/${ZIP}" | awk '{print $1}' > "artifacts/${ZIP}.md5"
 
       - name: Build release notes
-        id: notes
         shell: bash
         run: |
           cp .github/release-notes.md release-notes.md
-
-          {
-            echo "body<<EOF"
-            cat release-notes.md
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
-
-          {
-            cat release-notes.md
-            cat <<'MARKDOWN'
-
-          ## Install / update
-
-          Raw manifest (works without GitHub Pages):
-
-          ```text
-          https://raw.githubusercontent.com/${{ github.repository }}/gh-pages/manifest.json
-          ```
-
-          GitHub Pages manifest (optional, requires Pages to be enabled):
-
-          ```text
-          https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/manifest.json
-          ```
-          MARKDOWN
-          } > release-body.md
+          cp .github/release-notes.md release-body.md
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -168,7 +142,7 @@ jobs:
           OWNER="${{ github.repository_owner }}"
           DESCRIPTION="Creates Jellyfin anime series cards from YummyAnime and streams episodes from Alloha, CVH, and Kodik-backed sources."
           OVERVIEW="Builds a local STRM/NFO library from YummyAnime and plays episodes via Alloha, CVH, and Kodik-backed sources."
-          TARGET_ABI="12.0.0.0"
+          TARGET_ABI="10.11.0.0"
 
           SOURCE_URL="https://github.com/${{ github.repository }}/releases/download/${TAG}/${ZIP}"
           CHANGELOG="$(cat release-notes.md)"
@@ -176,13 +150,9 @@ jobs:
 
           mkdir -p site
 
-          # Fetch previous manifest from gh-pages (if it exists) so we keep older versions.
-          OLD_URL="https://raw.githubusercontent.com/${{ github.repository }}/gh-pages/manifest.json"
-          if curl -fsSL "$OLD_URL" -o site/manifest.old.json; then
-            echo "Loaded existing manifest from gh-pages."
-          else
-            echo "[] " > site/manifest.old.json
-          fi
+          # Read the latest committed catalog so consecutive releases preserve both compatibility lines.
+          git fetch --no-tags origin gh-pages --depth=1
+          git show FETCH_HEAD:manifest.json > site/manifest.old.json
 
           jq \
             --arg guid "$GUID" \

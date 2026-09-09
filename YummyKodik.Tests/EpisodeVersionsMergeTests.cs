@@ -15,7 +15,7 @@ internal static class EpisodeVersionsMergeTests
     public static void PreferenceChangeRevisitsEarlierSeriesBeforeNextUnrelatedGroup()
         => RunPriorityAsync().GetAwaiter().GetResult();
 
-    public static void PrimaryWithStaleOwnerBecomesVisibleAndThenNoOp()
+    public static void PrimaryWithStaleOwnerIsRepairedAndThenNoOp()
         => RunStaleOwnerAsync().GetAwaiter().GetResult();
 
     public static void LinkOnlyBatchUsesFreshMetadataAndDoesNotRecurse()
@@ -36,8 +36,8 @@ internal static class EpisodeVersionsMergeTests
             var primary = CreateEpisode(root, 5, "AniStar");
             var child = CreateEpisode(root, 5, "AnimeVost");
             primary.LocalAlternateVersions = new[] { child.Path };
-            // Jellyfin's mapper exposes this only as local, never in LinkedAlternateVersions.
-            child.SetPrimaryVersionId(primary.Id);
+            // A native local version already represents the same child without a linked duplicate.
+            child.SetPrimaryVersionId(primary.Id.ToString("N"));
             var library = DispatchProxy.Create<ILibraryManager, GroupedLibraryProxy>();
             var proxy = (GroupedLibraryProxy)(object)library;
             proxy.Episodes = new List<BaseItem> { primary, child };
@@ -52,7 +52,7 @@ internal static class EpisodeVersionsMergeTests
                 "An empty linked remainder must still allow primary ownership repair.");
             cfg.PreferredTranslationFilter = "AnimeVost";
             await service.MergeAllEligibleEpisodesAsync("VoiceChanged", cfg);
-            Require(!child.PrimaryVersionId.HasValue && primary.PrimaryVersionId == child.Id &&
+            Require(string.IsNullOrEmpty(child.PrimaryVersionId) && primary.PrimaryVersionId == child.Id.ToString("N") &&
                     child.LinkedAlternateVersions.Single().ItemId == primary.Id,
                 "Selecting a native alternate must still promote it and link the former primary.");
             var count = proxy.BatchCount;
@@ -137,17 +137,17 @@ internal static class EpisodeVersionsMergeTests
         {
             var oldPrimary = CreateEpisode(root, 5, "AnimeVost");
             var selected = CreateEpisode(root, 5, "AniStar");
-            oldPrimary.SetPrimaryVersionId(selected.Id);
+            oldPrimary.SetPrimaryVersionId(selected.Id.ToString("N"));
             selected.LinkedAlternateVersions = new[]
             {
-                new LinkedChild { ItemId = oldPrimary.Id, Type = LinkedChildType.LinkedAlternateVersion }
+                new LinkedChild { ItemId = oldPrimary.Id, Path = oldPrimary.Path, Type = LinkedChildType.Manual }
             };
             // This is the persisted failure: version links have already moved, but ownership has not.
             selected.OwnerId = oldPrimary.Id;
             var library = DispatchProxy.Create<ILibraryManager, GroupedLibraryProxy>();
             ((GroupedLibraryProxy)(object)library).Episodes = new List<BaseItem> { oldPrimary, selected };
-            Require(library.GetItemList(new InternalItemsQuery()).Count == 0,
-                "The ordinary episode query must reproduce both physical versions being hidden before repair.");
+            Require(library.GetItemList(new InternalItemsQuery()).Count == 2,
+                "Jellyfin 10.11 ungrouped queries must retain both physical versions despite stale ownership.");
 
             var cfg = new PluginConfiguration { OutputRootPath = root };
             cfg.SetUserSeriesPreferredTranslationId(Guid.Empty, "yummy:24253", "AniStar");
@@ -156,12 +156,12 @@ internal static class EpisodeVersionsMergeTests
             await service.MergeAllEligibleEpisodesAsync("Startup", cfg);
 
             var visible = library.GetItemList(new InternalItemsQuery());
-            Require(visible.Count == 1 && visible[0].Id == selected.Id,
-                "The repaired AniStar primary must be visible to ordinary episode and next-episode queries.");
-            Require(selected.OwnerId == Guid.Empty && !selected.PrimaryVersionId.HasValue,
+            Require(visible.Count == 2 && visible.Any(item => item.Id == selected.Id),
+                "The repaired AniStar primary must remain available to ungrouped queries.");
+            Require(selected.OwnerId == Guid.Empty && string.IsNullOrEmpty(selected.PrimaryVersionId),
                 "The selected primary must be independent of its former owner.");
             Require(selected.SaveCount == 1 && oldPrimary.SaveCount == 0 &&
-                oldPrimary.PrimaryVersionId == selected.Id &&
+                oldPrimary.PrimaryVersionId == selected.Id.ToString("N") &&
                 selected.LinkedAlternateVersions.Single().ItemId == oldPrimary.Id,
                 "Only the stale ownership must be persisted while the correct alternate links are preserved.");
 
@@ -196,10 +196,10 @@ internal static class EpisodeVersionsMergeTests
             {
                 var anime = CreateEpisode(directory, 5, "AnimeVost", 24253 + index);
                 var ani = CreateEpisode(directory, 5, "AniStar", 24253 + index);
-                anime.SetPrimaryVersionId(ani.Id);
+                anime.SetPrimaryVersionId(ani.Id.ToString("N"));
                 ani.LinkedAlternateVersions = new[]
                 {
-                    new LinkedChild { ItemId = anime.Id, Type = LinkedChildType.LinkedAlternateVersion }
+                    new LinkedChild { ItemId = anime.Id, Path = anime.Path, Type = LinkedChildType.Manual }
                 };
                 episodes.Add(anime);
                 episodes.Add(ani);
@@ -219,8 +219,8 @@ internal static class EpisodeVersionsMergeTests
             var reachedLater = false;
             trigger.OnSave = () =>
             {
-                Require(targetAni.PrimaryVersionId == targetAnime.Id &&
-                    !targetAnime.PrimaryVersionId.HasValue &&
+                Require(targetAni.PrimaryVersionId == targetAnime.Id.ToString("N") &&
+                    string.IsNullOrEmpty(targetAnime.PrimaryVersionId) &&
                     targetAnime.SaveCount == 1 && targetAni.SaveCount == 1,
                     "The target series must have completed its first merge before the new choice arrives.");
                 cfg.SetUserSeriesPreferredTranslationId(Guid.Empty, "yummy:24253", "AniStar");
@@ -230,7 +230,7 @@ internal static class EpisodeVersionsMergeTests
             later.OnSave = () =>
             {
                 Require(requested, "The explicit preference must arrive before the unrelated next group.");
-                Require(!targetAni.PrimaryVersionId.HasValue && targetAnime.PrimaryVersionId == targetAni.Id &&
+                Require(string.IsNullOrEmpty(targetAni.PrimaryVersionId) && targetAnime.PrimaryVersionId == targetAni.Id.ToString("N") &&
                     targetAnime.SaveCount == 2 && targetAni.SaveCount == 2,
                     "A newly selected voice must be persisted for the already visited series before the next unrelated group.");
                 reachedLater = true;
@@ -265,10 +265,10 @@ internal static class EpisodeVersionsMergeTests
             {
                 var oldPrimary = CreateEpisode(root, number, "AnimeVost");
                 var selected = CreateEpisode(root, number, "AniStar");
-                selected.SetPrimaryVersionId(oldPrimary.Id);
+                selected.SetPrimaryVersionId(oldPrimary.Id.ToString("N"));
                 oldPrimary.LinkedAlternateVersions = new[]
                 {
-                    new LinkedChild { ItemId = selected.Id, Type = LinkedChildType.LinkedAlternateVersion }
+                    new LinkedChild { ItemId = selected.Id, Path = selected.Path, Type = LinkedChildType.Manual }
                 };
                 episodes.Add(oldPrimary);
                 episodes.Add(selected);
@@ -287,9 +287,9 @@ internal static class EpisodeVersionsMergeTests
             {
                 var selected = group.Single(episode => episode.Name == "AniStar");
                 var oldPrimary = group.Single(episode => episode.Name == "AnimeVost");
-                Require(!selected.PrimaryVersionId.HasValue,
+                Require(string.IsNullOrEmpty(selected.PrimaryVersionId),
                     $"Saved AniStar must become primary for already merged E{group.Key}.");
-                Require(oldPrimary.PrimaryVersionId == selected.Id,
+                Require(oldPrimary.PrimaryVersionId == selected.Id.ToString("N"),
                     "The old primary must point to the selected version.");
                 Require(selected.LinkedAlternateVersions.Length == 1 &&
                     selected.LinkedAlternateVersions[0].ItemId == oldPrimary.Id &&
@@ -344,7 +344,7 @@ internal static class EpisodeVersionsMergeTests
         public Action? OnSave { get; set; }
 
         public override string CreatePresentationUniqueKey()
-            => (PrimaryVersionId ?? Id).ToString("N");
+            => PrimaryVersionId ?? Id.ToString("N");
 
         public override Task UpdateToRepositoryAsync(ItemUpdateType updateReason, CancellationToken cancellationToken)
             => throw new InvalidOperationException("Link edits must not invoke recursive Video metadata persistence.");
@@ -372,13 +372,8 @@ internal static class EpisodeVersionsMergeTests
                 {
                     BeforeReload?.Invoke();
                 }
-                // Jellyfin 12 ApplyAccessFiltering excludes linked versions and owned non-extra
-                // items unless IncludeOwnedItems is set, independently of presentation grouping.
-                IEnumerable<BaseItem> visible = query.IncludeOwnedItems
-                    ? Episodes
-                    : Episodes.Where(episode =>
-                        (episode is not Video video || !video.PrimaryVersionId.HasValue) &&
-                        (episode.OwnerId == Guid.Empty || episode.ExtraType.HasValue));
+                // Jellyfin 10.11 has no implicit primary/owner exclusion in item queries.
+                IEnumerable<BaseItem> visible = Episodes;
                 if (query.ItemIds.Length > 0)
                 {
                     visible = visible.Where(item => query.ItemIds.Contains(item.Id));

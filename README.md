@@ -6,17 +6,24 @@
 
 ![YummyKodik wordmark](YummyKodik/Assets/wordmark.png)
 
-[![CI](https://img.shields.io/github/actions/workflow/status/queukat/YummyKodik/ci.yml?branch=main&label=CI)](https://github.com/queukat/YummyKodik/actions/workflows/ci.yml)
+[![CI](https://img.shields.io/github/actions/workflow/status/queukat/YummyKodik/ci.yml?branch=jellyfin-10.11&label=CI)](https://github.com/queukat/YummyKodik/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/queukat/YummyKodik?display_name=tag)](https://github.com/queukat/YummyKodik/releases)
 [![Last Commit](https://img.shields.io/github/last-commit/queukat/YummyKodik)](https://github.com/queukat/YummyKodik/commits/main)
 [![Issues](https://img.shields.io/github/issues/queukat/YummyKodik)](https://github.com/queukat/YummyKodik/issues)
-![Jellyfin 12](https://img.shields.io/badge/Jellyfin-12-00A4DC)
-![.NET 10](https://img.shields.io/badge/.NET-10.0-512BD4)
+![Jellyfin 10.11](https://img.shields.io/badge/Jellyfin-10.11-00A4DC)
+![.NET 9](https://img.shields.io/badge/.NET-9.0-512BD4)
 ![Library STRM+NFO](https://img.shields.io/badge/Library-STRM%20%2B%20NFO-orange)
 ![Playback HLS](https://img.shields.io/badge/Playback-HLS-2ea44f)
 ![Segments Intro/Outro](https://img.shields.io/badge/Segments-Intro%20%2F%20Outro-blue)
 
 YummyKodik is a Jellyfin plugin that builds a local anime library from YummyAnime and streams episodes through Jellyfin from Alloha, CVH, and Kodik-backed sources.
+
+## Supported Jellyfin versions
+
+- `jellyfin-10.11` (this branch): YummyKodik `1.2.1.0` for Jellyfin 10.11 and .NET 9.
+- `main` (default branch): YummyKodik `2.0.0.0` for Jellyfin 12 and .NET 10.
+
+Both branches include the latest voice selection, playback buffering and library refresh improvements. Use the same plugin manifest; Jellyfin selects a compatible release.
 
 ## Quick Links
 

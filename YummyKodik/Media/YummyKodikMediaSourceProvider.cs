@@ -948,7 +948,7 @@ public sealed class YummyKodikMediaSourceProvider : IMediaSourceProvider
     private static bool IsMergedPrimaryVersion(BaseItem item)
     {
         return item is Video video &&
-               !video.PrimaryVersionId.HasValue &&
+               string.IsNullOrEmpty(video.PrimaryVersionId) &&
                video.LinkedAlternateVersions != null &&
                video.LinkedAlternateVersions.Length > 0;
     }

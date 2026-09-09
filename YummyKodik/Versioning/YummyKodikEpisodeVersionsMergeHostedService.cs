@@ -383,8 +383,7 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
         var allEpisodes = _libraryManager.GetItemList(new InternalItemsQuery
         {
             IncludeItemTypes = new[] { BaseItemKind.Episode },
-            // Jellyfin 12 treats linked alternate versions as owned items and hides them by default.
-            IncludeOwnedItems = true,
+            // Jellyfin 10.11 exposes alternate versions when presentation grouping is disabled.
             GroupByPresentationUniqueKey = false,
             Recursive = true
         })
@@ -508,7 +507,6 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
         {
             ItemIds = list.Select(item => item.Id).ToArray(),
             IncludeItemTypes = new[] { BaseItemKind.Episode },
-            IncludeOwnedItems = true,
             GroupByPresentationUniqueKey = false,
             DtoOptions = new DtoOptions(true)
         }).OfType<Video>().ToList();
@@ -565,8 +563,8 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
     private static List<LinkedChild> BuildDesiredAlternates(List<Video> items, Guid primaryId)
     {
         var seenPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        // Jellyfin persists a child as local OR linked, preferring local when both are
-        // supplied. Requesting it again as linked would therefore never reach a no-op.
+        // A native local version already exposes the child. Do not add the same
+        // physical version a second time through the linked version collection.
         var localPaths = new HashSet<string>(
             items.Single(item => item.Id == primaryId).LocalAlternateVersions,
             StringComparer.OrdinalIgnoreCase);
@@ -591,7 +589,8 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
         desiredAlternates.Add(new LinkedChild
         {
             ItemId = item.Id,
-            Type = LinkedChildType.LinkedAlternateVersion
+            Path = path,
+            Type = LinkedChildType.Manual
         });
     }
 
@@ -601,7 +600,7 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
         Guid desiredPrimaryId,
         IReadOnlyList<LinkedChild> desiredAlternates)
     {
-        return !primary.PrimaryVersionId.HasValue
+        return string.IsNullOrEmpty(primary.PrimaryVersionId)
                && primary.OwnerId == Guid.Empty
                && LinkedChildrenSetEquals(primary.LinkedAlternateVersions, desiredAlternates)
                && AreChildVersionsAlreadyMerged(items, primary.Id, desiredPrimaryId);
@@ -619,7 +618,7 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
 
     private static bool IsChildVersionAlreadyMerged(Video child, Guid desiredPrimaryId)
     {
-        return child.PrimaryVersionId == desiredPrimaryId
+        return child.PrimaryVersionId == desiredPrimaryId.ToString("N")
                && (child.LinkedAlternateVersions == null || child.LinkedAlternateVersions.Length == 0);
     }
 
@@ -627,9 +626,9 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
     {
         var changed = false;
 
-        if (child.PrimaryVersionId != desiredPrimaryId)
+        if (child.PrimaryVersionId != desiredPrimaryId.ToString("N"))
         {
-            child.SetPrimaryVersionId(desiredPrimaryId);
+            child.SetPrimaryVersionId(desiredPrimaryId.ToString("N"));
             changed = true;
         }
 
@@ -646,14 +645,13 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
     {
         var changed = false;
 
-        if (primary.PrimaryVersionId.HasValue)
+        if (!string.IsNullOrEmpty(primary.PrimaryVersionId))
         {
             primary.SetPrimaryVersionId(null);
             changed = true;
         }
 
-        // Jellyfin's scanner may have marked this alternate as owned. Clearing
-        // PrimaryVersionId alone leaves it hidden from normal episode queries.
+        // A promoted primary must be independent of its old scanner-assigned owner.
         if (primary.OwnerId != Guid.Empty)
         {
             primary.OwnerId = Guid.Empty;
@@ -772,7 +770,7 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
     private static Video? PickCurrentPrimary(IEnumerable<Video> ordered)
     {
         return ordered.FirstOrDefault(v =>
-            !v.PrimaryVersionId.HasValue &&
+            string.IsNullOrEmpty(v.PrimaryVersionId) &&
             v.LinkedAlternateVersions != null &&
             v.LinkedAlternateVersions.Length > 0);
     }
@@ -1054,20 +1052,16 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
     {
         existing ??= Array.Empty<LinkedChild>();
 
-        if (existing.Length != desired.Count)
-        {
-            // We still compare as sets: quick exit on count mismatch is ok because desired ids are unique.
-            // existing might contain duplicates, so set compare is needed.
-        }
-
+        // In Jellyfin 10.11 ItemId is a nullable resolution cache; Path is the
+        // persisted identity of file-backed linked versions.
         var a = existing
-            .Where(x => x?.ItemId.HasValue == true)
-            .Select(x => x!.ItemId!.Value)
-            .ToHashSet();
+            .Where(x => !string.IsNullOrWhiteSpace(x?.Path))
+            .Select(x => x.Path.Trim())
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
         var b = desired
-            .Where(x => x?.ItemId.HasValue == true)
-            .Select(x => x!.ItemId!.Value)
-            .ToHashSet();
+            .Where(x => !string.IsNullOrWhiteSpace(x?.Path))
+            .Select(x => x.Path.Trim())
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
         return a.SetEquals(b);
     }

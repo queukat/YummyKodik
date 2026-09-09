@@ -211,10 +211,10 @@ var tests = new (string Name, Action Run)[]
     ("KodikPlaybackSelector_ResolvesSavedVoiceNameToTranslationId", KodikPlaybackSelector_ResolvesSavedVoiceNameToTranslationId),
     ("EpisodeVersionsMerge_UsesSavedYummyVoicePreferenceForPrimary", EpisodeVersionsMerge_UsesSavedYummyVoicePreferenceForPrimary),
     ("EpisodeVersionsMerge_MatchesSavedKodikTranslationIdFromStrm", EpisodeVersionsMerge_MatchesSavedKodikTranslationIdFromStrm),
-    ("EpisodeVersionsMerge_ComparesJellyfin12LinksByItemId", EpisodeVersionsMerge_ComparesJellyfin12LinksByItemId),
+    ("EpisodeVersionsMerge_ComparesLinkedPathsRegardlessOfCachedItemId", EpisodeVersionsMerge_ComparesLinkedPathsRegardlessOfCachedItemId),
     ("EpisodeVersionsMerge_SavedVoiceReplacesAlreadyMergedPrimaryAcrossEpisodes", EpisodeVersionsMergeTests.SavedVoiceReplacesAlreadyMergedPrimaryAcrossEpisodes),
     ("EpisodeVersionsMerge_PreferenceChangeRevisitsEarlierSeriesBeforeNextUnrelatedGroup", EpisodeVersionsMergeTests.PreferenceChangeRevisitsEarlierSeriesBeforeNextUnrelatedGroup),
-    ("EpisodeVersionsMerge_PrimaryWithStaleOwnerBecomesVisibleAndThenNoOp", EpisodeVersionsMergeTests.PrimaryWithStaleOwnerBecomesVisibleAndThenNoOp),
+    ("EpisodeVersionsMerge_PrimaryWithStaleOwnerIsRepairedAndThenNoOp", EpisodeVersionsMergeTests.PrimaryWithStaleOwnerIsRepairedAndThenNoOp),
     ("EpisodeVersionsMerge_LinkOnlyBatchUsesFreshMetadataAndDoesNotRecurse", EpisodeVersionsMergeTests.LinkOnlyBatchUsesFreshMetadataAndDoesNotRecurse),
     ("EpisodeVersionsMerge_IncompleteConcurrentScanIsNotPersisted", EpisodeVersionsMergeTests.IncompleteConcurrentScanIsNotPersisted),
     ("EpisodeVersionsMerge_NativeAlternatesAlreadyCoveringGroupAreNoOp", EpisodeVersionsMergeTests.NativeAlternatesAlreadyCoveringGroupAreNoOp),
@@ -2079,14 +2079,14 @@ static void KodikClient_RunScriptCacheSharesSuccessAndEvictsAfterPostFailure()
 
         if (request.Method == HttpMethod.Get && request.RequestUri!.AbsoluteUri == scriptUrl)
         {
-            scriptGets++;
+            Interlocked.Increment(ref scriptGets);
             await Task.Delay(40, cancellationToken).ConfigureAwait(false);
             return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(scriptBody) };
         }
 
         if (request.Method == HttpMethod.Post && request.RequestUri!.AbsoluteUri == "https://kodikplayer.com/ftor")
         {
-            videoPosts++;
+            Interlocked.Increment(ref videoPosts);
             return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(linksJson) };
         }
 
@@ -6333,33 +6333,33 @@ static void EpisodeVersionsMerge_MatchesSavedKodikTranslationIdFromStrm()
     }
 }
 
-static void EpisodeVersionsMerge_ComparesJellyfin12LinksByItemId()
+static void EpisodeVersionsMerge_ComparesLinkedPathsRegardlessOfCachedItemId()
 {
     var serviceType = typeof(YummyKodik.Versioning.YummyKodikEpisodeVersionsMergeHostedService);
     var firstId = Guid.NewGuid();
     var secondId = Guid.NewGuid();
     var existing = new[]
     {
-        new LinkedChild { ItemId = firstId, Type = LinkedChildType.LinkedAlternateVersion },
-        new LinkedChild { ItemId = secondId, Type = LinkedChildType.LinkedAlternateVersion }
+        new LinkedChild { ItemId = firstId, Path = "first.strm", Type = LinkedChildType.Manual },
+        new LinkedChild { ItemId = secondId, Path = "second.strm", Type = LinkedChildType.Manual }
     };
     var reordered = new[]
     {
-        new LinkedChild { ItemId = secondId, Type = LinkedChildType.LinkedAlternateVersion },
-        new LinkedChild { ItemId = firstId, Type = LinkedChildType.LinkedAlternateVersion }
+        new LinkedChild { Path = "SECOND.STRM", Type = LinkedChildType.Manual },
+        new LinkedChild { Path = "first.strm", Type = LinkedChildType.Manual }
     };
     var different = new[]
     {
-        new LinkedChild { ItemId = firstId, Type = LinkedChildType.LinkedAlternateVersion },
-        new LinkedChild { ItemId = Guid.NewGuid(), Type = LinkedChildType.LinkedAlternateVersion }
+        new LinkedChild { ItemId = firstId, Path = "first.strm", Type = LinkedChildType.Manual },
+        new LinkedChild { ItemId = Guid.NewGuid(), Path = "different.strm", Type = LinkedChildType.Manual }
     };
 
     AssertTrue(
         InvokeStatic<bool>(serviceType, "LinkedChildrenSetEquals", existing, reordered),
-        "Jellyfin 12 linked children should compare by ItemId regardless of order.");
+        "Jellyfin 10.11 linked children should compare by path regardless of order.");
     AssertFalse(
         InvokeStatic<bool>(serviceType, "LinkedChildrenSetEquals", existing, different),
-        "Different Jellyfin 12 linked child ids must not compare as the same version set.");
+        "Different Jellyfin 10.11 linked child paths must not compare as the same version set.");
 }
 
 static void PostRefreshMergeBarrier_MissingOrUnindexedEpisodeIsUnresolved()

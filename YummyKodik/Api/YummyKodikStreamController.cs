@@ -1660,7 +1660,6 @@ namespace YummyKodik.Api
             foreach (var episode in _libraryManager.GetItemList(new InternalItemsQuery
             {
                 IncludeItemTypes = new[] { BaseItemKind.Episode },
-                IncludeOwnedItems = true,
                 GroupByPresentationUniqueKey = false,
                 Recursive = true
             })

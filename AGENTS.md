@@ -1,13 +1,13 @@
 # AGENTS.md — YummyKodik
 
 ## Project context
-YummyKodik targets .NET 10 and Jellyfin 12. It generates a TV-show-like STRM/NFO library from YummyAnime metadata and streams episodes through Jellyfin using Alloha, CVH, and Kodik-backed providers. Release `1.2.1.0` targets Jellyfin 12; `1.2.0.0` remains available for Jellyfin 10.11.
+This `jellyfin-10.11` branch targets .NET 9 and Jellyfin 10.11. It generates a TV-show-like STRM/NFO library from YummyAnime metadata and streams episodes through Jellyfin using Alloha, CVH, and Kodik-backed providers. Release `1.2.1.0` targets Jellyfin 10.11 with current features. The default `main` branch targets Jellyfin 12 with release `2.0.0.0`.
 
 ## Project parameters
-- Repository root: `C:\Users\User\RiderProjects\YummyKodik`
-- Solution: `C:\Users\User\RiderProjects\YummyKodik\YummyKodik.sln`
-- Plugin project: `C:\Users\User\RiderProjects\YummyKodik\YummyKodik\YummyKodik.csproj`
-- Regression test project: `C:\Users\User\RiderProjects\YummyKodik\YummyKodik.Tests\YummyKodik.Tests.csproj`
+- Repository root: `C:\Users\User\RiderProjects\YummyKodik-jellyfin-10.11`
+- Solution: `C:\Users\User\RiderProjects\YummyKodik-jellyfin-10.11\YummyKodik.sln`
+- Plugin project: `C:\Users\User\RiderProjects\YummyKodik-jellyfin-10.11\YummyKodik\YummyKodik.csproj`
+- Regression test project: `C:\Users\User\RiderProjects\YummyKodik-jellyfin-10.11\YummyKodik.Tests\YummyKodik.Tests.csproj`
 - Jellyfin Windows service name: `Jellyfin`
 - Local Jellyfin plugin test folder: `C:\ProgramData\Jellyfin\Server\plugins\YummyKodik_1.2.0.0`
 - Preferred local publish staging folder: `C:\Users\User\RiderProjects\YummyKodik\publish\YummyKodik_1.0.0.0`
@@ -37,7 +37,7 @@ By default, when an agent investigates or uses important project/runtime paths, 
 - `YummyKodik\Api\YummyKodikStreamController.cs`, `YummyKodik\Web\seriesTranslation.js`, `YummyKodik\Web\JellyfinWebSeriesTranslationBootstrapHostedService.cs`, `YummyKodik\Versioning\YummyKodikEpisodeVersionsMergeHostedService.cs`: the widget voice catalog is the normalized union of managed-version and provider voices; injection targets only the active visible Jellyfin details page, uses per-build/static and per-request/API cache keys, and retries a managed partial catalog four times with bounded backoff; explicit widget and native Version-dropdown choices share the canonical preference API and become the series-wide primary so Jellyfin Next/autoplay advances by episode in that voice. `scripts\test-series-translation.cjs` covers the native selection bridge, hidden SPA pages, and ordered saves.
 - `.yummykodik.refresh-state.json`: generated refresh state now also stores per-STRM media segments copied from the best available OP/ED timings for the episode, so Jellyfin segment generation can read local timings before hitting Yummy.
 - `YummyKodik.Tests\Program.cs`: console-style regression runner.
-- `YummyKodik\Util\NfoBuilder.cs`, `YummyKodik.Tests\NfoEncodingTests.cs`: UTF-8 XML declaration must match generated UTF-8 bytes; test parsing bytes, not only strings. Version merging uses host `ILibraryManager.UpdateItemsAsync` with `None` for links only, reloading complete current group records before writes; the Video metadata wrapper recursively saves local alternates in Jellyfin 12.
+- `YummyKodik\Util\NfoBuilder.cs`, `YummyKodik.Tests\NfoEncodingTests.cs`: UTF-8 XML declaration must match generated UTF-8 bytes; test parsing bytes, not only strings. Version merging uses host `ILibraryManager.UpdateItemsAsync` with `None` for links only, reloading complete current group records before writes; the Video metadata wrapper recursively saves local alternates. Jellyfin 10.11 uses string PrimaryVersionId and path-based Manual linked children; ungrouped queries include all versions.
 - `C:\ProgramData\Jellyfin\Server\plugins\YummyKodik_1.2.0.0`: current local Jellyfin 12 test target; the DLL may carry a newer local test version than the folder/meta version.
 - `publish\YummyKodik_1.0.0.0`: local publish staging folder used before copying into Jellyfin.
 - `scripts\Deploy-LocalJellyfinPlugin.ps1`: standard self-elevating local deployment script; selects the highest installed `YummyKodik_<version>` directory, stops Jellyfin, replaces only the four runtime files from staging, hash-verifies them, and starts the service without creating backups.
@@ -60,7 +60,7 @@ dotnet build .\YummyKodik.sln -c Release
 
 The tests are currently a console-style regression runner, not xUnit/NUnit. Many tests use reflection to reach internal/private helpers.
 
-For local Jellyfin plugin replacement, stop the `Jellyfin` service first, publish to the staging folder, then copy only the runtime files into the plugin folder:
+The local service currently runs Jellyfin 12: do not deploy this branch to it. For replacement on a Jellyfin 10.11 host, stop the `Jellyfin` service first, publish to the staging folder, then copy only the runtime files into the plugin folder:
 
 ```powershell
 dotnet publish .\YummyKodik\YummyKodik.csproj -c Release -o .\publish\YummyKodik_1.0.0.0
