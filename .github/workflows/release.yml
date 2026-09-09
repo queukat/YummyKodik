@@ -110,36 +110,10 @@ jobs:
           md5sum "artifacts/${ZIP}" | awk '{print $1}' > "artifacts/${ZIP}.md5"
 
       - name: Build release notes
-        id: notes
         shell: bash
         run: |
           cp .github/release-notes.md release-notes.md
-
-          {
-            echo "body<<EOF"
-            cat release-notes.md
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
-
-          {
-            cat release-notes.md
-            cat <<'MARKDOWN'
-
-          ## Install / update
-
-          Raw manifest (works without GitHub Pages):
-
-          ```text
-          https://raw.githubusercontent.com/${{ github.repository }}/gh-pages/manifest.json
-          ```
-
-          GitHub Pages manifest (optional, requires Pages to be enabled):
-
-          ```text
-          https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/manifest.json
-          ```
-          MARKDOWN
-          } > release-body.md
+          cp .github/release-notes.md release-body.md
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
