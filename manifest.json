@@ -10,7 +10,7 @@
     "versions": [
       {
         "version": "2.0.0.0",
-        "changelog": "- Выбранная озвучка сохраняется при переходе к следующей серии, в том числе при выборе через стандартный список версий Jellyfin.\n- При медленной загрузке плеер заранее накапливает запас видео и показывает ход буферизации.\n- Улучшено восстановление воспроизведения после временных сбоев загрузки.\n- Снижена лишняя нагрузка при обновлении библиотеки.\n- Исправлены ошибки с отображением сведений о сериях и вариантов озвучки.\n\nДля установки требуется Jellyfin 12.",
+        "changelog": "- Your selected voice track stays selected when moving to the next episode, including choices made through Jellyfin's standard version selector.\n- On slow connections, the player buffers video ahead of playback and shows buffering progress.\n- Improved playback recovery after temporary loading failures.\n- Reduced unnecessary load during library refreshes.\n- Fixed issues with episode information and available voice tracks.\n\nRequires Jellyfin 12.",
         "targetAbi": "12.0.0.0",
         "sourceUrl": "https://github.com/queukat/YummyKodik/releases/download/2.0.0.0/YummyKodik_2.0.0.0.zip",
         "checksum": "e1326ad9e46f2c6ed758bdbf46ec9f2c",
@@ -18,7 +18,7 @@
       },
       {
         "version": "1.2.1.0",
-        "changelog": "- Выбранная озвучка сохраняется при переходе к следующей серии, в том числе при выборе через стандартный список версий Jellyfin.\n- При медленной загрузке плеер заранее накапливает запас видео и показывает ход буферизации.\n- Улучшено восстановление воспроизведения после временных сбоев загрузки.\n- Снижена лишняя нагрузка при обновлении библиотеки.\n- Исправлены ошибки с отображением сведений о сериях и вариантов озвучки.\n\nДля установки требуется Jellyfin 10.11.",
+        "changelog": "- Your selected voice track stays selected when moving to the next episode, including choices made through Jellyfin's standard version selector.\n- On slow connections, the player buffers video ahead of playback and shows buffering progress.\n- Improved playback recovery after temporary loading failures.\n- Reduced unnecessary load during library refreshes.\n- Fixed issues with episode information and available voice tracks.\n\nRequires Jellyfin 10.11.",
         "targetAbi": "10.11.0.0",
         "sourceUrl": "https://github.com/queukat/YummyKodik/releases/download/1.2.1.0/YummyKodik_1.2.1.0.zip",
         "checksum": "887547e20126820b21d61ab16ebff8ab",
