@@ -228,6 +228,18 @@ function createHarness({ eagerHls = false } = {}) {
 }
 
 const tests = [
+    ["pinned Alloha and CVH sessions retain startup buffering", async () => {
+        for (const provider of ["alloha", "cvh"]) {
+            const h = createHarness();
+            await h.attach(`/YummyKodik/${provider}-proxy/session/manifest.m3u8`);
+            assert.ok(h.overlay());
+            assert.equal(h.hls.config.maxBufferLength, 120);
+            await h.progress([[0, 59]]);
+            assert.equal(h.video.paused, true);
+            await h.progress([[0, 60]]);
+            assert.equal(h.video.paused, false);
+        }
+    }],
     ["network recovery keeps progress and pending automatic startup", async () => {
         const h = createHarness();
         await h.attach();

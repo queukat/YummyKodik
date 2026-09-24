@@ -27,6 +27,152 @@ internal static class EpisodeVersionsMergeTests
     public static void NativeAlternatesAlreadyCoveringGroupAreNoOp()
         => RunNativeAlternatesAsync().GetAwaiter().GetResult();
 
+    public static void MixedNativeGroupsPreserveExternalPathsWhenPromoted()
+        => RunMixedNativeGroupsAsync().GetAwaiter().GetResult();
+
+    public static void IncompleteNativeIdentityRepairsCrossProviderLinksWithoutMetadata()
+        => RunIncompleteNativeIdentityAsync("valid").GetAwaiter().GetResult();
+
+    public static void IncompleteNativeIdentityRejectsUncorroboratedEvidence()
+    {
+        foreach (var scenario in new[] { "wrong-episode", "disjoint-provider", "no-edge" })
+            RunIncompleteNativeIdentityAsync(scenario).GetAwaiter().GetResult();
+    }
+
+    public static void IncompleteNativeIdentityRechecksFreshFileProof()
+        => RunIncompleteNativeIdentityAsync("fresh-proof-changed").GetAwaiter().GetResult();
+
+    private static async Task RunIncompleteNativeIdentityAsync(string scenario)
+    {
+        var root = Path.Combine(Path.GetTempPath(), "YummyKodikTests", Guid.NewGuid().ToString("N"));
+        var season = Path.Combine(root, "Season 04");
+        Directory.CreateDirectory(season);
+        try
+        {
+            var selected = CreateEpisode(season, 12, "AniLibria");
+            var incomplete = CreateEpisode(season, 12, "AniDUB");
+            var anchor = CreateEpisode(season, 12, "AnimeVost");
+            const string kodik = "http://localhost:8096/YummyKodik/stream?type=shikimori&id=123&ep=12";
+            File.WriteAllText(incomplete.Path, kodik);
+            File.WriteAllText(anchor.Path, kodik);
+            incomplete.IndexNumber = null;
+            incomplete.ParentIndexNumber = null;
+            incomplete.Overview = "incomplete metadata must remain unchanged";
+            var nfo = Path.ChangeExtension(incomplete.Path, ".nfo");
+            const string sidecar = "<episodedetails><title>AniDUB</title></episodedetails>";
+            File.WriteAllText(nfo, sidecar);
+            selected.LocalAlternateVersions = new[] { incomplete.Path };
+            incomplete.LocalAlternateVersions = new[] { selected.Path };
+            selected.OwnerId = incomplete.Id;
+            if (scenario == "wrong-episode") File.WriteAllText(incomplete.Path, kodik.Replace("ep=12", "ep=13"));
+            if (scenario == "disjoint-provider") File.WriteAllText(anchor.Path, kodik.Replace("id=123", "id=456"));
+            if (scenario == "no-edge")
+            {
+                selected.LocalAlternateVersions = Array.Empty<string>();
+                incomplete.LocalAlternateVersions = Array.Empty<string>();
+            }
+            var library = DispatchProxy.Create<ILibraryManager, GroupedLibraryProxy>();
+            var proxy = (GroupedLibraryProxy)(object)library;
+            proxy.SnapshotInventory = true;
+            proxy.Episodes = new List<BaseItem> { selected, incomplete, anchor };
+            using var service = new YummyKodikEpisodeVersionsMergeHostedService(
+                library, null!, NullLogger<YummyKodikEpisodeVersionsMergeHostedService>.Instance);
+            var cfg = new PluginConfiguration { OutputRootPath = root, PreferredTranslationFilter = "AniLibria" };
+            if (scenario == "fresh-proof-changed")
+            {
+                proxy.BeforeReload = () =>
+                {
+                    proxy.BeforeReload = null;
+                    File.WriteAllText(incomplete.Path, kodik.Replace("ep=12", "ep=13"));
+                };
+            }
+            await service.MergeAllEligibleEpisodesAsync("IncompleteNativeIdentity", cfg);
+            Require(incomplete.IndexNumber == null && incomplete.ParentIndexNumber == null &&
+                    incomplete.Overview == "incomplete metadata must remain unchanged" && File.ReadAllText(nfo) == sidecar,
+                "Effective identity must never invent metadata or rewrite the incomplete sidecar.");
+            if (scenario != "valid")
+            {
+                Require(incomplete.SaveCount == 0 && incomplete.OwnerId == Guid.Empty &&
+                        string.IsNullOrEmpty(incomplete.PrimaryVersionId),
+                    "Uncorroborated or changed evidence must not admit the incomplete member: " + scenario);
+                if (scenario == "fresh-proof-changed") Require(proxy.BatchCount == 0,
+                    "Changing managed-file proof between inventory and reload must defer the entire group.");
+                return;
+            }
+            Require(selected.OwnerId == Guid.Empty && string.IsNullOrEmpty(selected.PrimaryVersionId) &&
+                    incomplete.OwnerId == selected.Id && incomplete.PrimaryVersionId == selected.Id.ToString("N") &&
+                    incomplete.LocalAlternateVersions.Length == 0 &&
+                    selected.LocalAlternateVersions.SequenceEqual(new[] { incomplete.Path }),
+                "Split complete native-edge and provider-key anchors in one episode group must repair the reciprocal link.");
+            Require(selected.LinkedAlternateVersions.Single().Path == anchor.Path && proxy.BatchCount == 1,
+                "The complete provider anchor remains explicit, with one canonical host persistence batch.");
+            await service.MergeAllEligibleEpisodesAsync("RepeatedIncompleteNativeIdentity", cfg);
+            Require(proxy.BatchCount == 1, "The repaired incomplete native group must converge to a no-op.");
+            cfg.PreferredTranslationFilter = "AniDUB";
+            await service.MergeAllEligibleEpisodesAsync("IncompleteCannotBecomePrimary", cfg);
+            Require(!string.IsNullOrEmpty(incomplete.PrimaryVersionId) && incomplete.OwnerId != Guid.Empty,
+                "Even an explicit preferred voice with incomplete metadata cannot become primary.");
+        }
+        finally
+        {
+            foreach (var path in Directory.EnumerateFiles(season)) File.Delete(path);
+            Directory.Delete(season);
+            Directory.Delete(root);
+        }
+    }
+
+    private static async Task RunMixedNativeGroupsAsync()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "YummyKodikTests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var former = CreateEpisode(root, 5, "AniStar");
+            var native = CreateEpisode(root, 5, "AnimeVost");
+            var linked = CreateEpisode(root, 5, "Kodik");
+            var selected = CreateEpisode(root, 5, "Selected");
+            var externalFormer = Path.Combine(root, "external-former.mkv");
+            var externalSelected = Path.Combine(root, "external-selected.mkv");
+            former.LocalAlternateVersions = new[] { native.Path, externalFormer };
+            native.OwnerId = former.Id;
+            native.SetPrimaryVersionId(former.Id.ToString("N"));
+            // Even stale bidirectional native edges must converge to one owner.
+            native.LocalAlternateVersions = new[] { former.Path };
+            selected.LocalAlternateVersions = new[] { externalSelected };
+            var library = DispatchProxy.Create<ILibraryManager, GroupedLibraryProxy>();
+            var proxy = (GroupedLibraryProxy)(object)library;
+            proxy.SnapshotInventory = true;
+            proxy.Episodes = new List<BaseItem> { former, native, linked, selected };
+            var cfg = new PluginConfiguration { OutputRootPath = root, PreferredTranslationFilter = "Selected" };
+            using var service = new YummyKodikEpisodeVersionsMergeHostedService(
+                library, null!, NullLogger<YummyKodikEpisodeVersionsMergeHostedService>.Instance);
+            await service.MergeAllEligibleEpisodesAsync("MixedNativePromotion", cfg);
+            Require(selected.LocalAlternateVersions.ToHashSet(StringComparer.OrdinalIgnoreCase)
+                    .SetEquals(new[] { former.Path, native.Path, externalSelected }),
+                "Promoting an explicitly linked voice must adopt both native edge ends and retain external paths.");
+            Require(former.LocalAlternateVersions.SequenceEqual(new[] { externalFormer }) &&
+                    native.LocalAlternateVersions.Length == 0 && former.OwnerId == selected.Id && native.OwnerId == selected.Id,
+                "Former native members must lose in-group edges and acquire the selected owner, preserving unrelated paths.");
+            Require(selected.LinkedAlternateVersions.Single().Path == linked.Path && linked.OwnerId == Guid.Empty,
+                "An explicit-only sibling must remain linked without becoming a native owned item.");
+            Require(proxy.BatchCount == 1 && proxy.Episodes.Cast<StoredEpisode>().All(item => item.SaveCount == 1),
+                "Native repair must write each changed item exactly once in one host batch.");
+            await service.MergeAllEligibleEpisodesAsync("MixedNativeRepeated", cfg);
+            Require(proxy.BatchCount == 1, "A complete normalized snapshot must establish a no-op.");
+            native.OwnerId = former.Id;
+            await service.MergeAllEligibleEpisodesAsync("NativeOwnerDrift", cfg);
+            Require(native.OwnerId == selected.Id && proxy.BatchCount == 2 && native.SaveCount == 2 && selected.SaveCount == 1,
+                "Native ownership alone must invalidate no-op and repair only the changed child.");
+            await service.MergeAllEligibleEpisodesAsync("NativeOwnerRepaired", cfg);
+            Require(proxy.BatchCount == 2, "An ownership-only repair must then converge to no writes.");
+        }
+        finally
+        {
+            foreach (var path in Directory.EnumerateFiles(root)) File.Delete(path);
+            Directory.Delete(root);
+        }
+    }
+
     private static async Task RunNativeAlternatesAsync()
     {
         var root = Path.Combine(Path.GetTempPath(), "YummyKodikTests", Guid.NewGuid().ToString("N"));
@@ -38,6 +184,7 @@ internal static class EpisodeVersionsMergeTests
             primary.LocalAlternateVersions = new[] { child.Path };
             // A native local version already represents the same child without a linked duplicate.
             child.SetPrimaryVersionId(primary.Id.ToString("N"));
+            child.OwnerId = primary.Id;
             var library = DispatchProxy.Create<ILibraryManager, GroupedLibraryProxy>();
             var proxy = (GroupedLibraryProxy)(object)library;
             proxy.Episodes = new List<BaseItem> { primary, child };
@@ -53,8 +200,22 @@ internal static class EpisodeVersionsMergeTests
             cfg.PreferredTranslationFilter = "AnimeVost";
             await service.MergeAllEligibleEpisodesAsync("VoiceChanged", cfg);
             Require(string.IsNullOrEmpty(child.PrimaryVersionId) && primary.PrimaryVersionId == child.Id.ToString("N") &&
-                    child.LinkedAlternateVersions.Single().ItemId == primary.Id,
-                "Selecting a native alternate must still promote it and link the former primary.");
+                    child.LocalAlternateVersions.SequenceEqual(new[] { primary.Path }) &&
+                    child.LinkedAlternateVersions.Length == 0 && primary.LocalAlternateVersions.Length == 0 &&
+                    primary.OwnerId == child.Id,
+                "Selecting a native alternate must transfer its entire native ownership group.");
+            // Exercise the host's native refresh rules after promotion. A leftover
+            // back-edge would make the chosen primary owned/hidden again.
+            foreach (var owner in proxy.Episodes.OfType<Video>())
+            {
+                foreach (var path in owner.LocalAlternateVersions)
+                {
+                    var owned = proxy.Episodes.OfType<Video>().Single(item => item.Path == path);
+                    if (owned.OwnerId == Guid.Empty) owned.OwnerId = owner.Id;
+                }
+            }
+            Require(child.OwnerId == Guid.Empty && string.IsNullOrEmpty(child.PrimaryVersionId),
+                "Host native refresh must not undo the chosen primary or request another repair.");
             var count = proxy.BatchCount;
             await service.MergeAllEligibleEpisodesAsync("RepeatedVoice", cfg);
             Require(proxy.BatchCount == count, "The switched group must then be a no-op.");
@@ -389,7 +550,8 @@ internal static class EpisodeVersionsMergeTests
                         Id = item.Id, Name = item.Name, Path = item.Path,
                         IndexNumber = item.IndexNumber, ParentIndexNumber = item.ParentIndexNumber,
                         PrimaryVersionId = item.PrimaryVersionId, OwnerId = item.OwnerId,
-                        LinkedAlternateVersions = item.LinkedAlternateVersions.ToArray()
+                        LinkedAlternateVersions = item.LinkedAlternateVersions.ToArray(),
+                        LocalAlternateVersions = item.LocalAlternateVersions.ToArray()
                     });
                 }
                 return visible.ToList();

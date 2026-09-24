@@ -20,8 +20,8 @@ YummyKodik is a Jellyfin plugin that builds a local anime library from YummyAnim
 
 ## Supported Jellyfin versions
 
-- `jellyfin-10.11` (this branch): YummyKodik `1.2.1.0` for Jellyfin 10.11 and .NET 9.
-- `main` (default branch): YummyKodik `2.0.0.0` for Jellyfin 12 and .NET 10.
+- `jellyfin-10.11` (this branch): YummyKodik `1.2.2.0` for Jellyfin 10.11 and .NET 9.
+- `main` (default branch): YummyKodik `2.0.1.0` for Jellyfin 12 and .NET 10.
 
 Both branches include the latest voice selection, playback buffering and library refresh improvements. Use the same plugin manifest; Jellyfin selects a compatible release.
 
@@ -112,7 +112,7 @@ Download `YummyKodik_<version>.zip` from GitHub Releases and extract the files d
 Windows service or tray install:
 
 ```powershell
-$version = "1.2.1.0"
+$version = "1.2.2.0"
 $plugins = "$env:ProgramData\Jellyfin\Server\plugins"
 New-Item -ItemType Directory -Force "$plugins\YummyKodik_$version"
 Expand-Archive ".\YummyKodik_$version.zip" "$plugins\YummyKodik_$version" -Force
@@ -121,7 +121,7 @@ Expand-Archive ".\YummyKodik_$version.zip" "$plugins\YummyKodik_$version" -Force
 Windows portable install:
 
 ```powershell
-$version = "1.2.1.0"
+$version = "1.2.2.0"
 $plugins = "$env:LOCALAPPDATA\jellyfin\plugins"
 New-Item -ItemType Directory -Force "$plugins\YummyKodik_$version"
 Expand-Archive ".\YummyKodik_$version.zip" "$plugins\YummyKodik_$version" -Force
@@ -130,7 +130,7 @@ Expand-Archive ".\YummyKodik_$version.zip" "$plugins\YummyKodik_$version" -Force
 Docker install by copying an already extracted package:
 
 ```powershell
-$version = "1.2.1.0"
+$version = "1.2.2.0"
 docker exec jellyfin mkdir -p /config/plugins/YummyKodik_$version
 docker cp .\artifacts\package\. jellyfin:/config/plugins/YummyKodik_$version/
 docker restart jellyfin
@@ -139,7 +139,7 @@ docker restart jellyfin
 Docker install from a zip inside the container:
 
 ```bash
-version=1.2.1.0
+version=1.2.2.0
 mkdir -p "/config/plugins/YummyKodik_$version"
 unzip "YummyKodik_$version.zip" -d "/config/plugins/YummyKodik_$version"
 ```
@@ -258,13 +258,13 @@ dotnet run --project .\YummyKodik.Tests\YummyKodik.Tests.csproj -c Release
 Create a local release ZIP on Windows:
 
 ```powershell
-.\scripts\package.ps1 -Version 1.2.1.0
+.\scripts\package.ps1 -Version 1.2.2.0
 ```
 
 Create a local release ZIP on Linux/macOS:
 
 ```bash
-bash ./scripts/package.sh 1.2.1.0
+bash ./scripts/package.sh 1.2.2.0
 ```
 
 This produces:
@@ -279,8 +279,8 @@ The release workflow runs on version tags and publishes the ZIP, MD5 checksum, G
 Recommended tag format follows the existing release convention:
 
 ```bash
-git tag 1.2.1.0
-git push origin 1.2.1.0
+git tag 1.2.2.0
+git push origin 1.2.2.0
 ```
 
 Tags with a leading `v` also work because the workflow normalizes versions.

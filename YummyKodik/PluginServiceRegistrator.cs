@@ -27,6 +27,12 @@ public sealed class PluginServiceRegistrator : IPluginServiceRegistrator
             builder.AddFilter("YummyKodik", YummyKodikLogFilter.ShouldLogPluginCategory);
         });
 
+        serviceCollection.AddHttpClient(HttpClientNames.PlaybackManifest, client =>
+        {
+            client.Timeout = TimeSpan.FromSeconds(45);
+            client.MaxResponseContentBufferSize = 4 * 1024 * 1024;
+        });
+
         // Named HttpClient for Kodik-related requests (api, player html, token sources).
         serviceCollection
             .AddHttpClient(HttpClientNames.Kodik, client =>

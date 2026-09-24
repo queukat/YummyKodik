@@ -61,11 +61,17 @@ A managed refresh suppresses event-driven version merges while it writes artifac
 
 Version-link changes use the host library manager's batch persistence with `ItemUpdateType.None`, grouped by actual parent. Calling `Video.UpdateToRepositoryAsync` for this purpose also propagates title metadata to local alternate versions and can cause redundant NFO writes and refresh work. A potentially changed group is reloaded with complete metadata directly through a repository-backed item query before mutation. Removed, moved or incompletely indexed members defer that group; an unchanged group performs no writes. Host persistence and item-update events remain active.
 
-Native `LocalAlternateVersions` remain intact and are excluded from the desired explicit `LinkedAlternateVersions`. Jellyfin deduplicates these relationships in favor of local versions; trying to add a local child again as explicitly linked causes a rewrite on every pass. An entirely local group can have an empty explicit-link list and still needs its ownership and primary-version checks.
+Native `LocalAlternateVersions` are excluded from the desired explicit `LinkedAlternateVersions`. When a different voice becomes primary, both endpoints of existing native relationships inside that episode group move under the selected primary, and former members lose their in-group native edges. Paths outside the group remain attached to their original item. Native children receive the selected primary's `OwnerId`; otherwise Jellyfin's owned-item refresh can restore stale ownership and cause repeated repairs. An entirely local group can have an empty explicit-link list and still needs its ownership, native-path and primary-version checks.
+
+A native member lacking episode metadata can join a link-only repair only when its strict managed filename, season directory and STRM episode agree with complete members of the same group, with both an existing native edge and a matching provider series key corroborating that identity. It cannot become primary, its metadata is preserved, and the proof is checked again from fresh records and files before persistence. Ambiguous or changed evidence defers the repair.
+
+A late host item update that restores a proven reciprocal native cycle queues the existing merge worker for that series. Repeated cycle notifications coalesce without resetting the timer; normalized updates queue nothing. The authoritative post-refresh pass consumes only prior requests, retaining new conflicts observed during or after it until the batch releases.
 
 All NFO serializers declare UTF-8, matching the generated file writer. XML written through a plain `StringBuilder` writer declares UTF-16 regardless of the XML settings and must not be used for these UTF-8 files.
 
 ## Runtime metadata
+For Alloha playback, the gateway may select a fallback with a different cut. Resolve the selected session before returning the media source: sum the complete HLS media playlist durations, including the final fractional segment, and bind playback to that same local proxy session. Only manifests are fetched for this check; catalog duration must not truncate a longer fallback.
+
 Episode NFOs carry both Jellyfin-compatible minute runtime and exact-second runtime when known. Runtime comes from Yummy/provider metadata, a conservative Kodik manifest probe, or a sibling-version fallback. Refresh-time backfill remains conservative: it fills only missing or implausibly short metadata. At playback, an exact runtime resolved from the selected provider is authoritative for the effective merged primary and may correct that item and its NFO when the difference exceeds two seconds. It is never copied to sibling voices because different translations may have different cuts.
 
 ## Voice catalog and version-selection contract
@@ -142,3 +148,8 @@ A title may be skipped only when all checks pass:
 8. For either per-voice skip, `kodikDeepValidatedAtUtc` exists, is not in the future, and is less than 24 hours old. Pre-Kodik skip additionally requires preferred quality above 720p and a non-empty stored catalog signature. A changed preferred quality or normalized Yummy-advertised Kodik episode/voice availability also changes the main fingerprint.
 
 If any check fails, run the full title refresh and rewrite state only after successful cleanup. A failed Kodik link validation does not receive a fresh deep-validation timestamp, so the next refresh retries it.
+
+## Skip timing fallback
+Cross-voice transfer is intentional. The requested voice's usable timings retain priority. For a cross-voice fallback, the existing Alloha/CVH catalog selects a complete timing set supported by a strict majority of at least two distinct normalized voices. Corresponding opening and ending boundaries must agree within three seconds; missing segment types do not match present ones. Provider copies cannot add votes, and conflicting copies of one voice abstain while remaining in the denominator. With no majority, preserve the previous provider/voice fallback. Keep a real source's values and provenance rather than averaging or mixing cuts.
+
+Saved timing entries carry `SkipTimingSelectionVersion` separately from the generation contract. Pre-consensus entries are ignored when the media-segment provider is asked to generate timings, without invalidating the title's file hashes or forcing a full library regeneration. Already persisted Jellyfin segments are not rewritten simply by installing the plugin.

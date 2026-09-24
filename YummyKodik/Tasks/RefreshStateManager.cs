@@ -645,7 +645,8 @@ public static class RefreshStateManager
 
             return season.MediaSegments.FirstOrDefault(entry =>
                 string.Equals(entry.FileBaseName, fileBaseName, StringComparison.OrdinalIgnoreCase) &&
-                entry.Segments is { Length: > 0 });
+                entry.Segments is { Length: > 0 } &&
+                entry.SkipTimingSelectionVersion == Yummy.YummyVideoCatalog.SkipTimingSelectionVersion);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or ArgumentException)
         {
@@ -1226,6 +1227,8 @@ public sealed class RefreshStateKodikValidation
 
 public sealed class RefreshStateMediaSegmentEntry
 {
+    public int SkipTimingSelectionVersion { get; init; }
+
     public string FileBaseName { get; init; } = string.Empty;
     public int EpisodeNumber { get; init; }
     public string Provider { get; init; } = string.Empty;

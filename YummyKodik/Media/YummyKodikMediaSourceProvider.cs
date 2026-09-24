@@ -424,6 +424,13 @@ public sealed class YummyKodikMediaSourceProvider : IMediaSourceProvider
             url = YummyKodikStreamUri.BuildAllohaHttpUrl(baseUrl, request.AnimeId, episode, explicitVoiceName, embeddedSource);
         }
 
+        // The gateway can fall back to another provider whose cut is longer or shorter.
+        // Resolve once, then give Jellyfin the same session and its actual playlist duration.
+        var resolvedPlayback = await HlsPlaybackManifestResolver.ResolveAsync(
+                _httpClientFactory.CreateClient(HttpClientNames.PlaybackManifest), url + HlsFormatQuery, cancellationToken)
+            .ConfigureAwait(false);
+        runTimeTicks = resolvedPlayback.RunTimeTicks;
+
         return new[]
         {
             BuildSource(new MediaSourceBuildOptions
@@ -432,7 +439,7 @@ public sealed class YummyKodikMediaSourceProvider : IMediaSourceProvider
                 Episode = episode,
                 Suffix = "alloha-" + SafeIdPart(voiceLabel),
                 Name = voiceLabel,
-                Url = url + HlsFormatQuery,
+                Url = resolvedPlayback.Url,
                 Container = "m3u8",
                 SupportsDirectPlay = false,
                 RunTimeTicks = runTimeTicks,

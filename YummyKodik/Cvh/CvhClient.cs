@@ -264,6 +264,11 @@ public sealed class CvhClient
         return result;
     }
 
+    public static string BuildManifestProxyUrl(CvhPlaybackSession session, string proxyBaseUrl)
+    {
+        return BuildProxyUrl(session, proxyBaseUrl, session.ManifestUrl, CvhProxyResourceKind.Playlist);
+    }
+
     public static string BuildManifestResponseBody(CvhPlaybackSession session, string proxyBaseUrl)
     {
         ArgumentNullException.ThrowIfNull(session);

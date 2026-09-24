@@ -26,6 +26,20 @@ using YummyKodik.Tasks.Refresh;
 using YummyKodik.Util;
 using YummyKodik.Web;
 using YummyKodik.Yummy;
+if (args.Length == 2 && args[0] == "--live-manifest")
+{
+    using var client = new HttpClient { Timeout = TimeSpan.FromSeconds(45), MaxResponseContentBufferSize = 4 * 1024 * 1024 };
+    var manifest = await HlsPlaybackManifestResolver.ResolveAsync(client, args[1], CancellationToken.None);
+    var replay = await HlsPlaybackManifestResolver.ResolveAsync(client, manifest.Url, CancellationToken.None);
+    Console.WriteLine(JsonSerializer.Serialize(new
+    {
+        sourcePath = new Uri(manifest.Url).AbsolutePath,
+        seconds = TimeSpan.FromTicks(manifest.RunTimeTicks).TotalSeconds,
+        stableSession = manifest.Url == replay.Url && manifest.RunTimeTicks == replay.RunTimeTicks
+    }));
+    return;
+}
+
 if (args.Length > 0 &&
     string.Equals(args[0], "--live-alloha-probe", StringComparison.OrdinalIgnoreCase))
 {
@@ -144,12 +158,16 @@ var tests = new (string Name, Action Run)[]
     ("YummyVideoCatalog_MatchesCrossProviderVoiceAliases", YummyVideoCatalog_MatchesCrossProviderVoiceAliases),
     ("YummyVideoCatalog_FindPreferredEntryWithSkipsAcrossProviders_FallsBackToOtherProvider", YummyVideoCatalog_FindPreferredEntryWithSkipsAcrossProviders_FallsBackToOtherProvider),
     ("YummyVideoCatalog_FindPreferredEntryWithSkipsAcrossProviders_PrefersRequestedProvider", YummyVideoCatalog_FindPreferredEntryWithSkipsAcrossProviders_PrefersRequestedProvider),
+    ("SkipTimingConsensus_Selection", SkipTimingConsensusTests.Selection),
     ("YummyKodikMediaSourceProvider_RuntimePublicationPolicyRepairsMissingOrShortValues", YummyKodikMediaSourceProvider_RuntimePublicationPolicyRepairsMissingOrShortValues),
     ("YummyKodikMediaSourceProvider_AuthoritativeRuntimeCorrectsPlausibleMismatch", YummyKodikMediaSourceProvider_AuthoritativeRuntimeCorrectsPlausibleMismatch),
     ("YummyKodikMediaSourceProvider_ResolvesPrimaryOnlyForExplicitSeriesSelection", YummyKodikMediaSourceProvider_ResolvesPrimaryOnlyForExplicitSeriesSelection),
     ("YummyKodikMediaSourceProvider_FillsMissingSourceRuntimeFromSiblingOrItem", YummyKodikMediaSourceProvider_FillsMissingSourceRuntimeFromSiblingOrItem),
     ("YummyKodikMediaSourceProvider_SharesRuntimeOnlyWithinEpisodeVersionSet", YummyKodikMediaSourceProvider_SharesRuntimeOnlyWithinEpisodeVersionSet),
     ("YummyKodikMediaSourceFactory_CarriesRuntimeWithoutReflection", YummyKodikMediaSourceFactory_CarriesRuntimeWithoutReflection),
+    ("HlsPlaybackManifest_FallbackDurationAndPlaybackShareOneSession", HlsPlaybackManifestTests.FallbackDurationAndPlaybackShareOneSession),
+    ("HlsPlaybackManifest_MasterResolvesOnlyPlaylistsAndPreservesPinnedMaster", HlsPlaybackManifestTests.MasterResolvesOnlyPlaylistsAndPreservesPinnedMaster),
+    ("HlsPlaybackManifest_RejectsUnstableIncompleteAndInvalidManifests", HlsPlaybackManifestTests.RejectsUnstableIncompleteAndInvalidManifests),
     ("YummyKodikMediaSegmentProvider_ClonesCachedSegmentsPerItem", YummyKodikMediaSegmentProvider_ClonesCachedSegmentsPerItem),
     ("ResolveProviderCoverage_UsesYummyHintWhenKodikSeriesCountIsZero", ResolveProviderCoverage_UsesYummyHintWhenKodikSeriesCountIsZero),
     ("ResolveProviderCoverage_PreservesYummyCoverageBeyondKodik", ResolveProviderCoverage_PreservesYummyCoverageBeyondKodik),
@@ -174,12 +192,16 @@ var tests = new (string Name, Action Run)[]
     ("RefreshState_SkipDecisionReportsReasonsAndFileCounts", RefreshState_SkipDecisionReportsReasonsAndFileCounts),
     ("ExistingLibraryFallbackRefreshInfoLoader_LoadsSnapshotFromRefreshState", ExistingLibraryFallbackRefreshInfoLoader_LoadsSnapshotFromRefreshState),
     ("StaleReleaseCleanup_DeletesStaleManagedDirectory", StaleReleaseCleanup_DeletesStaleManagedDirectory),
+    ("StaleReleaseCleanup_AllowsHostMetadataAndRenamedPoster", StaleReleaseCleanup_AllowsHostMetadataAndRenamedPoster),
+    ("StaleReleaseCleanup_AcceptsKnownOlderOwnershipManifests", StaleReleaseCleanup_AcceptsKnownOlderOwnershipManifests),
+    ("StaleReleaseCleanup_RejectsUnknownStreamsAndMalformedMetadata", StaleReleaseCleanup_RejectsUnknownStreamsAndMalformedMetadata),
+    ("StaleReleaseCleanup_HostMetadataDoesNotHideModifiedStream", StaleReleaseCleanup_HostMetadataDoesNotHideModifiedStream),
     ("StaleReleaseCleanup_RetainsCurrentAndManualKeys", StaleReleaseCleanup_RetainsCurrentAndManualKeys),
     ("StaleReleaseCleanup_SkipsMissingCorruptAndAmbiguousState", StaleReleaseCleanup_SkipsMissingCorruptAndAmbiguousState),
     ("StaleReleaseCleanup_SkipsSeasonWithUnknownFile", StaleReleaseCleanup_SkipsSeasonWithUnknownFile),
     ("StaleReleaseCleanup_SkipsSeasonWithModifiedManagedFile", StaleReleaseCleanup_SkipsSeasonWithModifiedManagedFile),
     ("StaleReleaseCleanup_CanonicalizesPlainAndUrlCurrentKeys", StaleReleaseCleanup_CanonicalizesPlainAndUrlCurrentKeys),
-    ("StaleReleaseCleanup_SkipsLegacyGenerationContract", StaleReleaseCleanup_SkipsLegacyGenerationContract),
+    ("StaleReleaseCleanup_SkipsUnknownGenerationContract", StaleReleaseCleanup_SkipsUnknownGenerationContract),
     ("StaleReleaseCleanup_DeletesMixedRootStaleSeasonAndStateEntry", StaleReleaseCleanup_DeletesMixedRootStaleSeasonAndStateEntry),
     ("StaleReleaseCleanup_DeletesAllStaleRootForEmptyCurrentSet", StaleReleaseCleanup_DeletesAllStaleRootForEmptyCurrentSet),
     ("RefreshTitleKeySource_ValidEmptyUserListMarksFetchSucceeded", RefreshTitleKeySource_ValidEmptyUserListMarksFetchSucceeded),
@@ -218,6 +240,17 @@ var tests = new (string Name, Action Run)[]
     ("EpisodeVersionsMerge_LinkOnlyBatchUsesFreshMetadataAndDoesNotRecurse", EpisodeVersionsMergeTests.LinkOnlyBatchUsesFreshMetadataAndDoesNotRecurse),
     ("EpisodeVersionsMerge_IncompleteConcurrentScanIsNotPersisted", EpisodeVersionsMergeTests.IncompleteConcurrentScanIsNotPersisted),
     ("EpisodeVersionsMerge_NativeAlternatesAlreadyCoveringGroupAreNoOp", EpisodeVersionsMergeTests.NativeAlternatesAlreadyCoveringGroupAreNoOp),
+    ("EpisodeVersionsMerge_MixedNativeGroupsPreserveExternalPathsWhenPromoted", EpisodeVersionsMergeTests.MixedNativeGroupsPreserveExternalPathsWhenPromoted),
+    ("EpisodeVersionsMerge_IncompleteNativeIdentityRepairsCrossProviderLinksWithoutMetadata", EpisodeVersionsMergeTests.IncompleteNativeIdentityRepairsCrossProviderLinksWithoutMetadata),
+    ("EpisodeVersionsMerge_IncompleteNativeIdentityRejectsUncorroboratedEvidence", EpisodeVersionsMergeTests.IncompleteNativeIdentityRejectsUncorroboratedEvidence),
+    ("EpisodeVersionsMerge_IncompleteNativeIdentityRechecksFreshFileProof", EpisodeVersionsMergeTests.IncompleteNativeIdentityRechecksFreshFileProof),
+    ("LateNativeMerge_CycleDuringAuthoritativePassSurvivesBatchRelease", LateNativeMergeTests.CycleDuringAuthoritativePassSurvivesBatchRelease),
+    ("LateNativeMerge_CycleAfterAuthoritativePassSurvivesBatchRelease", LateNativeMergeTests.CycleAfterAuthoritativePassSurvivesBatchRelease),
+    ("LateNativeMerge_RepeatedCyclesCoalesceAndBusyWorkerRetainsRequest", LateNativeMergeTests.RepeatedCyclesCoalesceAndBusyWorkerRetainsRequest),
+    ("LateNativeMerge_NormalizedUpdatesDoNotQueueAndStopUnsubscribes", LateNativeMergeTests.NormalizedUpdatesDoNotQueueAndStopUnsubscribes),
+    ("LateNativeMerge_IncompleteCycleUsesSplitProviderAndTopologyWitnesses", LateNativeMergeTests.IncompleteCycleUsesSplitProviderAndTopologyWitnesses),
+    ("LateNativeMerge_CycleDuringBatchRepairsOnlyTargetDespitePendingGeneralMerge", LateNativeMergeTests.CycleDuringBatchRepairsOnlyTargetDespitePendingGeneralMerge),
+    ("LateNativeMerge_QueuedCycleAlreadyRepairedCausesNoWrites", LateNativeMergeTests.QueuedCycleAlreadyRepairedCausesNoWrites),
     ("NfoEncoding_SeriesNfoParsesFromUtf8Bytes", NfoEncodingTests.SeriesNfoParsesFromUtf8Bytes),
     ("NfoEncoding_EpisodeNfoParsesFromUtf8Bytes", NfoEncodingTests.EpisodeNfoParsesFromUtf8Bytes),
     ("NfoEncoding_RuntimeEnrichmentParsesFromUtf8BytesAndPreservesMetadata", NfoEncodingTests.RuntimeEnrichmentParsesFromUtf8BytesAndPreservesMetadata),
@@ -4007,6 +4040,7 @@ static void RefreshState_WritesAndReadsMediaSegmentsForEpisodeFile()
             [voiceFileBaseName] = new RefreshStateMediaSegmentEntry
             {
                 FileBaseName = voiceFileBaseName,
+                SkipTimingSelectionVersion = YummyVideoCatalog.SkipTimingSelectionVersion,
                 EpisodeNumber = 1,
                 Provider = "Cvh",
                 VoiceName = "AniLibria",
@@ -4050,6 +4084,17 @@ static void RefreshState_WritesAndReadsMediaSegmentsForEpisodeFile()
         AssertEqual("Komnata Didi", entry.SourceVoiceName, "Source voice should record where fallback timings came from.");
         AssertEqual(2, entry.Segments.Length, "Intro and outro segments should be stored.");
         AssertEqual(TimeSpan.FromSeconds(44).Ticks, entry.Segments[0].StartTicks, "Intro start ticks should round-trip.");
+        var statePath = Path.Combine(fixture.SeriesRoot, ".yummykodik.refresh-state.json");
+        var oldState = JsonNode.Parse(File.ReadAllText(statePath))!;
+        foreach (var node in oldState["seasons"]!.AsObject().SelectMany(season => season.Value!["mediaSegments"]!.AsArray()))
+        {
+            node!.AsObject().Remove("skipTimingSelectionVersion");
+        }
+        File.WriteAllText(statePath, oldState.ToJsonString());
+        var oldEntry = RefreshStateManager.TryReadMediaSegmentEntryForPathAsync(
+                Path.Combine(seasonDir, voiceFileBaseName + ".strm"), CancellationToken.None)
+            .GetAwaiter().GetResult();
+        AssertTrue(oldEntry == null, "Pre-consensus saved timings must be recomputed, not silently reused.");
     }
     finally
     {
@@ -4118,6 +4163,87 @@ static void ExistingLibraryFallbackRefreshInfoLoader_LoadsSnapshotFromRefreshSta
     {
         TryDeleteDirectory(tempRoot);
     }
+}
+
+static void StaleReleaseCleanup_AcceptsKnownOlderOwnershipManifests()
+{
+    foreach (var version in new[] { 1, 2, 3 })
+    {
+        var root = Path.Combine(Path.GetTempPath(), "YummyKodikTests", Guid.NewGuid().ToString("N"));
+        try
+        {
+            var series = Path.Combine(root, "Old release");
+            WriteManagedCleanupSeason(series, 1, "removed");
+            var path = Path.Combine(series, RefreshStateManager.StateFileName);
+            var state = JsonNode.Parse(File.ReadAllText(path))!;
+            state["generationContractVersion"] = version;
+            File.WriteAllText(path, state.ToJsonString());
+            AssertEqual(1, RunStaleReleaseCleanup(root, Array.Empty<string>()).DeletedSeriesDirectoryCount,
+                "An old generation with the same proven ownership schema must not require regeneration before deletion.");
+        }
+        finally { TryDeleteDirectory(root); }
+    }
+}
+
+static void StaleReleaseCleanup_AllowsHostMetadataAndRenamedPoster()
+{
+    var root = Path.Combine(Path.GetTempPath(), "YummyKodikTests", Guid.NewGuid().ToString("N"));
+    try
+    {
+        var series = Path.Combine(root, "Stale");
+        var season = WriteManagedCleanupSeason(series, 1, "stale");
+        File.WriteAllText(Path.Combine(season, "S01E01.nfo"), "<episodedetails><runtime>24</runtime><dateadded>2026-09-19</dateadded></episodedetails>");
+        File.WriteAllText(Path.Combine(series, "tvshow.nfo"), "<tvshow><title>Host enriched title</title></tvshow>");
+        File.WriteAllText(Path.Combine(season, "season.nfo"), "<season><seasonnumber>1</seasonnumber></season>");
+        File.WriteAllBytes(Path.Combine(season, "S01E01 - Old Voice-thumb.jpg"), new byte[] { 1, 2, 3 });
+        File.WriteAllBytes(Path.Combine(series, "folder.jpg"), new byte[] { 1, 2, 3 });
+        var statePath = Path.Combine(series, RefreshStateManager.StateFileName);
+        var state = JsonNode.Parse(File.ReadAllText(statePath))!;
+        state["seasons"]!["Season 01"]!["managedFiles"]!.AsArray().Add(new JsonObject
+        {
+            ["relativePath"] = "poster.jpg", ["sha256"] = new string('a', 64)
+        });
+        File.WriteAllText(statePath, state.ToJsonString());
+        AssertEqual(1, RunStaleReleaseCleanup(root, Array.Empty<string>()).DeletedSeriesDirectoryCount,
+            "Host metadata, artwork and a renamed poster must not pin a stale managed release.");
+        AssertTrue(!Directory.Exists(series), "The stale series must disappear entirely.");
+    }
+    finally { TryDeleteDirectory(root); }
+}
+
+static void StaleReleaseCleanup_RejectsUnknownStreamsAndMalformedMetadata()
+{
+    foreach (var invalid in new[] { "extra.strm", "private.jpg", "invalid-nfo", "foreign-thumb" })
+    {
+        var root = Path.Combine(Path.GetTempPath(), "YummyKodikTests", Guid.NewGuid().ToString("N"));
+        try
+        {
+            var series = Path.Combine(root, "Stale");
+            var season = WriteManagedCleanupSeason(series, 1, "stale");
+            var name = invalid == "invalid-nfo" ? "S01E01.nfo" : invalid == "foreign-thumb" ? "S01E99 - Other-thumb.jpg" : invalid;
+            File.WriteAllText(Path.Combine(season, name), "unproven");
+            AssertEqual(0, RunStaleReleaseCleanup(root, Array.Empty<string>()).DeletedDirectoryCount,
+                "Unknown streams/files, malformed NFOs and unrelated thumbnails must block deletion.");
+            AssertTrue(File.Exists(Path.Combine(season, name)), "Unproven content must remain.");
+        }
+        finally { TryDeleteDirectory(root); }
+    }
+}
+
+static void StaleReleaseCleanup_HostMetadataDoesNotHideModifiedStream()
+{
+    var root = Path.Combine(Path.GetTempPath(), "YummyKodikTests", Guid.NewGuid().ToString("N"));
+    try
+    {
+        var series = Path.Combine(root, "Stale");
+        var season = WriteManagedCleanupSeason(series, 1, "stale");
+        File.AppendAllText(Path.Combine(season, "S01E01.strm"), "modified");
+        File.WriteAllText(Path.Combine(season, "S01E01.nfo"), "<episodedetails><runtime>24</runtime></episodedetails>");
+        File.WriteAllBytes(Path.Combine(series, "folder.jpg"), new byte[] { 1 });
+        AssertEqual(0, RunStaleReleaseCleanup(root, Array.Empty<string>()).DeletedDirectoryCount,
+            "Mutable metadata must never bypass stream ownership hashes.");
+    }
+    finally { TryDeleteDirectory(root); }
 }
 
 static void StaleReleaseCleanup_DeletesStaleManagedDirectory()
@@ -4257,7 +4383,7 @@ static void StaleReleaseCleanup_CanonicalizesPlainAndUrlCurrentKeys()
     }
 }
 
-static void StaleReleaseCleanup_SkipsLegacyGenerationContract()
+static void StaleReleaseCleanup_SkipsUnknownGenerationContract()
 {
     AssertTrue(RefreshStateManager.GenerationContractVersion > 1, "Gateway cleanup must have a newer generation contract than legacy state files.");
 
@@ -4268,14 +4394,14 @@ static void StaleReleaseCleanup_SkipsLegacyGenerationContract()
         WriteManagedCleanupSeason(seriesRoot, 1, "stale-release");
         var statePath = Path.Combine(seriesRoot, RefreshStateManager.StateFileName);
         var state = JsonNode.Parse(File.ReadAllText(statePath))!.AsObject();
-        state["generationContractVersion"] = RefreshStateManager.GenerationContractVersion - 1;
+        state["generationContractVersion"] = 5;
         File.WriteAllText(statePath, state.ToJsonString());
 
         var result = RunStaleReleaseCleanup(tempRoot, Array.Empty<string>());
 
-        AssertTrue(Directory.Exists(seriesRoot), "A stale directory with an older generation contract must be preserved.");
-        AssertEqual(1, result.SkippedDirectoryCount, "Legacy generation state should take the safe skip path.");
-        AssertEqual(0, result.DeletedDirectoryCount, "Legacy state must not authorize deletion.");
+        AssertTrue(Directory.Exists(seriesRoot), "A stale directory with an unknown generation contract must be preserved.");
+        AssertEqual(1, result.SkippedDirectoryCount, "Unknown generation state should take the safe skip path.");
+        AssertEqual(0, result.DeletedDirectoryCount, "Unknown state must not authorize deletion.");
     }
     finally
     {

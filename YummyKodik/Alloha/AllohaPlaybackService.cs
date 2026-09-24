@@ -290,6 +290,12 @@ public sealed class AllohaPlaybackService
                or TaskCanceledException;
     }
 
+    public static string BuildManifestProxyUrl(AllohaPlaybackSession session, string proxyBaseUrl)
+    {
+        return BuildProxyResourceUrl(session, proxyBaseUrl, new Uri(session.ManifestUrl),
+            session.ManifestUrl, session.ManifestUrl, parentResourceId: null);
+    }
+
     public static string BuildManifestResponseBody(AllohaPlaybackSession session, string proxyBaseUrl)
     {
         ArgumentNullException.ThrowIfNull(session);

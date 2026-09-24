@@ -1,5 +1,8 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
+using System.Xml;
+using System.Xml.Linq;
 using Microsoft.Extensions.Logging;
 
 namespace YummyKodik.Tasks.Refresh;
@@ -254,30 +257,49 @@ internal static class StaleReleaseCleanupService
 
         try
         {
-            var actualFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var entry in Directory.EnumerateFileSystemEntries(seasonDirectory, "*", SearchOption.TopDirectoryOnly))
+            // STRMs establish ownership. Jellyfin may rewrite NFOs and download sidecars;
+            // those mutable derivatives are not a byte-for-byte generation receipt.
+            var streamNames = expectedFiles.Keys.Where(name => name.EndsWith(".strm", StringComparison.OrdinalIgnoreCase))
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            if (streamNames.Count == 0)
             {
-                cancellationToken.ThrowIfCancellationRequested();
-                var attributes = File.GetAttributes(entry);
-                if ((attributes & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != 0)
-                {
-                    return false;
-                }
+                return false;
+            }
 
-                var fileName = Path.GetFileName(entry);
-                if (!IsDirectFileName(fileName) || !actualFiles.Add(fileName) || !expectedFiles.TryGetValue(fileName, out var expectedHash))
-                {
-                    return false;
-                }
-
-                var actualHash = await ComputeFileSha256HexAsync(entry, cancellationToken).ConfigureAwait(false);
-                if (!string.Equals(actualHash, expectedHash, StringComparison.OrdinalIgnoreCase))
+            foreach (var name in streamNames)
+            {
+                var path = Path.Combine(seasonDirectory, name);
+                if (!File.Exists(path) || (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0 ||
+                    !string.Equals(await ComputeFileSha256HexAsync(path, cancellationToken).ConfigureAwait(false),
+                        expectedFiles[name], StringComparison.OrdinalIgnoreCase))
                 {
                     return false;
                 }
             }
 
-            return actualFiles.SetEquals(expectedFiles.Keys);
+            foreach (var entry in Directory.EnumerateFileSystemEntries(seasonDirectory, "*", SearchOption.TopDirectoryOnly))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if ((File.GetAttributes(entry) & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != 0)
+                {
+                    return false;
+                }
+
+                var name = Path.GetFileName(entry);
+                if (streamNames.Contains(name) || IsHostMetadataFile(entry, streamNames, isSeriesRoot: false))
+                {
+                    continue;
+                }
+
+                if (!expectedFiles.TryGetValue(name, out var hash) ||
+                    !string.Equals(await ComputeFileSha256HexAsync(entry, cancellationToken).ConfigureAwait(false), hash,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    return false;
+                }
+            }
+
+            return true;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
@@ -369,7 +391,17 @@ internal static class StaleReleaseCleanupService
                     continue;
                 }
 
-                if (!actualFiles.Add(fileName) || !expectedRootFiles.TryGetValue(fileName, out var expectedHash))
+                if (!actualFiles.Add(fileName))
+                {
+                    return false;
+                }
+
+                if (IsHostMetadataFile(file, new HashSet<string>(StringComparer.OrdinalIgnoreCase), isSeriesRoot: true))
+                {
+                    continue;
+                }
+
+                if (!expectedRootFiles.TryGetValue(fileName, out var expectedHash))
                 {
                     return false;
                 }
@@ -381,13 +413,72 @@ internal static class StaleReleaseCleanupService
                 }
             }
 
-            return actualFiles.SetEquals(expectedRootFiles.Keys);
+            // A host may rename poster.jpg to folder.jpg. Only immutable files must still exist.
+            return expectedRootFiles.Keys.All(name => actualFiles.Contains(name) || IsArtworkName(name));
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             logger.LogWarning(ex, "[YummyKodik] Cannot verify a stale series directory before cleanup. path='{Path}'", seriesDirectory);
             return false;
         }
+    }
+
+    private static bool IsHostMetadataFile(string path, IReadOnlySet<string> streamNames, bool isSeriesRoot)
+    {
+        var name = Path.GetFileName(path);
+        if (IsArtworkName(name))
+        {
+            return true;
+        }
+
+        if (!isSeriesRoot && Regex.IsMatch(name, @"^S[0-9]+E[0-9]+(?: - .+)?-thumb\.(?:jpg|jpeg|png|webp)$", RegexOptions.IgnoreCase))
+        {
+            var episode = Regex.Match(name, @"^S[0-9]+E[0-9]+", RegexOptions.IgnoreCase).Value;
+            return streamNames.Any(stream => stream.StartsWith(episode + " - ", StringComparison.OrdinalIgnoreCase) ||
+                stream.Equals(episode + ".strm", StringComparison.OrdinalIgnoreCase));
+        }
+
+        string? expectedRoot = null;
+        if (isSeriesRoot && name.Equals("tvshow.nfo", StringComparison.OrdinalIgnoreCase))
+        {
+            expectedRoot = "tvshow";
+        }
+        else if (!isSeriesRoot && name.Equals("season.nfo", StringComparison.OrdinalIgnoreCase))
+        {
+            expectedRoot = "season";
+        }
+        else if (!isSeriesRoot && name.EndsWith(".nfo", StringComparison.OrdinalIgnoreCase) &&
+                 streamNames.Contains(Path.ChangeExtension(name, ".strm")))
+        {
+            expectedRoot = "episodedetails";
+        }
+
+        if (expectedRoot == null)
+        {
+            return false;
+        }
+
+        try
+        {
+            using var reader = XmlReader.Create(path, new XmlReaderSettings
+            {
+                DtdProcessing = DtdProcessing.Prohibit,
+                XmlResolver = null,
+                MaxCharactersInDocument = 4 * 1024 * 1024
+            });
+            return XDocument.Load(reader).Root?.Name == expectedRoot;
+        }
+        catch (XmlException)
+        {
+            return false;
+        }
+    }
+
+    private static bool IsArtworkName(string name)
+    {
+        return Regex.IsMatch(name,
+            @"^(?:(?:poster|folder|banner|backdrop|fanart|landscape|logo|thumb)(?:[0-9]+)?|season(?:[0-9]+|-specials)-(?:poster|banner|landscape))\.(?:jpg|jpeg|png|webp)$",
+            RegexOptions.IgnoreCase);
     }
 
     private static bool IsDirectFileName(string? value)
@@ -472,7 +563,9 @@ internal static class StaleReleaseCleanupService
             if (state == null ||
                 root == null ||
                 state.SchemaVersion != RefreshStateManager.SchemaVersion ||
-                state.GenerationContractVersion != RefreshStateManager.GenerationContractVersion ||
+                // Generation versions 1–4 share this ownership manifest schema.
+                // Old output may be removed without first regenerating a deleted subscription.
+                state.GenerationContractVersion is < 1 or > 4 ||
                 state.Seasons == null ||
                 state.Seasons.Count == 0 ||
                 !HasCanonicalUniqueSeasons(state.Seasons))

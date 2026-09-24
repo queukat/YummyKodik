@@ -1,7 +1,7 @@
 # AGENTS.md — YummyKodik
 
 ## Project context
-This `jellyfin-10.11` branch targets .NET 9 and Jellyfin 10.11. It generates a TV-show-like STRM/NFO library from YummyAnime metadata and streams episodes through Jellyfin using Alloha, CVH, and Kodik-backed providers. Release `1.2.1.0` targets Jellyfin 10.11 with current features. The default `main` branch targets Jellyfin 12 with release `2.0.0.0`.
+This `jellyfin-10.11` branch targets .NET 9 and Jellyfin 10.11. It generates a TV-show-like STRM/NFO library from YummyAnime metadata and streams episodes through Jellyfin using Alloha, CVH, and Kodik-backed providers. Release `1.2.1.0` targets Jellyfin 10.11 with current features. The default `main` branch targets Jellyfin 12 with release `2.0.1.0`.
 
 ## Project parameters
 - Repository root: `C:\Users\User\RiderProjects\YummyKodik-jellyfin-10.11`
@@ -121,3 +121,7 @@ Do not overwrite `AllohaApiToken.txt` or `meta.json` during local replacement. `
 - Keep public release notes and changelogs in English, consistent with the README and previous releases, regardless of the conversation language.
 - `.github/release-notes.md` is the single source for the Jellyfin changelog and GitHub release notes.
 - Write only user-visible changes in plain language. Omit implementation details, internal counters, test counts, benchmark reports and engineering disclaimers. State required Jellyfin compatibility.
+
+- `YummyKodik/Media/HlsPlaybackManifestResolver.cs`: resolves Alloha gateway fallback once, reads complete HLS duration, and pins the existing local provider proxy session so Jellyfin duration and playback use the same cut.
+
+- `YummyKodik/Yummy/YummyVideoCatalog.cs`: canonical cross-voice skip-timing consensus; own-voice priority and ambiguous fallback preserved. `SkipTimingConsensusTests.cs` covers independent votes and disagreements; saved segment selection versions prevent reuse of pre-consensus state during generation.

@@ -2,6 +2,7 @@ namespace YummyKodik.Util;
 
 public static class HttpClientNames
 {
+    public const string PlaybackManifest = "YummyKodik.PlaybackManifest";
     public const string Kodik = "YummyKodik.Kodik";
     public const string Yummy = "YummyKodik.Yummy";
     public const string Cvh = "YummyKodik.Cvh";

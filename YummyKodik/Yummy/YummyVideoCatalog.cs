@@ -5,6 +5,8 @@ namespace YummyKodik.Yummy;
 
 public sealed class YummyVideoCatalog
 {
+    public const int SkipTimingSelectionVersion = 1;
+
     private static readonly YummyVideoProviderKind[] DefaultProviderPreference =
     {
         YummyVideoProviderKind.Alloha,
@@ -259,11 +261,61 @@ public sealed class YummyVideoCatalog
             var fallbackMatch = FindMatchingEntryWithSkips(provider, episodeNumber, normalizedPreferredVoice, allowFallback: true);
             if (fallbackMatch != null)
             {
-                return fallbackMatch;
+                return FindConsensusSkipEntry(episodeNumber, providerOrder, fallbackMatch);
             }
         }
 
         return null;
+    }
+
+    private YummyVideoEntry FindConsensusSkipEntry(
+        int episodeNumber,
+        IReadOnlyList<YummyVideoProviderKind> providerOrder,
+        YummyVideoEntry fallback)
+    {
+        var candidates = providerOrder
+            .SelectMany(FilterProviderEntries)
+            .Where(entry => entry.EpisodeNumber == episodeNumber && HasUsableSkips(entry.Skips))
+            .OrderBy(entry => ReferenceEquals(entry, fallback) ? 0 : 1)
+            .ToArray();
+        // Provider copies do not create extra votes. A voice with conflicting copies
+        // cannot support a cluster, but still counts in the majority denominator.
+        var voices = candidates
+            .Where(entry => !string.IsNullOrWhiteSpace(entry.DisplayVoiceName))
+            .GroupBy(entry => TranslationNameKeyNormalizer.Normalize(entry.DisplayVoiceName), StringComparer.Ordinal)
+            .ToArray();
+        var winner = candidates
+            .Select(entry => new
+            {
+                Entry = entry,
+                Votes = voices.Count(voice => voice.All(copy => SkipTimingsAgree(entry.Skips!, copy.Skips!)))
+            })
+            .OrderByDescending(candidate => candidate.Votes)
+            .FirstOrDefault();
+        return winner is { Votes: >= 2 } && winner.Votes > voices.Length / 2
+            ? winner.Entry
+            : fallback;
+    }
+
+    private static bool SkipTimingsAgree(YummyVideoSkips left, YummyVideoSkips right)
+    {
+        // Keep one real source's complete timing set; do not average boundaries or
+        // combine opening/ending from potentially different edits of the episode.
+        return SegmentsAgree(left.Opening, right.Opening) && SegmentsAgree(left.Ending, right.Ending);
+
+        static bool SegmentsAgree(YummySkipSegment? first, YummySkipSegment? second)
+        {
+            var hasFirst = first is { Length: > 0 };
+            var hasSecond = second is { Length: > 0 };
+            if (!hasFirst || !hasSecond)
+            {
+                return hasFirst == hasSecond;
+            }
+
+            const int toleranceSeconds = 3;
+            return Math.Abs((long)first!.Time - second!.Time) <= toleranceSeconds &&
+                Math.Abs((long)first.Time + first.Length - second.Time - second.Length) <= toleranceSeconds;
+        }
     }
 
     public int? GetDurationSeconds(int episodeNumber, string? preferredVoiceName = null)
