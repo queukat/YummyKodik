@@ -5,6 +5,7 @@ using System.Net.Security;
 using MediaBrowser.Controller;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Plugins;
+using MediaBrowser.Controller.Resolvers;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -25,6 +26,12 @@ public sealed class PluginServiceRegistrator : IPluginServiceRegistrator
         serviceCollection.AddLogging(builder =>
         {
             builder.AddFilter("YummyKodik", YummyKodikLogFilter.ShouldLogPluginCategory);
+        });
+
+        serviceCollection.AddHttpClient(HttpClientNames.PlaybackManifest, client =>
+        {
+            client.Timeout = TimeSpan.FromSeconds(45);
+            client.MaxResponseContentBufferSize = 4 * 1024 * 1024;
         });
 
         // Named HttpClient for Kodik-related requests (api, player html, token sources).
@@ -134,6 +141,7 @@ public sealed class PluginServiceRegistrator : IPluginServiceRegistrator
 
         // Auto-merge STRM "versions" for duplicate episodes (translations) based on library events.
         serviceCollection.AddSingleton<YummyKodikEpisodeVersionsMergeHostedService>();
+        serviceCollection.AddSingleton<IItemResolver, YummyKodikNativeEpisodeResolver>();
         serviceCollection.AddSingleton<IHostedService>(sp => sp.GetRequiredService<YummyKodikEpisodeVersionsMergeHostedService>());
         serviceCollection.AddSingleton<YummyKodikPostRefreshMergeBarrier>();
         serviceCollection.AddSingleton<MediaBrowser.Model.Tasks.IScheduledTask, RefreshYummyKodikLibraryTask>();

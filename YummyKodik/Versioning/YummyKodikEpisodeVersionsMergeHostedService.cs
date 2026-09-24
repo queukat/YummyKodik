@@ -1,4 +1,4 @@
-﻿// File: Versioning/YummyKodikEpisodeVersionsMergeHostedService.cs
+// File: Versioning/YummyKodikEpisodeVersionsMergeHostedService.cs
 
 using System;
 using System.Collections.Concurrent;
@@ -7,6 +7,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Data.Enums;
@@ -27,7 +28,7 @@ namespace YummyKodik.Versioning;
 
 /// <summary>
 /// Automatically merges duplicate Episode items into "Versions" by using Jellyfin version-linking.
-/// Triggered by library events (ItemAdded + ScanCompleted when available).
+/// Triggered by library additions, scan completion and proven native version cycles.
 ///
 /// Constraints from your requirements:
 /// - Only Episodes (TV).
@@ -49,6 +50,7 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
 
     private readonly SemaphoreSlim _mergeLock = new(1, 1);
     private readonly ConcurrentQueue<string> _prioritySeriesDirectories = new();
+    private readonly ConcurrentDictionary<EpisodeGroupKey, Guid> _pendingNativeCycleGroups = new();
 
     private Timer? _mergeDebounceTimer;
     private Timer? _scanPollTimer;
@@ -58,7 +60,6 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
     private volatile string _pendingMergeReason = "Unknown";
 
     private int _activeRefreshBatches;
-    private int _authoritativeRefreshMergeCompleted;
 
     private bool _wasScanRunning;
 
@@ -81,6 +82,7 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
         _logger.LogInformation("[YummyKodik] Episode versions auto-merge service starting.");
 
         _libraryManager.ItemAdded += OnItemAdded;
+        _libraryManager.ItemUpdated += OnItemUpdated;
 
         // Try to hook ScanCompleted (or LibraryScanCompleted) if it exists.
         TryHookScanCompletedEvent();
@@ -103,6 +105,7 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
         _stopping = true;
 
         _libraryManager.ItemAdded -= OnItemAdded;
+        _libraryManager.ItemUpdated -= OnItemUpdated;
 
         UnhookScanCompletedEvent();
 
@@ -125,19 +128,18 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
     }
 
     /// <summary>
-    /// Suppresses event-driven merge passes while the managed refresh task is still writing files.
+    /// Suppresses general event-driven merge passes while the managed refresh task is writing files.
+    /// Proven native cycles are repaired in their existing group without waiting for batch completion.
     /// The returned scope must remain active until the post-refresh readiness barrier and final
     /// merge have completed.
     /// </summary>
     public async Task<IDisposable> BeginRefreshBatchAsync(CancellationToken cancellationToken)
     {
-        if (Interlocked.Increment(ref _activeRefreshBatches) == 1)
-        {
-            Interlocked.Exchange(ref _authoritativeRefreshMergeCompleted, 0);
-        }
+        Interlocked.Increment(ref _activeRefreshBatches);
         try
         {
-            _mergeDebounceTimer?.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
+            if (_pendingNativeCycleGroups.IsEmpty)
+                _mergeDebounceTimer?.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
         }
         catch (ObjectDisposedException)
         {
@@ -147,8 +149,8 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
         try
         {
             // Drain a worker that passed admission before this batch became active. Workers that
-            // acquire the lock after this point re-check _activeRefreshBatches and leave without
-            // touching Jellyfin repository links.
+            // acquire the lock after this point defer general work. Proven native-cycle
+            // repairs remain admissible through the same gate and fresh group checks.
             await _mergeLock.WaitAsync(cancellationToken).ConfigureAwait(false);
             _mergeLock.Release();
         }
@@ -177,8 +179,6 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
 
             _mergeRequested = false;
             await MergeAllEligibleEpisodesAsync("PostRefresh").ConfigureAwait(false);
-            _mergeRequested = false;
-            Interlocked.Exchange(ref _authoritativeRefreshMergeCompleted, 1);
         }
         finally
         {
@@ -221,6 +221,58 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
         catch (Exception ex)
         {
             _logger.LogDebug(ex, "[YummyKodik] ItemAdded handler failure (ignored).");
+        }
+    }
+
+    private void OnItemUpdated(object? sender, ItemChangeEventArgs e)
+    {
+        if (_stopping || e.Item is not Episode episode) return;
+        try
+        {
+            ObserveNativeVersionUpdate(episode, Plugin.Instance.Configuration);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "[YummyKodik] Native version update inspection failed (ignored).");
+        }
+    }
+
+    internal void ObserveNativeVersionUpdate(Episode? item, PluginConfiguration cfg)
+    {
+        if (_stopping || item == null ||
+            !IsUnderRoot(cfg.OutputRootPath, item.Path) ||
+            !item.Path.EndsWith(".strm", StringComparison.OrdinalIgnoreCase) ||
+            item.LocalAlternateVersions.Length == 0) return;
+
+        Episode? ReadPeer(string path)
+        {
+            if (!IsUnderRoot(cfg.OutputRootPath, path) ||
+                !path.EndsWith(".strm", StringComparison.OrdinalIgnoreCase)) return null;
+            // This is the host's own native-version identity lookup. FindByPath would
+            // issue a query on every event and can hide owned items on Jellyfin 12.
+            var peer = _libraryManager.GetItemById(_libraryManager.GetNewItemId(path, typeof(Episode))) as Episode;
+            return peer != null && string.Equals(peer.Path, path, StringComparison.OrdinalIgnoreCase) ? peer : null;
+        }
+
+        foreach (var path in item.LocalAlternateVersions)
+        {
+            var peer = ReadPeer(path);
+            if (peer == null || peer.Id == item.Id ||
+                !peer.LocalAlternateVersions.Contains(item.Path, StringComparer.OrdinalIgnoreCase) ||
+                !File.Exists(item.Path) || !File.Exists(peer.Path)) continue;
+
+            var candidates = item.LocalAlternateVersions.Concat(peer.LocalAlternateVersions)
+                .Distinct(StringComparer.OrdinalIgnoreCase).Select(ReadPeer).OfType<Episode>()
+                .Append(item).Append(peer).GroupBy(episode => episode.Id).Select(group => group.First()).ToList();
+            var key = GetProvenEpisodeGroupKey(item, candidates);
+            if (!key.HasValue || key != GetProvenEpisodeGroupKey(peer, candidates)) continue;
+
+            // General refresh work cannot mask a cycle: waiting for batch completion
+            // lets the host accumulate recursive metadata saves. Deduplicate by group
+            // and wake the same worker for a scoped, freshly validated repair.
+            if (_pendingNativeCycleGroups.TryAdd(key.Value, item.Id) && _pendingNativeCycleGroups.Count == 1)
+                ScheduleMergeWorker(TimeSpan.FromSeconds(1));
+            return;
         }
     }
 
@@ -294,6 +346,12 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
             return;
         }
 
+        ScheduleMergeWorker(delay);
+    }
+
+    private void ScheduleMergeWorker(TimeSpan delay)
+    {
+        if (_stopping) return;
         if (_mergeDebounceTimer == null)
         {
             _mergeDebounceTimer = new Timer(
@@ -310,34 +368,22 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
 
     private async Task MergeWorkerAsync(string reason)
     {
-        if (_stopping)
-        {
-            return;
-        }
-
-        // If already running, just leave the request flag raised and let next debounce tick handle it.
+        if (_stopping) return;
         if (!await _mergeLock.WaitAsync(0).ConfigureAwait(false))
         {
-            _mergeRequested = true;
+            if (!_pendingNativeCycleGroups.IsEmpty ||
+                (_mergeRequested && Volatile.Read(ref _activeRefreshBatches) == 0))
+                ScheduleMergeWorker(TimeSpan.FromSeconds(1));
             return;
         }
 
         try
         {
-            if (Volatile.Read(ref _activeRefreshBatches) > 0)
-            {
-                _mergeRequested = true;
-                return;
-            }
-
-            if (!_mergeRequested)
-            {
-                return;
-            }
-
+            var cfg = Plugin.Instance.Configuration;
+            await MergePendingNativeCyclesAsync(cfg).ConfigureAwait(false);
+            if (Volatile.Read(ref _activeRefreshBatches) > 0 || !_mergeRequested) return;
             _mergeRequested = false;
-
-            await MergeAllEligibleEpisodesAsync(reason).ConfigureAwait(false);
+            await MergeAllEligibleEpisodesAsync(reason, cfg).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -346,14 +392,44 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
         finally
         {
             _mergeLock.Release();
+            if (!_stopping && (!_pendingNativeCycleGroups.IsEmpty ||
+                (_mergeRequested && Volatile.Read(ref _activeRefreshBatches) == 0)))
+                ScheduleMergeWorker(TimeSpan.FromSeconds(1));
         }
+    }
 
-        // If something arrived while we were working, schedule another quick pass.
-        if (_mergeRequested &&
-            !_stopping &&
-            Volatile.Read(ref _activeRefreshBatches) == 0)
+    private async Task MergePendingNativeCyclesAsync(PluginConfiguration cfg)
+    {
+        // Consume only this snapshot. Events arriving while a group is saved remain
+        // pending; ordinary normalized saves contain no cycle and do not enqueue work.
+        foreach (var key in _pendingNativeCycleGroups.Keys.ToArray())
         {
-            _mergeDebounceTimer?.Change(TimeSpan.FromSeconds(3), Timeout.InfiniteTimeSpan);
+            if (!_pendingNativeCycleGroups.TryRemove(key, out var anchorId)) continue;
+            if (_libraryManager.GetItemById(anchorId) is not Episode anchor || anchor.ParentId == Guid.Empty ||
+                !string.Equals(NormalizeDir(Path.GetDirectoryName(anchor.Path) ?? string.Empty),
+                    key.SeasonDir, StringComparison.OrdinalIgnoreCase)) continue;
+
+            // Load the entire season, including explicit-only siblings and incomplete
+            // native members. A reciprocal pair alone cannot establish the chosen voice.
+            var season = _libraryManager.GetItemList(new InternalItemsQuery
+            {
+                ParentId = anchor.ParentId,
+                IncludeItemTypes = new[] { BaseItemKind.Episode },
+                IncludeOwnedItems = true,
+                GroupByPresentationUniqueKey = false,
+                DtoOptions = new DtoOptions(true)
+            }).OfType<Episode>().Where(item => IsUnderRoot(cfg.OutputRootPath, item.Path) &&
+                string.Equals(NormalizeDir(Path.GetDirectoryName(item.Path) ?? string.Empty),
+                    key.SeasonDir, StringComparison.OrdinalIgnoreCase) &&
+                item.Path.EndsWith(".strm", StringComparison.OrdinalIgnoreCase) && File.Exists(item.Path)).ToList();
+            var group = season.Where(item => GetProvenEpisodeGroupKey(item, season) == key).ToList();
+            var byPath = group.ToDictionary(item => item.Path, StringComparer.OrdinalIgnoreCase);
+            var hasCycle = group.Any(item => item.LocalAlternateVersions.Any(path =>
+                byPath.TryGetValue(path, out var peer) && peer.Id != item.Id &&
+                peer.LocalAlternateVersions.Contains(item.Path, StringComparer.OrdinalIgnoreCase)));
+            if (!hasCycle) continue;
+            await MergeEpisodeGroupAsync(group.Cast<Video>().ToList(), cfg,
+                ParsePreferredTokens(cfg.PreferredTranslationFilter), forceReload: true).ConfigureAwait(false);
         }
     }
 
@@ -379,7 +455,7 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
         // So we DO NOT filter by IsVirtualItem here; instead we filter strictly by:
         // - OutputRootPath containment
         // - .strm extension
-        // - valid episode number
+        // - complete metadata or corroborated managed-file episode identity
         var allEpisodes = _libraryManager.GetItemList(new InternalItemsQuery
         {
             IncludeItemTypes = new[] { BaseItemKind.Episode },
@@ -390,7 +466,6 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
         })
         .OfType<Episode>()
         .Where(ep => IsUnderRoot(root, ep.Path))
-        .Where(ep => ep.IndexNumber.HasValue && ep.IndexNumber.Value > 0)
         .Where(ep => ep.Path != null && ep.Path.EndsWith(".strm", StringComparison.OrdinalIgnoreCase))
         .Where(ep => File.Exists(ep.Path))
         .ToList();
@@ -405,18 +480,14 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
         var groups = allEpisodes
             .Select(ep =>
             {
-                var seasonDir = NormalizeDir(Path.GetDirectoryName(ep.Path) ?? string.Empty);
                 return new
                 {
-                    Key = new EpisodeGroupKey(
-                        SeasonDir: seasonDir,
-                        EpisodeNumber: ep.IndexNumber!.Value,
-                        EpisodeNumberEnd: ep.IndexNumberEnd),
+                    Key = GetProvenEpisodeGroupKey(ep, allEpisodes),
                     Episode = ep
                 };
             })
-            .Where(x => !string.IsNullOrWhiteSpace(x.Key.SeasonDir))
-            .GroupBy(x => x.Key)
+            .Where(x => x.Key.HasValue)
+            .GroupBy(x => x.Key!.Value)
             .Select(g => new { Key = g.Key, Items = g.Select(x => x.Episode).ToList() })
             .Where(g => g.Items.Count > 1)
             .ToList();
@@ -441,6 +512,7 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
 
         foreach (var g in groups)
         {
+            await MergePendingNativeCyclesAsync(cfg).ConfigureAwait(false);
             // Keep the existing merge owner/lock, but apply an interactive choice
             // before continuing the bulk pass. Include already visited groups:
             // their preference may have changed while another title was saved.
@@ -486,7 +558,7 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
             return false;
         }
 
-        var primary = PickPrimaryByPreferredFilter(list, cfg, preferredTokens);
+        var primary = PickPrimaryByPreferredFilter(list.Where(HasCompleteEpisodeIdentity).ToList(), cfg, preferredTokens);
         if (primary == null)
         {
             return false;
@@ -518,24 +590,57 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
                 previous.IndexNumber == item.IndexNumber &&
                 (previous as Episode)?.IndexNumberEnd == (item as Episode)?.IndexNumberEnd &&
                 previous.ParentIndexNumber == item.ParentIndexNumber &&
-                item.IndexNumber.HasValue && item.ParentIndexNumber.HasValue &&
                 File.Exists(item.Path))))
         {
-            // A scan moved, removed or has not finished indexing a member. Its completion
-            // owns the next merge; never write incomplete metadata back over that scan.
+            // A scan moved, removed or changed a member since inventory. Its completion
+            // owns the next merge; never overwrite those concurrent metadata changes.
             return false;
         }
 
-        primary = PickPrimaryByPreferredFilter(fresh, cfg, preferredTokens);
+        // Missing metadata is not permission to infer a different episode: prove the
+        // same group again from fresh records and managed files immediately before saving.
+        var freshEpisodes = fresh.OfType<Episode>().ToList();
+        var provenKeys = freshEpisodes.Select(item => GetProvenEpisodeGroupKey(item, freshEpisodes)).ToArray();
+        if (provenKeys.Length != fresh.Count || provenKeys.Any(key => !key.HasValue) ||
+            provenKeys.Distinct().Count() != 1)
+        {
+            return false;
+        }
+
+        primary = PickPrimaryByPreferredFilter(fresh.Where(HasCompleteEpisodeIdentity).ToList(), cfg, preferredTokens);
         if (primary == null)
         {
             return false;
         }
+        // A promoted native alternate must no longer remain owned by the former
+        // primary: the host would otherwise refresh it back into that old group.
+        var desiredLocalAlternates = BuildDesiredLocalAlternates(fresh, primary.Id);
+        var nativeChildren = desiredLocalAlternates[primary.Id].ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var changed = new List<BaseItem>();
+        foreach (var item in fresh)
+        {
+            var itemChanged = false;
+            if (!PathSetEquals(item.LocalAlternateVersions, desiredLocalAlternates[item.Id]))
+            {
+                item.LocalAlternateVersions = desiredLocalAlternates[item.Id];
+                itemChanged = true;
+            }
+            if (item.Id != primary.Id)
+            {
+                if (nativeChildren.Contains(item.Path) && item.OwnerId != primary.Id)
+                {
+                    item.OwnerId = primary.Id;
+                    itemChanged = true;
+                }
+                itemChanged |= UpdateChildVersionLinks(item, primary.Id);
+            }
+            if (itemChanged)
+            {
+                changed.Add(item);
+            }
+        }
         desiredAlternates = BuildDesiredAlternates(fresh, primary.Id);
-        var changed = fresh.Where(item => item.Id != primary.Id)
-            .Where(item => UpdateChildVersionLinks(item, primary.Id))
-            .Cast<BaseItem>().ToList();
-        if (UpdatePrimaryVersionLinks(primary, desiredAlternates))
+        if (UpdatePrimaryVersionLinks(primary, desiredAlternates) && !changed.Contains(primary))
         {
             changed.Add(primary);
         }
@@ -561,6 +666,86 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
             .Select(g => g.First())
             .ToList();
     }
+
+    private static bool HasCompleteEpisodeIdentity(Video item)
+        => item.IndexNumber is > 0 && item.ParentIndexNumber.HasValue;
+
+    private static EpisodeGroupKey? GetProvenEpisodeGroupKey(Episode item, IReadOnlyList<Episode> candidates)
+    {
+        var directory = NormalizeDir(Path.GetDirectoryName(item.Path) ?? string.Empty);
+        if (string.IsNullOrWhiteSpace(directory)) return null;
+        if (HasCompleteEpisodeIdentity(item))
+            return new EpisodeGroupKey(directory, item.IndexNumber!.Value, item.IndexNumberEnd);
+
+        // A host refresh can persist a native alternate before its episode metadata.
+        // Excluding that alternate leaves recursive native links intact indefinitely.
+        // Use corroborated managed-file identity for links only; do not invent/save metadata.
+        if (item.IndexNumberEnd.HasValue || !TryReadManagedFileIdentity(item, out var season, out var number, out var request) ||
+            (item.IndexNumber.HasValue && item.IndexNumber != number) ||
+            (item.ParentIndexNumber.HasValue && item.ParentIndexNumber != season)) return null;
+
+        var anchors = candidates.Where(other => other.Id != item.Id &&
+                other.IndexNumber == number && other.ParentIndexNumber == season && !other.IndexNumberEnd.HasValue &&
+                string.Equals(directory, NormalizeDir(Path.GetDirectoryName(other.Path) ?? string.Empty), StringComparison.OrdinalIgnoreCase))
+            .Where(other => TryReadManagedFileIdentity(other, out var s, out var e, out _) && s == season && e == number)
+            .ToList();
+        var nativeConnected = anchors.Any(other =>
+            other.LocalAlternateVersions.Contains(item.Path, StringComparer.OrdinalIgnoreCase) ||
+            item.LocalAlternateVersions.Contains(other.Path, StringComparer.OrdinalIgnoreCase));
+        if (!nativeConnected) return null;
+        var keys = BuildSeriesPreferenceKeys(request).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (!anchors.Any(other => TryReadStrmRequest(other.Path, out var sibling, out _) &&
+                BuildSeriesPreferenceKeys(sibling).Any(keys.Contains))) return null;
+
+        return new EpisodeGroupKey(directory, number, null);
+    }
+
+    internal static bool TryReadManagedEpisodeIdentity(Episode item, out int season, out int number, out YummyStreamRequest request)
+        => TryReadManagedFileIdentity(item, out season, out number, out request);
+
+    private static bool TryReadManagedFileIdentity(Episode item, out int season, out int number, out YummyStreamRequest request)
+    {
+        season = number = 0;
+        request = new YummyStreamRequest();
+        var match = Regex.Match(Path.GetFileName(item.Path), @"^S(?<s>\d{2,})E(?<e>\d{2,})(?: - .+)?\.strm$",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1));
+        return match.Success &&
+            int.TryParse(match.Groups["s"].Value, NumberStyles.None, CultureInfo.InvariantCulture, out season) &&
+            int.TryParse(match.Groups["e"].Value, NumberStyles.None, CultureInfo.InvariantCulture, out number) && number > 0 &&
+            string.Equals(Path.GetFileName(Path.GetDirectoryName(item.Path)), $"Season {season:00}", StringComparison.OrdinalIgnoreCase) &&
+            TryReadStrmRequest(item.Path, out request, out _) && request.Episode == number;
+    }
+
+    private static Dictionary<Guid, string[]> BuildDesiredLocalAlternates(IReadOnlyList<Video> items, Guid primaryId)
+    {
+        var groupPaths = items.Select(item => item.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var nativeMembers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var item in items)
+        {
+            foreach (var path in item.LocalAlternateVersions.Where(groupPaths.Contains))
+            {
+                // Both ends belong to the native group, including a former owner.
+                nativeMembers.Add(item.Path);
+                nativeMembers.Add(path);
+            }
+        }
+        nativeMembers.Remove(items.Single(item => item.Id == primaryId).Path);
+        return items.ToDictionary(item => item.Id, item =>
+            item.LocalAlternateVersions.Where(path => !groupPaths.Contains(path))
+                .Concat(item.Id == primaryId ? nativeMembers : Enumerable.Empty<string>())
+                .Distinct(StringComparer.OrdinalIgnoreCase).ToArray());
+    }
+
+    private static bool NativeVersionLinksMatch(IReadOnlyList<Video> items, Guid primaryId)
+    {
+        var desired = BuildDesiredLocalAlternates(items, primaryId);
+        var nativeChildren = desired[primaryId].ToHashSet(StringComparer.OrdinalIgnoreCase);
+        return items.All(item => PathSetEquals(item.LocalAlternateVersions, desired[item.Id]) &&
+            (item.Id == primaryId || !nativeChildren.Contains(item.Path) || item.OwnerId == primaryId));
+    }
+
+    private static bool PathSetEquals(IEnumerable<string> first, IEnumerable<string> second)
+        => first.ToHashSet(StringComparer.OrdinalIgnoreCase).SetEquals(second);
 
     private static List<LinkedChild> BuildDesiredAlternates(List<Video> items, Guid primaryId)
     {
@@ -603,6 +788,7 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
     {
         return !primary.PrimaryVersionId.HasValue
                && primary.OwnerId == Guid.Empty
+               && NativeVersionLinksMatch(items, desiredPrimaryId)
                && LinkedChildrenSetEquals(primary.LinkedAlternateVersions, desiredAlternates)
                && AreChildVersionsAlreadyMerged(items, primary.Id, desiredPrimaryId);
     }
@@ -667,6 +853,20 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
         }
 
         return changed;
+    }
+
+    internal static Video? PickPrimaryForResolvedGroup(List<Video> items, PluginConfiguration cfg)
+        => PickPrimaryByPreferredFilter(items.Where(HasCompleteEpisodeIdentity).ToList(), cfg,
+            ParsePreferredTokens(cfg.PreferredTranslationFilter));
+
+    internal static bool IsCanonicalNativeResolvedGroup(IReadOnlyList<Video> items, Video primary)
+    {
+        if (primary.PrimaryVersionId.HasValue || primary.OwnerId != Guid.Empty ||
+            items.Any(item => item.LinkedAlternateVersions.Length != 0)) return false;
+        var children = items.Where(item => item.Id != primary.Id).ToArray();
+        return PathSetEquals(primary.LocalAlternateVersions, children.Select(item => item.Path)) &&
+            children.All(item => item.LocalAlternateVersions.Length == 0 &&
+                item.OwnerId == primary.Id && item.PrimaryVersionId == primary.Id);
     }
 
     private static Video? PickPrimaryByPreferredFilter(List<Video> items, PluginConfiguration cfg, string[] preferredTokens)
@@ -1177,18 +1377,10 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
             return;
         }
 
-        if (Interlocked.Exchange(ref _authoritativeRefreshMergeCompleted, 0) == 1)
-        {
-            // The post-refresh pass intentionally absorbs ItemAdded/ScanCompleted requests that
-            // arrived while the managed batch was settling or merging.
-            _mergeRequested = false;
-            return;
-        }
-
-        if (_mergeRequested && !_stopping)
-        {
-            RequestMerge(TimeSpan.FromSeconds(3), "RefreshBatchReleased");
-        }
+        // The authoritative pass consumes requests before it starts. A later metadata
+        // save may invalidate a group already processed; retain and drain that request.
+        if (!_stopping && (_mergeRequested || !_pendingNativeCycleGroups.IsEmpty))
+            ScheduleMergeWorker(TimeSpan.FromSeconds(1));
     }
 
     private sealed class RefreshBatchScope : IDisposable

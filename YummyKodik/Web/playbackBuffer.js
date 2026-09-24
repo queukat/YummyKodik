@@ -9,7 +9,7 @@
     function isManagedSource(source) {
         try {
             const path = new URL(source, window.location.href).pathname;
-            return /\/YummyKodik\/(?:stream\/?|kodik-proxy(?:\/.*)?)$/i.test(path);
+            return /\/YummyKodik\/(?:stream\/?|(?:kodik|alloha|cvh)-proxy(?:\/.*)?)$/i.test(path);
         } catch {
             return false;
         }

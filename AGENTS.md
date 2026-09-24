@@ -1,7 +1,7 @@
 # AGENTS.md — YummyKodik
 
 ## Project context
-YummyKodik targets .NET 10 and Jellyfin 12. It generates a TV-show-like STRM/NFO library from YummyAnime metadata and streams episodes through Jellyfin using Alloha, CVH, and Kodik-backed providers. The default `main` branch and release `2.0.0.0` target Jellyfin 12. Branch `jellyfin-10.11` and release `1.2.1.0` carry the same improvements for Jellyfin 10.11.
+YummyKodik targets .NET 10 and Jellyfin 12. It generates a TV-show-like STRM/NFO library from YummyAnime metadata and streams episodes through Jellyfin using Alloha, CVH, and Kodik-backed providers. The default `main` branch and release `2.0.1.0` target Jellyfin 12. Branch `jellyfin-10.11` and release `1.2.2.0` carry the same improvements for Jellyfin 10.11.
 
 ## Project parameters
 - Repository root: `C:\Users\User\RiderProjects\YummyKodik`
@@ -9,7 +9,7 @@ YummyKodik targets .NET 10 and Jellyfin 12. It generates a TV-show-like STRM/NFO
 - Plugin project: `C:\Users\User\RiderProjects\YummyKodik\YummyKodik\YummyKodik.csproj`
 - Regression test project: `C:\Users\User\RiderProjects\YummyKodik\YummyKodik.Tests\YummyKodik.Tests.csproj`
 - Jellyfin Windows service name: `Jellyfin`
-- Local Jellyfin plugin test folder: `C:\ProgramData\Jellyfin\Server\plugins\YummyKodik_1.2.0.0`
+- Local Jellyfin plugin test folder: `C:\ProgramData\Jellyfin\Server\plugins\YummyKodik_2.0.0.0`
 - Preferred local publish staging folder: `C:\Users\User\RiderProjects\YummyKodik\publish\YummyKodik_1.0.0.0`
 - Do not create or keep deployment backup files (`*.bak-*`, backup zip copies, or backup build folders). If rollback is needed, rebuild or use git.
 
@@ -37,10 +37,12 @@ By default, when an agent investigates or uses important project/runtime paths, 
 - `YummyKodik\Api\YummyKodikStreamController.cs`, `YummyKodik\Web\seriesTranslation.js`, `YummyKodik\Web\JellyfinWebSeriesTranslationBootstrapHostedService.cs`, `YummyKodik\Versioning\YummyKodikEpisodeVersionsMergeHostedService.cs`: the widget voice catalog is the normalized union of managed-version and provider voices; injection targets only the active visible Jellyfin details page, uses per-build/static and per-request/API cache keys, and retries a managed partial catalog four times with bounded backoff; explicit widget and native Version-dropdown choices share the canonical preference API and become the series-wide primary so Jellyfin Next/autoplay advances by episode in that voice. `scripts\test-series-translation.cjs` covers the native selection bridge, hidden SPA pages, and ordered saves.
 - `.yummykodik.refresh-state.json`: generated refresh state now also stores per-STRM media segments copied from the best available OP/ED timings for the episode, so Jellyfin segment generation can read local timings before hitting Yummy.
 - `YummyKodik.Tests\Program.cs`: console-style regression runner.
-- `YummyKodik\Util\NfoBuilder.cs`, `YummyKodik.Tests\NfoEncodingTests.cs`: UTF-8 XML declaration must match generated UTF-8 bytes; test parsing bytes, not only strings. Version merging uses host `ILibraryManager.UpdateItemsAsync` with `None` for links only, reloading complete current group records before writes; the Video metadata wrapper recursively saves local alternates in Jellyfin 12.
-- `C:\ProgramData\Jellyfin\Server\plugins\YummyKodik_1.2.0.0`: current local Jellyfin 12 test target; the DLL may carry a newer local test version than the folder/meta version.
+- `YummyKodik\Util\NfoBuilder.cs`, `YummyKodik.Tests\NfoEncodingTests.cs`: UTF-8 XML declaration must match generated UTF-8 bytes; test parsing bytes, not only strings. Version merging uses host `ILibraryManager.UpdateItemsAsync` with `None` for links only, reloading complete current group records before writes; the Video metadata wrapper recursively saves local alternates in Jellyfin 12. Native alternate links and ownership within the managed episode group must move to the selected primary together, preserving out-of-group paths, so host refresh cannot reassert a former owner. Incomplete native members need corroborated managed filename/season/stream and complete-sibling proofs, revalidated before saving; do not invent numeric metadata or select an incomplete primary. Late reciprocal native cycles use cached host identities and a deduplicated group queue in the existing merge worker. Scoped, freshly revalidated repairs run even during a refresh batch; general merge requests remain deferred. Requests arriving during/after a pass must survive batch release. `YummyKodik.Tests/LateNativeMergeTests.cs` covers this lifecycle.
+- `C:\ProgramData\Jellyfin\Server\plugins\YummyKodik_2.0.0.0`: current local Jellyfin 12 test target; verify the installed folder before deployment.
 - `publish\YummyKodik_1.0.0.0`: local publish staging folder used before copying into Jellyfin.
 - `scripts\Deploy-LocalJellyfinPlugin.ps1`: standard self-elevating local deployment script; selects the highest installed `YummyKodik_<version>` directory, stops Jellyfin, replaces only the four runtime files from staging, hash-verifies them, and starts the service without creating backups.
+
+- `artifacts/refresh-load-20260912/docker-10.11/`: isolated Jellyfin 10.11.11 ownership regression fixture and receipts; Docker container `yummykodik-1011-verification`, loopback port `18096`, stopped after verification. No production mounts.
 
 ## Hard constraints
 - Do not add new UI settings and do not change `PluginConfiguration` unless the task explicitly says so.
@@ -121,3 +123,10 @@ Do not overwrite `AllohaApiToken.txt` or `meta.json` during local replacement. `
 - Keep public release notes and changelogs in English, consistent with the README and previous releases, regardless of the conversation language.
 - `.github/release-notes.md` is the single source for the Jellyfin changelog and GitHub release notes.
 - Write only user-visible changes in plain language. Omit implementation details, internal counters, test counts, benchmark reports and engineering disclaimers. State required Jellyfin compatibility.
+
+
+Jellyfin 12 native resolution: `YummyKodik/Versioning/YummyKodikNativeEpisodeResolver.cs` runs before the host MovieResolver and preserves the already canonical chosen primary only for fully proven existing managed seasons. Ambiguous/new/mixed seasons fall back to the host. This adapter is intentionally absent from the Jellyfin 10.11 branch, whose host uses explicit version links. Local refresh acceptance and the library-specific Missing Episode Fetcher exclusion are recorded in `artifacts/refresh-load-20260912/REPORT.md`.
+
+- `YummyKodik/Media/HlsPlaybackManifestResolver.cs`: resolves Alloha gateway fallback once, reads complete HLS duration, and pins the existing local provider proxy session so Jellyfin duration and playback use the same cut.
+
+- `YummyKodik/Yummy/YummyVideoCatalog.cs`: canonical cross-voice skip-timing consensus; own-voice priority and ambiguous fallback preserved. `SkipTimingConsensusTests.cs` covers independent votes and disagreements; saved segment selection versions prevent reuse of pre-consensus state during generation.

@@ -1247,6 +1247,7 @@ namespace YummyKodik.Api
         private ContentResult BuildAllohaManifestResult(AllohaPlaybackSession session)
         {
             SetNoStoreCacheHeader();
+            Response.Headers.ContentLocation = AllohaPlaybackService.BuildManifestProxyUrl(session, BuildAllohaProxyBaseUrl());
             return Content(
                 AllohaPlaybackService.BuildManifestResponseBody(session, BuildAllohaProxyBaseUrl()),
                 "application/vnd.apple.mpegurl");
@@ -2830,6 +2831,7 @@ namespace YummyKodik.Api
                 var session = await cvh.CreatePlaybackSessionAsync(chosenEntry.Cvh, quality, cancellationToken)
                     .ConfigureAwait(false);
                 SetNoStoreCacheHeader();
+                Response.Headers.ContentLocation = CvhClient.BuildManifestProxyUrl(session, BuildCvhProxyBaseUrl());
                 return Content(
                     CvhClient.BuildManifestResponseBody(session, BuildCvhProxyBaseUrl()),
                     "application/vnd.apple.mpegurl");
@@ -2939,9 +2941,7 @@ namespace YummyKodik.Api
                             requestedVoice);
 
                         SetNoStoreCacheHeader();
-                        return Content(
-                            AllohaPlaybackService.BuildManifestResponseBody(session, BuildAllohaProxyBaseUrl()),
-                            "application/vnd.apple.mpegurl");
+                        return BuildAllohaManifestResult(session);
                     }
                 }
                 catch (Exception ex) when (IsYummyProviderFallbackException(ex))

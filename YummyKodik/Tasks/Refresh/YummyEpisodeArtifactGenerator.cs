@@ -261,6 +261,7 @@ internal sealed class YummyEpisodeArtifactGenerator
         context.State.MediaSegmentEntriesByFileBaseName[fileBaseName] = new RefreshStateMediaSegmentEntry
         {
             FileBaseName = fileBaseName,
+            SkipTimingSelectionVersion = YummyVideoCatalog.SkipTimingSelectionVersion,
             EpisodeNumber = episodeNumber,
             Provider = provider.ToString(),
             VoiceName = voiceName,
