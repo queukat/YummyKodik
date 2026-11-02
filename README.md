@@ -1,9 +1,5 @@
 # YummyKodik
 
-<!-- public-repo-status -->
-> Status: Active Jellyfin plugin. Releases are published through GitHub Releases and the plugin manifest; issues are open for reproducible bugs and focused feature requests.
-
-
 ![YummyKodik wordmark](YummyKodik/Assets/wordmark.png)
 
 [![CI](https://img.shields.io/github/actions/workflow/status/queukat/YummyKodik/ci.yml?branch=main&label=CI)](https://github.com/queukat/YummyKodik/actions/workflows/ci.yml)
@@ -20,11 +16,11 @@ YummyKodik is a Jellyfin plugin that builds a local anime library from YummyAnim
 
 ## Quick Links
 
-- Releases: `https://github.com/queukat/YummyKodik/releases`
-- Raw Jellyfin manifest: `https://raw.githubusercontent.com/queukat/YummyKodik/gh-pages/manifest.json`
-- GitHub Pages manifest: `https://queukat.github.io/YummyKodik/manifest.json`
-- Actions: `https://github.com/queukat/YummyKodik/actions`
-- Issues: `https://github.com/queukat/YummyKodik/issues`
+- [Releases](https://github.com/queukat/YummyKodik/releases)
+- [Raw Jellyfin manifest](https://raw.githubusercontent.com/queukat/YummyKodik/gh-pages/manifest.json)
+- [GitHub Pages manifest](https://queukat.github.io/YummyKodik/manifest.json)
+- [Actions](https://github.com/queukat/YummyKodik/actions)
+- [Issues](https://github.com/queukat/YummyKodik/issues)
 
 ## What It Does
 
@@ -36,43 +32,13 @@ YummyKodik is a Jellyfin plugin that builds a local anime library from YummyAnim
 - Uses the requested quality as a preference, then asks the selected provider for the best matching HLS stream.
 - Falls back to another provider when an episode is missing, a selected provider has fewer episodes, or playback resolution fails.
 - Resolves and caches a Kodik token automatically, with an optional manual token override.
-- Adds intro/outro media segments from Yummy/Kodik skip timings for Jellyfin clients that support skip actions.
+- Adds intro/outro skip timings and can borrow them across voice translations when a track has none, so more episodes offer skip buttons in compatible Jellyfin clients.
 - Injects a small Jellyfin Web series-page widget for choosing the series-wide voice translation or returning to auto mode.
 - Can create one episode file per episode, or one episode file per voice translation.
 
-## Provider Blending
-
-Anime providers rarely have identical coverage. One player may already have four aired episodes, another may have two, and a third may have only one or a different set of voice translations. YummyKodik is built around that reality.
-
-During refresh, the plugin asks Yummy for provider metadata and builds a combined picture of what is currently playable. It prefers direct Yummy-backed providers first:
-
-- `Alloha`: usually the first generated provider when Yummy exposes enough Alloha data.
-- `CVH`: used alongside Alloha and as a fallback when CVH has better episode/voice coverage.
-- `Kodik`: used as a fallback and supplement when Yummy provider data is incomplete or a Kodik id is the best available route.
-
-The result is that normal setup has no provider picker to babysit. You configure the anime source and desired quality, then let the plugin do the coverage work across all three providers. If episode 4 exists only in Kodik, refresh can still create the episode file even when Alloha has fewer episodes. If playback for a generated Alloha or CVH URL fails at runtime, the stream endpoint tries neighboring providers before giving up.
-
-Voice selection follows the same idea. The plugin first honors an explicit series-wide choice from the Jellyfin Web widget, then `Preferred translation filter`, then automatic fallback. In per-voice mode it creates separate files for available voice translations; in normal mode it keeps one episode file and resolves the best voice when you press play.
-
-## Jellyfin Web Voice Widget
-
-At startup, the plugin tries to patch Jellyfin Web `index.html` with a small bootstrap script:
-
-```text
-/web/ConfigurationPage?name=seriesTranslation.js&v=<plugin-version>
-```
-
-That script adds an `Озвучка` row to supported series details pages. The widget shows `Авто` plus the normalized voices already present in local STRM files for the whole series, including local Kodik versions. Opening a details page does not contact providers. New voices appear after library refresh generates their files.
-
-An explicit choice becomes the library-wide primary voice for that series. Jellyfin `Next` and autoplay then advance by episode in the chosen voice wherever it exists, while unmatched episodes use the normal safe fallback. Because Jellyfin stores the primary version globally, simultaneous independent voice locks for different users are not supported.
-
-Changing the voice does not require a library refresh. If the selected voice exists only in a neighboring provider, playback can move to that provider instead of silently playing another voice. Choosing `Авто` clears the explicit selection and returns to `Preferred translation filter` plus automatic fallback. Jellyfin's native version selector chooses a voice for the current playback only; it does not change the series-wide preference or the widget.
-
-If Jellyfin Web `index.html` is not writable or not found, the widget is skipped. Playback still works through generated files, `Preferred translation filter`, and per-voice files if that mode is enabled.
-
-The default `main` branch targets Jellyfin 12. The `jellyfin-10.11` branch maintains Jellyfin 10.11 support with the same user-facing improvements.
-
 ## Requirements
+
+Release `2.1.0.0` and the `main` branch target Jellyfin 12. Jellyfin 10.11 uses the separate `jellyfin-10.11` branch and release `1.2.2.0`; the features described here apply to the Jellyfin 12 release.
 
 - Jellyfin `12`. For Jellyfin `10.11.x`, use plugin release `1.2.2.0` from the `jellyfin-10.11` branch.
 - A writable folder visible to the Jellyfin server for generated `.strm` and `.nfo` files.
@@ -102,9 +68,9 @@ Then install:
 
 ## Manual ZIP Install
 
-Download `YummyKodik_<version>.zip` from GitHub Releases and extract the files directly into a versioned plugin folder.
+Download `YummyKodik_<version>.zip` from [GitHub Releases](https://github.com/queukat/YummyKodik/releases). Stop Jellyfin, extract the files directly into a versioned plugin folder, then start Jellyfin again. Use the plugin directory belonging to your installation; the examples below show common Windows locations.
 
-Windows service or tray install:
+Windows service installation:
 
 ```powershell
 $version = "2.1.0.0"
@@ -113,7 +79,7 @@ New-Item -ItemType Directory -Force "$plugins\YummyKodik_$version"
 Expand-Archive ".\YummyKodik_$version.zip" "$plugins\YummyKodik_$version" -Force
 ```
 
-Windows portable install:
+Windows user installation (verify the data directory if using a custom or portable setup):
 
 ```powershell
 $version = "2.1.0.0"
@@ -122,26 +88,11 @@ New-Item -ItemType Directory -Force "$plugins\YummyKodik_$version"
 Expand-Archive ".\YummyKodik_$version.zip" "$plugins\YummyKodik_$version" -Force
 ```
 
-Docker install by copying an already extracted package:
-
-```powershell
-$version = "2.1.0.0"
-docker exec jellyfin mkdir -p /config/plugins/YummyKodik_$version
-docker cp .\artifacts\package\. jellyfin:/config/plugins/YummyKodik_$version/
-docker restart jellyfin
-```
-
-Docker install from a zip inside the container:
-
-```bash
-version=2.1.0.0
-mkdir -p "/config/plugins/YummyKodik_$version"
-unzip "YummyKodik_$version.zip" -d "/config/plugins/YummyKodik_$version"
-```
-
-If Jellyfin cached a failed manual install as `NotSupported`, remove or rename `/config/plugins/YummyKodik_<version>/meta.json` after fixing the files, then restart Jellyfin.
+For Docker, stop the container and extract the ZIP into `plugins/YummyKodik_<version>` under the host directory mounted as `/config`, then start the container again. Use the actual configuration mount from your container setup.
 
 ## Configure
+
+Enter the Yummy public token and an absolute output folder, choose slugs or a user list, and save. Add the output folder as a Jellyfin **Shows** library. Run the corresponding YummyKodik scheduled refresh, then scan that library to see the generated series.
 
 Open `Dashboard -> Plugins -> My Plugins -> YummyKodik -> Settings`.
 
@@ -175,9 +126,9 @@ Optional settings:
 - The account status shows the last verified result and actionable authentication errors. Token-only sign-in is available under advanced account settings and clears the saved password. Password sign-in stores the password on the server for recovery if the token is rejected.
 - `Refresh interval`: scheduled refresh interval in minutes.
 
-Authentication failures no longer appear as successful list refreshes: existing local titles may still be refreshed, but the task finishes as failed with an explanation. Jellyfin records failed tasks in dashboard activity and sends its standard task-completion event to administrator sessions. The settings banner persists the last authentication result; it is not a continuous connectivity check. A list access failure is distinct from an invalid account.
+When list authentication fails, existing local titles may still be refreshed, but the task finishes as failed with an explanation. Jellyfin records failed tasks in dashboard activity and sends its standard task-completion event to administrator sessions. The settings banner persists the last authentication result; it is not a continuous connectivity check. A list access failure is distinct from an invalid account.
 
-The API currently uses hCaptcha only when requested by the provider (HTTP420). The plugin reports this challenge instead of asking every user for an unexplained captcha response; it does not automatically solve or embed a challenge. API address changes must be saved before using the sign-in button. The initial refresh interval applies when a task is first created; change existing schedules in Jellyfin Scheduled Tasks.
+If Yummy requires hCaptcha, sign-in reports the challenge; the plugin cannot complete it automatically. API address changes must be saved before using the sign-in button. The initial refresh interval applies when a task is first created; change existing schedules in Jellyfin Scheduled Tasks.
 
 ## Modes
 
@@ -185,7 +136,7 @@ Manual slug mode:
 
 - Put one or more Yummy slugs in `Yummy slugs`.
 - Leave `Use user list subscription` off.
-- Run `Dashboard -> Scheduled Tasks -> YummyKodik library refresh`.
+- Run `Dashboard -> Scheduled Tasks -> YummyKodik: primary library refresh`.
 
 User list mode:
 
@@ -217,10 +168,44 @@ Per-voice file mode:
 Translation widget mode:
 
 - The plugin patches Jellyfin Web `index.html` at startup to load `seriesTranslation.js`.
-- On a supported series details page, the widget shows `Auto` and the normalized available voice choices across managed versions and providers.
+- On a supported series details page, the widget shows `Авто` (Auto) and the voices present in local episode files for the whole series.
 - Choosing a voice makes it the series-wide primary and keeps `Next`/autoplay on that voice where it is available.
 - Choosing `Auto` clears the explicit selection and returns to automatic selection.
 - No library refresh is required after changing the widget choice.
+
+## Provider Blending
+
+Anime providers rarely have identical coverage. One player may already have four aired episodes, another may have two, and a third may have only one or a different set of voice translations. YummyKodik is built around that reality.
+
+During refresh, the plugin asks Yummy for provider metadata and builds a combined picture of what is currently playable. It prefers direct Yummy-backed providers first:
+
+- `Alloha`: usually the first generated provider when Yummy exposes enough Alloha data.
+- `CVH`: used alongside Alloha and as a fallback when CVH has better episode/voice coverage.
+- `Kodik`: used as a fallback and supplement when Yummy provider data is incomplete or a Kodik id is the best available route.
+
+The result is that normal setup has no provider picker to babysit. You configure the anime source and desired quality, then let the plugin do the coverage work across all three providers. If episode 4 exists only in Kodik, refresh can still create the episode file even when Alloha has fewer episodes. If playback for a generated Alloha or CVH URL fails at runtime, the stream endpoint tries neighboring providers before giving up.
+
+For a fresh Alloha playback request with a specific selected or saved voice, the plugin first tries the same voice on Kodik and keeps Alloha as a fallback. This can select a lower resolution even when a higher quality is preferred.
+
+Voice selection follows the same idea. The plugin first honors an explicit series-wide choice from the Jellyfin Web widget, then `Preferred translation filter`, then automatic fallback. In per-voice mode it creates separate files for available voice translations; in normal mode it keeps one episode file and resolves the best voice when you press play.
+
+## Jellyfin Web Voice Widget
+
+The **Приоритет озвучки** (voice priority) row appears on supported series details pages. The widget shows `Авто` plus the normalized voices already present in local STRM files for the whole series, including local Kodik versions. Opening a details page does not contact providers. New voices appear after library refresh generates their files.
+
+An explicit choice becomes the library-wide primary voice for that series. Jellyfin `Next` and autoplay then advance by episode in the chosen voice wherever it exists, while unmatched episodes use the normal safe fallback. Because Jellyfin stores the primary version globally, simultaneous independent voice locks for different users are not supported.
+
+Changing the voice does not require a library refresh. If the selected voice exists only in a neighboring provider, playback can move to that provider instead of silently playing another voice. Choosing `Авто` clears the explicit selection and returns to `Preferred translation filter` plus automatic fallback. Jellyfin's native version selector chooses a voice for the current playback only; it does not change the series-wide preference or the widget.
+
+If Jellyfin Web `index.html` is not writable or not found, the widget is skipped. Playback still works through generated files, `Preferred translation filter`, and per-voice files if that mode is enabled.
+
+## Intro And Outro Timings
+
+YummyKodik reads opening and ending timings from Yummy/Kodik metadata and supplies them to Jellyfin as media segments. Clients that support these segments can show intro/outro skip buttons.
+
+Timings can transfer between voice translations of the same episode. The selected voice's own usable timings take priority. When they are missing, the plugin can borrow timings from another voice. For Yummy-backed sources, it prefers a complete timing set agreed on by a strict majority of at least two distinct voices, with corresponding boundaries within three seconds. Copies of the same voice on different providers do not count as additional votes.
+
+If the voices disagree or there is not enough evidence for a consensus, the existing provider/voice fallback still applies; borrowed timings are not guaranteed to match every cut. The plugin uses one source's timing set rather than averaging boundaries or combining different cuts. Available timings are also saved with generated episodes for local reuse. Installing an update alone does not replace media segments already stored by Jellyfin.
 
 ## Docker Notes
 
@@ -237,7 +222,7 @@ Mount that path from the host, then point a Jellyfin `Shows` library at the same
 After changing slugs, user-list settings, `Output root path`, or per-voice mode:
 
 1. Save the plugin configuration.
-2. Run `Dashboard -> Scheduled Tasks -> YummyKodik library refresh`.
+2. Run the primary or second-library YummyKodik refresh under `Dashboard -> Scheduled Tasks`, matching the folder you changed.
 3. Scan the Jellyfin library that points at `Output root path`.
 4. Open a generated series and start playback.
 
@@ -294,41 +279,26 @@ This produces:
 
 The release workflow runs on version tags and publishes the ZIP, MD5 checksum, GitHub Release, and `gh-pages` manifest.
 
-Recommended tag format follows the existing release convention:
+After updating the project version and `.github/release-notes.md` and passing verification, publish a new, unused version tag:
 
 ```bash
-git tag 2.1.0.0
-git push origin 2.1.0.0
+version='X.Y.Z.0' # Replace with the new release version.
+git tag "$version"
+git push origin "$version"
 ```
 
 Tags with a leading `v` also work because the workflow normalizes versions.
 
-## Previous Docker Smoke Test
-
-Release `1.2.0.0` was smoke-tested against `jellyfin/jellyfin:10.11.0` with a single configured slug:
-
-```text
-fermerskaya-zhizn-v-inom-mire-2
-```
-
-Verified:
-
-- The plugin loads as `Active`.
-- The refresh task generates one series and five aired episode `.strm` files.
-- Generated stream URLs use Jellyfin's process-local gateway address and do not depend on a client-facing server URL.
-- The generated Alloha stream returns an HLS master playlist.
-- A nested playlist returns `200 application/vnd.apple.mpegurl`.
-- The first proxied `.ts` segment returns `200 video/MP2T`.
-
 ## Notes
 
-- Generated playback sources use HLS.
+- Generated playback sources use HLS. In Jellyfin Web, managed HLS playback waits for up to 60 seconds of contiguous video to be buffered before starting or recovering from a stall; shorter remaining tails need only their remaining duration. The progress overlay includes an automatic-start control.
 - Intro/outro skip support depends on the Jellyfin client honoring media segments.
 - If you update from an older manual install, restart Jellyfin after replacing plugin files.
 
 ## Acknowledgements
 
 Special thanks to [`YaNesyTortiK/AnimeParsers`](https://github.com/YaNesyTortiK/AnimeParsers), which helped show that building a plugin like this was possible in the first place.
+
 ## License
 
 <!-- commercial-license-policy -->
