@@ -32,7 +32,7 @@ namespace YummyKodik.Kodik
 
             if (!resp.IsSuccessStatusCode)
             {
-                throw new KodikServiceException($"Kodik search failed: {resp.StatusCode}: {json}");
+                throw new KodikServiceException($"Kodik search failed: {resp.StatusCode}; responseChars={json.Length}");
             }
 
             using var doc = JsonDocument.Parse(json);

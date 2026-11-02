@@ -132,28 +132,34 @@ internal static class KodikStreamingTests
 
     private static async Task SniffedManifestIsFullyRewrittenAsync()
     {
-        const string manifest = "#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXTINF:6.0,\nsegment-001.ts\n#EXT-X-ENDLIST\n";
-        var source = Encoding.UTF8.GetBytes(manifest);
-        // The extension and content type do not identify a playlist; every prefix read is split.
-        var stream = new ChunkStream(source.Select(value => new[] { value }).ToArray());
-        using var fixture = new Fixture(_ => Response(stream, source.Length, "application/octet-stream"), ".bin");
-        using var destination = new MemoryStream();
-        var callbacks = 0;
-        await fixture.DownloadAsync((_, bytes, token) =>
+        foreach (var mediaType in new[] { "text/plain", "application/octet-stream", "", "application/vnd.apple.mpegurl", "application/x-mpegurl", "audio/mpegurl" })
         {
-            callbacks++;
-            return destination.WriteAsync(bytes, token).AsTask();
-        }).WaitAsync(TestTimeout);
+            const string manifest = "#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXTINF:6.0,\nsegment-001.ts\n#EXT-X-ENDLIST\n";
+            var source = Encoding.UTF8.GetBytes(manifest);
+            // The extension and content type do not identify a playlist; every prefix read is split.
+            var stream = new ChunkStream(source.Select(value => new[] { value }).ToArray());
+            using var fixture = new Fixture(_ => Response(stream, source.Length, mediaType.Length == 0 ? null : mediaType), ".bin");
+            using var destination = new MemoryStream();
+            var callbacks = 0;
+            var result = await fixture.DownloadAsync((contentType, bytes, token) =>
+            {
+                Check(contentType == (mediaType.Contains("mpegurl", StringComparison.OrdinalIgnoreCase) ? mediaType : "application/vnd.apple.mpegurl"),
+                    "A sniffed playlist must advertise HLS to FFmpeg even when upstream sends a generic MIME type.");
+                callbacks++;
+                return destination.WriteAsync(bytes, token).AsTask();
+            }).WaitAsync(TestTimeout);
 
-        var rewritten = Encoding.UTF8.GetString(destination.ToArray());
-        Check(callbacks == 1, "A sniffed manifest must be rewritten completely before one downstream callback.");
-        Check(rewritten.StartsWith("#EXTM3U", StringComparison.Ordinal), "The manifest header must be preserved.");
-        Check(rewritten.Contains(ProxyBaseUrl + "/", StringComparison.Ordinal), "A sniffed manifest must rewrite segment URLs through the canonical proxy.");
-        Check(rewritten.Contains("sessionId=" + fixture.Session.SessionId, StringComparison.Ordinal), "Rewritten URLs must retain the current session.");
-        Check(!rewritten.Contains("\nsegment-001.ts\n", StringComparison.Ordinal), "A raw relative segment URL must not escape rewriting.");
-        Check(fixture.Session.ProxyResources.Values.Contains(new Uri(new Uri(fixture.ResourceUrl), "segment-001.ts").AbsoluteUri),
-            "The rewritten child resource must be registered in the playback session.");
-        Check(stream.WasDisposed, "The manifest source stream must be disposed.");
+            var rewritten = Encoding.UTF8.GetString(destination.ToArray());
+            Check(callbacks == 1, "A sniffed manifest must be rewritten completely before one downstream callback.");
+            Check(rewritten.StartsWith("#EXTM3U", StringComparison.Ordinal), "The manifest header must be preserved.");
+            Check(rewritten.Contains(ProxyBaseUrl + "/", StringComparison.Ordinal), "A sniffed manifest must rewrite segment URLs through the canonical proxy.");
+            Check(rewritten.Contains("sessionId=" + fixture.Session.SessionId, StringComparison.Ordinal), "Rewritten URLs must retain the current session.");
+            Check(!rewritten.Contains("\nsegment-001.ts\n", StringComparison.Ordinal), "A raw relative segment URL must not escape rewriting.");
+            Check(fixture.Session.ProxyResources.Values.Contains(new Uri(new Uri(fixture.ResourceUrl), "segment-001.ts").AbsoluteUri),
+                "The rewritten child resource must be registered in the playback session.");
+            Check(stream.WasDisposed, "The manifest source stream must be disposed.");
+            Check(result.ContentType.Contains("mpegurl", StringComparison.OrdinalIgnoreCase), "Buffered and streaming responses must agree on HLS MIME.");
+        }
     }
 
     private static async Task OversizedResourceStreamsWithoutCachingAsync()

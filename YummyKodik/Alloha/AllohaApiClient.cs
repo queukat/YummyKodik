@@ -1,3 +1,4 @@
+using YummyKodik.Util;
 using System.Collections.Concurrent;
 using System.Globalization;
 using System.Net.Http;
@@ -72,7 +73,7 @@ public sealed class AllohaApiClient
         if (!response.IsSuccessStatusCode)
         {
             throw new InvalidOperationException(
-                $"Alloha API request failed. status={(int)response.StatusCode} {queryName}={queryValue} body={TrimForLog(body)}");
+                $"Alloha API request failed. status={(int)response.StatusCode} {queryName}={queryValue} body={ProviderDiagnostics.DescribePayload(body)}");
         }
 
         if (string.IsNullOrWhiteSpace(body))
@@ -406,11 +407,7 @@ public sealed class AllohaApiClient
         };
     }
 
-    private static string TrimForLog(string? value)
-    {
-        var trimmed = (value ?? string.Empty).Trim();
-        return trimmed.Length <= 512 ? trimmed : trimmed[..512];
-    }
+
 }
 
 public static class AllohaApiCatalogLoader

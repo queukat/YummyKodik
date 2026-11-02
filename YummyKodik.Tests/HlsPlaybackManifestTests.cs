@@ -56,6 +56,31 @@ internal static class HlsPlaybackManifestTests
         }
     }
 
+    public static void BasePathPreservesProxyBoundary()
+    {
+        const string gateway = "http://localhost:8096/jellyfin/YummyKodik/stream";
+        const string valid = "http://localhost:8096/jellyfin/YummyKodik/cvh-proxy/root.m3u8";
+        foreach (var location in new[] { valid,
+            "http://localhost:8096/YummyKodik/cvh-proxy/root.m3u8",
+            "http://localhost:8096/jellyfin-other/YummyKodik/cvh-proxy/root.m3u8",
+            "http://localhost:8097/jellyfin/YummyKodik/cvh-proxy/root.m3u8",
+            "https://localhost:8096/jellyfin/YummyKodik/cvh-proxy/root.m3u8",
+            "http://localhost:8096/jellyfin/YummyKodik/cvh-proxy-foreign/root.m3u8" })
+        {
+            using var handler = new Handler((request, _) => Response(request,
+                "#EXTM3U\n#EXTINF:6,\na.ts\n#EXT-X-ENDLIST", location));
+            using var client = new HttpClient(handler);
+            try
+            {
+                var resolved = HlsPlaybackManifestResolver.ResolveAsync(client, gateway, CancellationToken.None).GetAwaiter().GetResult();
+                if (location != valid || resolved.Url != valid) throw new Exception("Proxy escaped configured base path.");
+                var replay = HlsPlaybackManifestResolver.ResolveAsync(client, resolved.Url, CancellationToken.None).GetAwaiter().GetResult();
+                if (replay.Url != valid) throw new Exception("Pinned proxy replay must preserve base path.");
+            }
+            catch (InvalidOperationException) when (location != valid) { }
+        }
+    }
+
     private static HttpResponseMessage Response(HttpRequestMessage request, string body, string? location)
     {
         var result = new HttpResponseMessage(HttpStatusCode.OK) { RequestMessage = request, Content = new StringContent(body) };

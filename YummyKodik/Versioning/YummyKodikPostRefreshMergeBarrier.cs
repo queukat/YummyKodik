@@ -10,6 +10,7 @@ using MediaBrowser.Controller.Entities.TV;
 using MediaBrowser.Controller.Library;
 using Microsoft.Extensions.Logging;
 using YummyKodik.Logging;
+using YummyKodik.Configuration;
 using YummyKodik.Media;
 using YummyKodik.Util;
 
@@ -61,7 +62,7 @@ public sealed class YummyKodikPostRefreshMergeBarrier
     }
 
     public async Task WaitForEpisodesThenMergeAsync(
-        string outputRoot,
+        IReadOnlyList<string> outputRoots,
         DateTime refreshStartedUtc,
         IReadOnlyCollection<string> initialStrmPaths,
         CancellationToken cancellationToken)
@@ -70,8 +71,8 @@ public sealed class YummyKodikPostRefreshMergeBarrier
         IReadOnlyCollection<string> currentStrmPaths;
         try
         {
-            expectedArtifacts = CollectExpectedArtifacts(outputRoot, refreshStartedUtc);
-            currentStrmPaths = EnumerateCurrentStrmPaths(outputRoot);
+            expectedArtifacts = outputRoots.SelectMany(root => CollectExpectedArtifacts(root, refreshStartedUtc)).ToArray();
+            currentStrmPaths = outputRoots.SelectMany(EnumerateCurrentStrmPaths).ToArray();
         }
         catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
         {
@@ -95,7 +96,7 @@ public sealed class YummyKodikPostRefreshMergeBarrier
 
             try
             {
-                var episodes = LoadEpisodeSnapshots(outputRoot);
+                var episodes = LoadEpisodeSnapshots(outputRoots);
                 readiness = EvaluatePostRefreshReadiness(
                     expectedArtifacts,
                     episodes,
@@ -142,8 +143,8 @@ public sealed class YummyKodikPostRefreshMergeBarrier
             await Task.Delay(PollInterval, cancellationToken).ConfigureAwait(false);
         }
 
-        await ApplyAvailableEpisodeRunTimesAsync(outputRoot, cancellationToken).ConfigureAwait(false);
-        await _mergeService.MergeAfterRefreshAsync(cancellationToken).ConfigureAwait(false);
+        await ApplyAvailableEpisodeRunTimesAsync(outputRoots, cancellationToken).ConfigureAwait(false);
+        await _mergeService.MergeAfterRefreshAsync(outputRoots, cancellationToken).ConfigureAwait(false);
 
         _logger.LogInformation(
             "[YummyKodik] Post-refresh episode versions merge completed. expectedChangedEpisodes={Expected} expectedDeletedEpisodes={Deleted}",
@@ -152,21 +153,11 @@ public sealed class YummyKodikPostRefreshMergeBarrier
     }
 
     internal async Task ApplyAvailableEpisodeRunTimesAsync(
-        string outputRoot,
+        IReadOnlyList<string> outputRoots,
         CancellationToken cancellationToken)
     {
         var updatedCount = 0;
-        var episodes = _libraryManager.GetItemList(new InternalItemsQuery
-        {
-            IncludeItemTypes = new[] { BaseItemKind.Episode },
-            Recursive = true
-        })
-            .OfType<Episode>()
-            .Where(episode => IsUnderRoot(outputRoot, episode.Path))
-            .Where(episode =>
-                episode.Path != null &&
-                episode.Path.EndsWith(".strm", StringComparison.OrdinalIgnoreCase))
-            .ToArray();
+        var episodes = ManagedEpisodeInventory.Load(_libraryManager, outputRoots);
 
         foreach (var episode in episodes)
         {
@@ -356,16 +347,9 @@ public sealed class YummyKodikPostRefreshMergeBarrier
             .ToArray();
     }
 
-    private IReadOnlyList<EpisodeReadinessSnapshot> LoadEpisodeSnapshots(string outputRoot)
+    private IReadOnlyList<EpisodeReadinessSnapshot> LoadEpisodeSnapshots(IReadOnlyList<string> outputRoots)
     {
-        return _libraryManager.GetItemList(new InternalItemsQuery
-        {
-            IncludeItemTypes = new[] { BaseItemKind.Episode },
-            Recursive = true
-        })
-            .OfType<Episode>()
-            .Where(x => IsUnderRoot(outputRoot, x.Path))
-            .Where(x => x.Path != null && x.Path.EndsWith(".strm", StringComparison.OrdinalIgnoreCase))
+        return ManagedEpisodeInventory.Load(_libraryManager, outputRoots)
             .Select(x => new EpisodeReadinessSnapshot(
                 NormalizePath(x.Path!),
                 x.IndexNumber,
@@ -374,26 +358,6 @@ public sealed class YummyKodikPostRefreshMergeBarrier
             .ToList();
     }
 
-    private static bool IsUnderRoot(string root, string? path)
-    {
-        if (string.IsNullOrWhiteSpace(root) || string.IsNullOrWhiteSpace(path))
-        {
-            return false;
-        }
-
-        try
-        {
-            var fullRoot = Path.GetFullPath(root)
-                .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
-                + Path.DirectorySeparatorChar;
-            var fullPath = Path.GetFullPath(path);
-            return fullPath.StartsWith(fullRoot, StringComparison.OrdinalIgnoreCase);
-        }
-        catch
-        {
-            return false;
-        }
-    }
 
     private static string NormalizePath(string? path)
     {

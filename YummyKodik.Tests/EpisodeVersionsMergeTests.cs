@@ -5,10 +5,41 @@ using MediaBrowser.Controller.Library;
 using MediaBrowser.Model.Entities;
 using Microsoft.Extensions.Logging.Abstractions;
 using YummyKodik.Configuration;
+using YummyKodik;
 using YummyKodik.Versioning;
 
 internal static class EpisodeVersionsMergeTests
 {
+    public static void VersionsStayInsideEachLibrary()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "YummyKodikTests", Guid.NewGuid().ToString("N"));
+        try
+        {
+            var first = Path.Combine(root, "first");
+            var second = Path.Combine(root, "second");
+            Directory.CreateDirectory(first);
+            Directory.CreateDirectory(second);
+            var firstA = CreateEpisode(first, 5, "AniStar");
+            var firstB = CreateEpisode(first, 5, "Other");
+            var secondA = CreateEpisode(second, 5, "AniStar");
+            var secondB = CreateEpisode(second, 5, "Other");
+            var library = DispatchProxy.Create<ILibraryManager, GroupedLibraryProxy>();
+            var proxy = (GroupedLibraryProxy)(object)library;
+            proxy.Episodes = new List<BaseItem> { firstA, firstB, secondA, secondB };
+            var cfg = new PluginConfiguration { OutputRootPath = first, SecondOutputRootPath = second, UseSecondUserListSubscription = true, PreferredTranslationFilter = "AniStar" };
+            using var service = new YummyKodikEpisodeVersionsMergeHostedService(library, NullLogger<YummyKodikEpisodeVersionsMergeHostedService>.Instance);
+            service.MergeAllEligibleEpisodesAsync("TwoLibraries", cfg).GetAwaiter().GetResult();
+            Require(firstB.PrimaryVersionId == firstA.Id && secondB.PrimaryVersionId == secondA.Id && firstA.Id != secondA.Id,
+                "Same provider identity in two libraries must form two independent version groups.");
+            Require(firstA.LinkedAlternateVersions.All(item => item.ItemId == firstB.Id) && secondA.LinkedAlternateVersions.All(item => item.ItemId == secondB.Id),
+                "Native/explicit version links must not cross libraries.");
+            var writes = proxy.BatchCount;
+            service.MergeAllEligibleEpisodesAsync("Repeat", cfg).GetAwaiter().GetResult();
+            Require(proxy.BatchCount == writes, "Repeated two-library merge must not rewrite settled groups.");
+        }
+        finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
+    }
+
     public static void SavedVoiceReplacesAlreadyMergedPrimaryAcrossEpisodes()
         => RunAsync().GetAwaiter().GetResult();
 
@@ -81,7 +112,7 @@ internal static class EpisodeVersionsMergeTests
             if (condition == "fresh-file") proxy.BeforeReload = () => File.Delete(incomplete.Path);
             var cfg = new PluginConfiguration { OutputRootPath = root, PreferredTranslationFilter = "AniDUB|AniLiberty" };
             using var service = new YummyKodikEpisodeVersionsMergeHostedService(
-                library, null!, NullLogger<YummyKodikEpisodeVersionsMergeHostedService>.Instance);
+                library, NullLogger<YummyKodikEpisodeVersionsMergeHostedService>.Instance);
             await service.MergeAllEligibleEpisodesAsync("IncompleteNative", cfg);
             if (condition != null)
             {
@@ -135,7 +166,7 @@ internal static class EpisodeVersionsMergeTests
             proxy.Episodes = new List<BaseItem> { oldPrimary, native, selected, explicitChild };
             var cfg = new PluginConfiguration { OutputRootPath = root, PreferredTranslationFilter = "Dream Cast" };
             using var service = new YummyKodikEpisodeVersionsMergeHostedService(
-                library, null!, NullLogger<YummyKodikEpisodeVersionsMergeHostedService>.Instance);
+                library, NullLogger<YummyKodikEpisodeVersionsMergeHostedService>.Instance);
 
             await service.MergeAllEligibleEpisodesAsync("RepairNativeOwnership", cfg);
             Require(proxy.BatchCount == 1, "Broken native ownership must invalidate the fast no-op check.");
@@ -178,7 +209,7 @@ internal static class EpisodeVersionsMergeTests
             proxy.Episodes = new List<BaseItem> { primary, child };
             var cfg = new PluginConfiguration { OutputRootPath = root, PreferredTranslationFilter = "AniStar" };
             using var service = new YummyKodikEpisodeVersionsMergeHostedService(
-                library, null!, NullLogger<YummyKodikEpisodeVersionsMergeHostedService>.Instance);
+                library, NullLogger<YummyKodikEpisodeVersionsMergeHostedService>.Instance);
             await service.MergeAllEligibleEpisodesAsync("ScanCompleted", cfg);
             Require(proxy.BatchCount == 0, "Already persisted native versions must not be added again as linked versions.");
             primary.OwnerId = child.Id;
@@ -251,7 +282,7 @@ internal static class EpisodeVersionsMergeTests
             };
             var cfg = new PluginConfiguration { OutputRootPath = root, PreferredTranslationFilter = "AniStar" };
             using var service = new YummyKodikEpisodeVersionsMergeHostedService(
-                library, null!, NullLogger<YummyKodikEpisodeVersionsMergeHostedService>.Instance);
+                library, NullLogger<YummyKodikEpisodeVersionsMergeHostedService>.Instance);
             await service.MergeAllEligibleEpisodesAsync("ScanCompleted", cfg);
             Require(inventory[0].SaveCount == 0, "The old inventory object must never be persisted.");
             Require(File.ReadAllText(nfoPath) == "unchanged sidecar", "Link edits must leave NFOs untouched.");
@@ -302,7 +333,7 @@ internal static class EpisodeVersionsMergeTests
             var cfg = new PluginConfiguration { OutputRootPath = root };
             cfg.SetUserSeriesPreferredTranslationId(Guid.Empty, "yummy:24253", "AniStar");
             using var service = new YummyKodikEpisodeVersionsMergeHostedService(
-                library, null!, NullLogger<YummyKodikEpisodeVersionsMergeHostedService>.Instance);
+                library, NullLogger<YummyKodikEpisodeVersionsMergeHostedService>.Instance);
             await service.MergeAllEligibleEpisodesAsync("Startup", cfg);
 
             var visible = library.GetItemList(new InternalItemsQuery());
@@ -331,6 +362,8 @@ internal static class EpisodeVersionsMergeTests
 
     private static async Task RunPriorityAsync()
     {
+        var previousPlugin = Plugin.Instance;
+        var previousLogConfiguration = YummyKodik.Logging.YummyKodikLogFilter.ConfigurationProvider;
         var root = Path.Combine(Path.GetTempPath(), "YummyKodikTests", Guid.NewGuid().ToString("N"));
         var seriesDirectories = new[] { "Target", "Trigger", "Later" }
             .Select(name => Path.Combine(root, name)).ToArray();
@@ -361,10 +394,15 @@ internal static class EpisodeVersionsMergeTests
             var later = (StoredEpisode)episodes[5];
             var library = DispatchProxy.Create<ILibraryManager, GroupedLibraryProxy>();
             ((GroupedLibraryProxy)(object)library).Episodes = episodes;
-            var cfg = new PluginConfiguration { OutputRootPath = root, PreferredTranslationFilter = "AnimeVost" };
+            var paths = DispatchProxy.Create<MediaBrowser.Common.Configuration.IApplicationPaths, LateNativeMergeTests.HostDependencyProxy>();
+            ((LateNativeMergeTests.HostDependencyProxy)(object)paths).Root = root;
+            var serializer = DispatchProxy.Create<MediaBrowser.Model.Serialization.IXmlSerializer, LateNativeMergeTests.HostDependencyProxy>();
+            var cfg = new Plugin(paths, serializer, NullLogger<Plugin>.Instance).Configuration;
+            cfg.OutputRootPath = root;
+            cfg.PreferredTranslationFilter = "AnimeVost";
             ((GroupedLibraryProxy)(object)library).SnapshotInventory = true;
             using var service = new YummyKodikEpisodeVersionsMergeHostedService(
-                library, null!, NullLogger<YummyKodikEpisodeVersionsMergeHostedService>.Instance);
+                library, NullLogger<YummyKodikEpisodeVersionsMergeHostedService>.Instance);
             var requested = false;
             var reachedLater = false;
             trigger.OnSave = () =>
@@ -391,6 +429,8 @@ internal static class EpisodeVersionsMergeTests
         }
         finally
         {
+            typeof(Plugin).GetProperty(nameof(Plugin.Instance))!.SetValue(null, previousPlugin);
+            YummyKodik.Logging.YummyKodikLogFilter.ConfigurationProvider = previousLogConfiguration;
             foreach (var directory in directories)
             {
                 foreach (var path in Directory.EnumerateFiles(directory))
@@ -429,7 +469,7 @@ internal static class EpisodeVersionsMergeTests
             var cfg = new PluginConfiguration { OutputRootPath = root };
             cfg.SetUserSeriesPreferredTranslationId(Guid.Empty, "yummy:24253", "AniStar");
             using var service = new YummyKodikEpisodeVersionsMergeHostedService(
-                library, null!, NullLogger<YummyKodikEpisodeVersionsMergeHostedService>.Instance);
+                library, NullLogger<YummyKodikEpisodeVersionsMergeHostedService>.Instance);
 
             await service.MergeAllEligibleEpisodesAsync("TranslationPreferenceChanged", cfg);
 
@@ -515,6 +555,8 @@ internal static class EpisodeVersionsMergeTests
 
         protected override object? Invoke(MethodInfo? targetMethod, object?[]? args)
         {
+            if (targetMethod?.Name == nameof(ILibraryManager.FindByPath))
+                return new Folder { Id = Guid.NewGuid(), Path = (string)args![0]! };
             if (targetMethod?.Name == nameof(ILibraryManager.GetItemList) &&
                 args?[0] is InternalItemsQuery query)
             {

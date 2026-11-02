@@ -79,7 +79,7 @@ internal sealed class RefreshTitleService
                     ex,
                     "[YummyKodik] Failed to load Yummy metadata for key '{Key}' and no usable local fallback snapshot was found.",
                     cleanKey);
-                return;
+                throw;
             }
 
             summaryTitle = refresh.TitleInfo.Title;
@@ -153,6 +153,15 @@ internal sealed class RefreshTitleService
                 .ConfigureAwait(false);
             if (kodikLookup == null)
             {
+                // Kodik supplements Yummy coverage; an outage must not hide available episodes.
+                // Keep unverified existing files and state so the next run retries the full pass.
+                if (deferYummyGenerationUntilKodik && refresh.Availability.YummySupportedEpisodes.Length > 0)
+                {
+                    using (await _seriesRootLockProvider.AcquireAsync(refresh.Files.SeriesRoot, cancellationToken).ConfigureAwait(false))
+                    {
+                        await GenerateYummyArtifactsAsync(refresh, state, seasonDir, cfg, perf, cancellationToken).ConfigureAwait(false);
+                    }
+                }
                 return;
             }
 

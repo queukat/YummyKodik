@@ -35,7 +35,7 @@ public sealed class YummyKodikNativeEpisodeResolver(ILibraryManager libraryManag
         CollectionType? collectionType, PluginConfiguration cfg)
     {
         if (parent is not Season || parent.Id == Guid.Empty || collectionType != CollectionType.tvshows ||
-            !IsInsideRoot(cfg.OutputRootPath, parent.Path)) return null;
+            !cfg.ContainsLibraryPath(parent.Path)) return null;
 
         var strmFiles = files.Where(file => !file.IsDirectory &&
             string.Equals(Path.GetExtension(file.FullName), ".strm", StringComparison.OrdinalIgnoreCase)).ToList();
@@ -99,12 +99,4 @@ public sealed class YummyKodikNativeEpisodeResolver(ILibraryManager libraryManag
            string.Equals(Path.TrimEndingDirectorySeparator(Path.GetFullPath(first)),
                Path.TrimEndingDirectorySeparator(Path.GetFullPath(second)), StringComparison.OrdinalIgnoreCase);
 
-    private static bool IsInsideRoot(string? root, string? path)
-    {
-        if (string.IsNullOrWhiteSpace(root) || string.IsNullOrWhiteSpace(path)) return false;
-        var relative = Path.GetRelativePath(root, path);
-        return !Path.IsPathRooted(relative) && relative != ".." &&
-               !relative.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal) &&
-               !relative.StartsWith(".." + Path.AltDirectorySeparatorChar, StringComparison.Ordinal);
-    }
 }

@@ -3,6 +3,7 @@ obj/
 artifacts/
 publish/
 reports/
+output/
 tmp/
 .tmp/
 .dotnet-cli/

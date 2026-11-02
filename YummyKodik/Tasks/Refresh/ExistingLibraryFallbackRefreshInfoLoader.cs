@@ -17,7 +17,7 @@ internal sealed class ExistingLibraryFallbackRefreshInfoLoader
         TimeSpan.FromSeconds(1));
 
     private static readonly Regex EpisodeFileRegex = new(
-        @"^S(?<season>\d{2})E(?<episode>\d{2})(?: - (?<suffix>.+))?$",
+        @"^S(?<season>\d{2})E(?<episode>\d{2,})(?: - (?<suffix>.+))?$",
         RegexOptions.CultureInvariant | RegexOptions.IgnoreCase | RegexOptions.Compiled,
         TimeSpan.FromSeconds(1));
 

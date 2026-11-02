@@ -3,9 +3,11 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Net.Http;
 using System.Threading;
 using System.Threading.Tasks;
+using MediaBrowser.Controller.Library;
 using MediaBrowser.Model.Tasks;
 using Microsoft.Extensions.Logging;
 using YummyKodik.Configuration;
@@ -31,6 +33,7 @@ namespace YummyKodik.Tasks
         private readonly IHttpClientFactory _httpClientFactory;
         private readonly IInternalJellyfinUrlProvider _internalJellyfinUrlProvider;
         private readonly YummyKodikPostRefreshMergeBarrier _postRefreshMergeBarrier;
+        private readonly ILibraryMonitor _libraryMonitor;
         private readonly SemaphoreSlim _runGate = new(1, 1);
         private readonly SeriesRootLockProvider _seriesRootLockProvider = new();
 
@@ -38,19 +41,21 @@ namespace YummyKodik.Tasks
             ILogger<RefreshYummyKodikLibraryTask> logger,
             IHttpClientFactory httpClientFactory,
             IInternalJellyfinUrlProvider internalJellyfinUrlProvider,
-            YummyKodikPostRefreshMergeBarrier postRefreshMergeBarrier)
+            YummyKodikPostRefreshMergeBarrier postRefreshMergeBarrier,
+            ILibraryMonitor libraryMonitor)
         {
             _logger = new YummyKodikLogger<RefreshYummyKodikLibraryTask>(logger);
             _httpClientFactory = httpClientFactory;
             _internalJellyfinUrlProvider = internalJellyfinUrlProvider;
             _postRefreshMergeBarrier = postRefreshMergeBarrier;
+            _libraryMonitor = libraryMonitor;
         }
 
         public string Key => "YummyKodikRefresh";
 
-        public string Name => "YummyKodik library refresh";
+        public string Name => "YummyKodik: primary library refresh";
 
-        public string Description => "Creates/updates YummyAnime based anime series and Kodik backed STRM episodes.";
+        public string Description => "Updates only the primary output folder and its Yummy list or manual titles.";
 
         public string Category => "YummyKodik";
 
@@ -67,22 +72,30 @@ namespace YummyKodik.Tasks
 
         public Task ExecuteAsync(IProgress<double> progress, CancellationToken cancellationToken)
         {
-            return ExecuteInternalAsync(progress, cancellationToken);
+            return ExecuteTargetAsync(0, progress, cancellationToken);
         }
 
-        private async Task ExecuteInternalAsync(IProgress<double> progress, CancellationToken cancellationToken)
+        internal async Task ExecuteTargetAsync(int targetIndex, IProgress<double> progress, CancellationToken cancellationToken)
         {
-            await RunWithRunGateAsync(
+            var ran = await RunWithRunGateAsync(
                     _runGate,
                     _logger,
-                    () => ExecuteRefreshBodyAsync(progress, cancellationToken))
+                    () => ExecuteRefreshBodyAsync(targetIndex, progress, cancellationToken))
                 .ConfigureAwait(false);
+            if (!ran)
+                _logger.LogWarning("[YummyKodik] Library {LibraryNumber} refresh skipped: another library refresh is running. Run this task again or stagger its scheduled triggers.", targetIndex + 1);
         }
 
-        private async Task ExecuteRefreshBodyAsync(IProgress<double> progress, CancellationToken cancellationToken)
+        private async Task ExecuteRefreshBodyAsync(int targetIndex, IProgress<double> progress, CancellationToken cancellationToken)
         {
             var plugin = Plugin.Instance;
             var cfg = plugin.Configuration;
+            var targets = cfg.GetLibraryTargets();
+            if (targetIndex >= targets.Count)
+            {
+                progress.Report(100);
+                return;
+            }
 
             if (!ValidateConfiguration(cfg))
             {
@@ -93,7 +106,11 @@ namespace YummyKodik.Tasks
             var runOutcome = "completed";
             try
             {
-                var root = cfg.OutputRootPath;
+                LibraryTarget.Validate(targets);
+                var target = targets[targetIndex];
+                var root = target.OutputRootPath;
+                var roots = new[] { root };
+                progress.Report(0);
                 Directory.CreateDirectory(root);
                 var internalBaseUrl = _internalJellyfinUrlProvider.GetBaseUrl();
                 var refreshStartedUtc = DateTime.UtcNow;
@@ -115,91 +132,52 @@ namespace YummyKodik.Tasks
 
                     runMetrics.AddCount("files.strm_snapshot", initialStrmPaths.Count);
 
-                    using (runMetrics.Measure("phase.runtime_backfill.pre"))
-                    {
-                        var updatedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                        var updated = await EpisodeRuntimeBackfillService
-                            .BackfillMissingAsync(root, _logger, cancellationToken, updatedPaths)
-                            .ConfigureAwait(false);
-                        runMetrics.AddCount("runtime.backfill_updated", updated);
-                        var stateHashesUpdated = await ReconcileRuntimeBackfillStateAsync(
-                                root,
-                                updatedPaths,
-                                cancellationToken)
-                            .ConfigureAwait(false);
-                        runMetrics.AddCount("runtime.state_hashes_updated", stateHashesUpdated);
-                    }
-
+                    var refreshClients = CreateRefreshClients(cfg, runMetrics, cancellationToken);
+                    var titleService = CreateTitleService(plugin.Logger);
+                    await BackfillRuntimeStateAsync(root, runMetrics, cancellationToken).ConfigureAwait(false);
                     using (runMetrics.Measure("phase.runtime_publish.pre"))
                     {
-                        await _postRefreshMergeBarrier
-                            .ApplyAvailableEpisodeRunTimesAsync(root, cancellationToken)
-                            .ConfigureAwait(false);
+                        await _postRefreshMergeBarrier.ApplyAvailableEpisodeRunTimesAsync(roots, cancellationToken).ConfigureAwait(false);
                     }
-
-                    var refreshClients = CreateRefreshClients(cfg, runMetrics, cancellationToken);
-                    var titleKeySource = new RefreshTitleKeySource(_logger, plugin.SaveConfiguration);
-                    List<string> allKeys;
+                    cancellationToken.ThrowIfCancellationRequested();
+                    // Fetch outcome belongs to this target; a failed list can never authorize its cleanup.
+                    var titleKeySource = new RefreshTitleKeySource(_logger, plugin.SaveConfiguration, () => plugin.Configuration);
+                    List<string> keys;
                     using (runMetrics.Measure("phase.title_keys"))
                     {
-                        allKeys = await titleKeySource.BuildAsync(cfg, refreshClients.Yummy, cancellationToken).ConfigureAwait(false);
-                        AddExistingLibraryKeysAfterUserListFailure(root, titleKeySource, allKeys);
+                        keys = await titleKeySource.BuildAsync(cfg, refreshClients.Yummy, cancellationToken, target).ConfigureAwait(false);
+                        AddExistingLibraryKeysAfterUserListFailure(root, titleKeySource, keys);
                     }
-
-                    runMetrics.AddCount("titles.total", allKeys.Count);
+                    runMetrics.AddCount("titles.total", keys.Count);
+                    _logger.LogInformation("[YummyKodik] Library refresh: root='{Root}' listId={ListId} titles={Count} listFetched={Fetched}",
+                        root, target.UseUserListSubscription ? target.YummyUserListId : -1, keys.Count, titleKeySource.UserListFetchSucceeded);
                     using (runMetrics.Measure("phase.stale_cleanup"))
                     {
                         await CleanupStaleReleasesAfterSuccessfulUserListFetchAsync(
-                                root,
-                                cfg,
-                                titleKeySource,
-                                allKeys,
-                                runMetrics,
-                                cancellationToken)
-                            .ConfigureAwait(false);
+                            root, cfg, target, titleKeySource, keys, runMetrics, cancellationToken).ConfigureAwait(false);
                     }
-
-                    if (allKeys.Count == 0)
+                    var failedTitles = 0;
+                    if (keys.Count > 0)
                     {
-                        _logger.LogInformation("[YummyKodik] No slugs or list items configured, nothing to refresh.");
-                    }
-                    else
-                    {
-                        var titleService = CreateTitleService(plugin.Logger);
                         using (runMetrics.Measure("phase.titles"))
                         {
-                            await ProcessKeysInParallelAsync(
-                                    allKeys,
-                                    (key, tokenForKey) => titleService.RefreshAsync(key, root, internalBaseUrl, cfg, refreshClients, tokenForKey),
-                                    progress,
-                                    _logger,
-                                    runMetrics,
-                                    cancellationToken)
-                                .ConfigureAwait(false);
+                            failedTitles = await ProcessKeysInParallelAsync(keys,
+                                (key, tokenForKey) => titleService.RefreshAsync(key, root, internalBaseUrl, cfg, refreshClients, tokenForKey),
+                                progress, _logger, runMetrics, cancellationToken).ConfigureAwait(false);
                         }
                     }
-
-                    using (runMetrics.Measure("phase.runtime_backfill.post"))
-                    {
-                        var updatedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                        var updated = await EpisodeRuntimeBackfillService
-                            .BackfillMissingAsync(root, _logger, cancellationToken, updatedPaths)
-                            .ConfigureAwait(false);
-                        runMetrics.AddCount("runtime.backfill_updated", updated);
-                        var stateHashesUpdated = await ReconcileRuntimeBackfillStateAsync(
-                                root,
-                                updatedPaths,
-                                cancellationToken)
-                            .ConfigureAwait(false);
-                        runMetrics.AddCount("runtime.state_hashes_updated", stateHashesUpdated);
-                    }
-
+                    await BackfillRuntimeStateAsync(root, runMetrics, cancellationToken).ConfigureAwait(false);
                     using (runMetrics.Measure("phase.readiness_merge"))
                     {
                         await _postRefreshMergeBarrier
-                            .WaitForEpisodesThenMergeAsync(root, refreshStartedUtc, initialStrmPaths, cancellationToken)
+                            .WaitForEpisodesThenMergeAsync(roots, refreshStartedUtc, initialStrmPaths, cancellationToken)
                             .ConfigureAwait(false);
                     }
+                    if (titleKeySource.UserListFetchFailed)
+                        throw new InvalidOperationException($"Yummy list {target.YummyUserListId} was not updated ({titleKeySource.FailureCode}). Existing local titles were refreshed where possible. Open YummyKodik settings to check the account.");
+                    if (failedTitles > 0)
+                        throw new InvalidOperationException($"YummyKodik refresh failed for {failedTitles} title(s). Other titles were processed; see the server log for affected titles.");
+                    progress.Report(100);
                 }
             }
             catch (OperationCanceledException)
@@ -218,9 +196,22 @@ namespace YummyKodik.Tasks
             }
         }
 
+        private async Task BackfillRuntimeStateAsync(string root, RefreshRunMetrics metrics, CancellationToken cancellationToken)
+        {
+            using (metrics.Measure("phase.runtime_backfill"))
+            {
+                var updatedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                var updated = await EpisodeRuntimeBackfillService.BackfillMissingAsync(root, _logger, cancellationToken, updatedPaths).ConfigureAwait(false);
+                metrics.AddCount("runtime.backfill_updated", updated);
+                var reconciled = await ReconcileRuntimeBackfillStateAsync(root, updatedPaths, cancellationToken).ConfigureAwait(false);
+                metrics.AddCount("runtime.state_hashes_updated", reconciled);
+            }
+        }
+
         private async Task CleanupStaleReleasesAfterSuccessfulUserListFetchAsync(
             string root,
             PluginConfiguration cfg,
+            LibraryTarget target,
             RefreshTitleKeySource titleKeySource,
             IReadOnlyList<string> allKeys,
             RefreshRunMetrics runMetrics,
@@ -231,10 +222,10 @@ namespace YummyKodik.Tasks
                 return;
             }
 
-            if (!cfg.UseUserListSubscription || !titleKeySource.UserListFetchSucceeded)
+            if (!target.UseUserListSubscription || !titleKeySource.UserListFetchSucceeded)
             {
                 _logger.LogWarning(
-                    "[YummyKodik] DeleteReleasesNotInYummyList is enabled, but stale-release cleanup was skipped because the current Yummy user list was not fetched successfully.");
+                    "[YummyKodik] Stale-release cleanup skipped for '{Root}': its Yummy list was not fetched successfully.", root);
                 return;
             }
 
@@ -251,6 +242,13 @@ namespace YummyKodik.Tasks
             var result = await StaleReleaseCleanupService
                 .CleanupAsync(root, normalizedKeys, _logger, cancellationToken)
                 .ConfigureAwait(false);
+
+            // Native reconciliation handles the catalogue (including metadata-only series),
+            // even when this library has no active filesystem watcher.
+            foreach (var deletedPath in result.DeletedPaths)
+            {
+                _libraryMonitor.ReportFileSystemChanged(deletedPath);
+            }
 
             runMetrics.AddCount("cleanup.examined", result.ExaminedDirectoryCount);
             runMetrics.AddCount("cleanup.deleted_series", result.DeletedSeriesDirectoryCount);
@@ -298,8 +296,8 @@ namespace YummyKodik.Tasks
             if (added > 0)
             {
                 _logger.LogWarning(
-                    "[YummyKodik] Yummy user list is unavailable; added {Count} existing local title key(s) for provider-only fallback refresh.",
-                    added);
+                    "[YummyKodik] Yummy user list is unavailable for '{Root}'; added {Count} existing local title key(s) for provider-only fallback refresh.",
+                    root, added);
             }
         }
 
@@ -415,7 +413,7 @@ namespace YummyKodik.Tasks
             }
         }
 
-        private static async Task ProcessKeysInParallelAsync(
+        private static async Task<int> ProcessKeysInParallelAsync(
             IReadOnlyList<string> allKeys,
             Func<string, CancellationToken, Task> refreshKeyAsync,
             IProgress<double>? progress,
@@ -425,6 +423,7 @@ namespace YummyKodik.Tasks
         {
             var perItemStep = 100.0 / allKeys.Count;
             var completed = 0;
+            var failed = 0;
             var progressGate = new object();
 
             progress?.Report(0);
@@ -445,6 +444,7 @@ namespace YummyKodik.Tasks
                         }
                         catch (Exception ex) when (!tokenForKey.IsCancellationRequested)
                         {
+                            Interlocked.Increment(ref failed);
                             runMetrics?.AddCount("titles.unhandled_failed");
                             logger.LogError(ex, "[YummyKodik] Failed to refresh key '{Key}': {Message}", key, ex.Message);
                         }
@@ -459,6 +459,7 @@ namespace YummyKodik.Tasks
                         }
                     })
                 .ConfigureAwait(false);
+            return failed;
         }
     }
 }

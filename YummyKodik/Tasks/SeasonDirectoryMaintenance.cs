@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
-using System.Xml;
+using YummyKodik.Tasks.Refresh;
 using Microsoft.Extensions.Logging;
 
 namespace YummyKodik.Tasks
@@ -515,7 +515,7 @@ namespace YummyKodik.Tasks
                 }
 
                 var xml = File.ReadAllText(nfoPath);
-                if (!IsValidXmlContent(xml))
+                if (!RefreshFileWriter.IsValidXmlContent(xml))
                 {
                     return;
                 }
@@ -529,7 +529,8 @@ namespace YummyKodik.Tasks
 
                 if (!string.Equals(xml, updated, StringComparison.Ordinal))
                 {
-                    File.WriteAllText(nfoPath, updated);
+                    RefreshFileWriter.WriteTextAtomicallyAsync(nfoPath, updated, null, "nfo", CancellationToken.None)
+                        .GetAwaiter().GetResult();
                 }
             }
             catch (Exception ex)
@@ -538,29 +539,5 @@ namespace YummyKodik.Tasks
             }
         }
 
-        private static bool IsValidXmlContent(string? content)
-        {
-            if (string.IsNullOrWhiteSpace(content))
-            {
-                return false;
-            }
-
-            try
-            {
-                var settings = new XmlReaderSettings
-                {
-                    DtdProcessing = DtdProcessing.Ignore,
-                    IgnoreComments = true,
-                    IgnoreWhitespace = true
-                };
-
-                using var reader = XmlReader.Create(new StringReader(content), settings);
-                return reader.MoveToContent() == XmlNodeType.Element;
-            }
-            catch (XmlException)
-            {
-                return false;
-            }
-        }
     }
 }

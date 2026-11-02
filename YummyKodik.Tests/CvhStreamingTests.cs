@@ -88,25 +88,36 @@ internal static class CvhStreamingTests
 
     private static async Task SniffedManifestIsRewrittenBeforeWritingAsync()
     {
-        const string manifest = " \n#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXTINF:6,\nchild.ts\n#EXT-X-ENDLIST\n";
-        var bytes = Encoding.UTF8.GetBytes(manifest);
-        var stream = new ScriptedStream(bytes.Select(value => new[] { value }).ToArray());
-        using var handler = new Handler(request => Response(request, stream, bytes.Length));
-        using var http = new HttpClient(handler);
-        using var received = new MemoryStream();
-        var session = Session();
-        var writes = 0;
-        await new CvhClient(http).DownloadProxyResourceAsync(session, "https://cdn.cvh.example/video/opaque.bin", ProxyBaseUrl, CancellationToken.None,
-            (_, content, token) =>
+        foreach (var mediaType in new[] { "text/plain", "application/octet-stream", "", "application/vnd.apple.mpegurl", "application/x-mpegurl", "audio/mpegurl" })
+        {
+            const string manifest = " \n#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXTINF:6,\nchild.ts\n#EXT-X-ENDLIST\n";
+            var bytes = Encoding.UTF8.GetBytes(manifest);
+            var stream = new ScriptedStream(bytes.Select(value => new[] { value }).ToArray());
+            using var handler = new Handler(request =>
             {
-                writes++;
-                return received.WriteAsync(content, token).AsTask();
-            }).WaitAsync(Timeout);
-        var rewritten = Encoding.UTF8.GetString(received.ToArray());
-        Check(writes == 1, "A manifest split across prefix reads must be rewritten fully before the first write.");
-        Check(rewritten.Contains(ProxyBaseUrl + "/", StringComparison.Ordinal) && rewritten.Contains("sessionId=" + session.SessionId, StringComparison.Ordinal), "CVH child URLs must use the current session and canonical proxy path.");
-        Check(!rewritten.Contains("\nchild.ts\n", StringComparison.Ordinal), "A sniffed manifest must not leak its original child URL.");
-        Check(session.ProxyResources.Values.Contains("https://cdn.cvh.example/video/child.ts") && stream.Disposed, "Rewritten resources must be registered and the upstream disposed.");
+                var response = Response(request, stream, bytes.Length);
+                if (mediaType.Length > 0) response.Content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue(mediaType);
+                return response;
+            });
+            using var http = new HttpClient(handler);
+            using var received = new MemoryStream();
+            var session = Session();
+            var writes = 0;
+            var result = await new CvhClient(http).DownloadProxyResourceAsync(session, "https://cdn.cvh.example/video/opaque.bin", ProxyBaseUrl, CancellationToken.None,
+                (contentType, content, token) =>
+                {
+                    Check(contentType == (mediaType.Contains("mpegurl", StringComparison.OrdinalIgnoreCase) ? mediaType : "application/vnd.apple.mpegurl"),
+                        "A sniffed playlist must advertise HLS to FFmpeg even when upstream sends a generic MIME type.");
+                    writes++;
+                    return received.WriteAsync(content, token).AsTask();
+                }).WaitAsync(Timeout);
+            var rewritten = Encoding.UTF8.GetString(received.ToArray());
+            Check(writes == 1, "A manifest split across prefix reads must be rewritten fully before the first write.");
+            Check(rewritten.Contains(ProxyBaseUrl + "/", StringComparison.Ordinal) && rewritten.Contains("sessionId=" + session.SessionId, StringComparison.Ordinal), "CVH child URLs must use the current session and canonical proxy path.");
+            Check(!rewritten.Contains("\nchild.ts\n", StringComparison.Ordinal), "A sniffed manifest must not leak its original child URL.");
+            Check(session.ProxyResources.Values.Contains("https://cdn.cvh.example/video/child.ts") && stream.Disposed, "Rewritten resources must be registered and the upstream disposed.");
+            Check(result.ContentType.Contains("mpegurl", StringComparison.OrdinalIgnoreCase), "Buffered and streaming responses must agree on HLS MIME.");
+        }
     }
 
     private static async Task PartialFailureAndCancellationStopWritesAsync()

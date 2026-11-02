@@ -225,7 +225,7 @@ internal sealed class EpisodeArtifactWriter
 
         var effectiveSeasonNumber = seasonNumber >= 0 ? seasonNumber : 1;
         var filePattern = new Regex(
-            @"^S(?<season>\d{2})E(?<episode>\d{2})(?: - (?<suffix>.+))?$",
+            @"^S(?<season>\d{2})E(?<episode>\d{2,})(?: - (?<suffix>.+))?$",
             RegexOptions.CultureInvariant | RegexOptions.IgnoreCase,
             TimeSpan.FromSeconds(1));
 

@@ -1,7 +1,6 @@
 ﻿using System;
 using System.Net;
 using System.Net.Http;
-using System.Net.Security;
 using MediaBrowser.Controller;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Plugins;
@@ -23,6 +22,10 @@ public sealed class PluginServiceRegistrator : IPluginServiceRegistrator
 {
     public void RegisterServices(IServiceCollection serviceCollection, IServerApplicationHost applicationHost)
     {
+        serviceCollection.AddTransient<YummyKodikHlsVideoEncodingFilter>();
+        serviceCollection.Configure<Microsoft.AspNetCore.Mvc.MvcOptions>(options =>
+            options.Filters.Add(new Microsoft.AspNetCore.Mvc.ServiceFilterAttribute(typeof(YummyKodikHlsVideoEncodingFilter))));
+
         serviceCollection.AddLogging(builder =>
         {
             builder.AddFilter("YummyKodik", YummyKodikLogFilter.ShouldLogPluginCategory);
@@ -106,12 +109,7 @@ public sealed class PluginServiceRegistrator : IPluginServiceRegistrator
                 AutomaticDecompression =
                     DecompressionMethods.GZip |
                     DecompressionMethods.Deflate |
-                    DecompressionMethods.Brotli,
-                // api.alloha.tv currently serves an invalid certificate, so keep the bypass
-                // narrowly scoped to that single upstream instead of disabling TLS checks globally.
-                ServerCertificateCustomValidationCallback = static (request, _, _, sslErrors) =>
-                    sslErrors == SslPolicyErrors.None ||
-                    string.Equals(request?.RequestUri?.Host, "api.alloha.tv", StringComparison.OrdinalIgnoreCase)
+                    DecompressionMethods.Brotli
             });
 
         serviceCollection
@@ -132,9 +130,35 @@ public sealed class PluginServiceRegistrator : IPluginServiceRegistrator
             });
 
         serviceCollection.AddSingleton<IInternalJellyfinUrlProvider>(_ => new InternalJellyfinUrlProvider(applicationHost));
-        serviceCollection.AddSingleton<IMediaSourceProvider, YummyKodikMediaSourceProvider>();
+        // Jellyfin's GetExports creates providers with ActivatorUtilities as well
+        // as through registrations. Both paths must receive the deferred manager.
+        serviceCollection.AddSingleton<Func<IMediaSourceManager>>(sp => () => sp.GetRequiredService<IMediaSourceManager>());
+        serviceCollection.AddSingleton(sp => new YummyKodikMediaSourceProvider(
+            sp.GetRequiredService<ILogger<YummyKodikMediaSourceProvider>>(),
+            sp.GetRequiredService<IHttpClientFactory>(),
+            sp.GetRequiredService<IInternalJellyfinUrlProvider>(),
+            sp.GetRequiredService<ILibraryManager>(),
+            sp.GetRequiredService<Func<IMediaSourceManager>>()));
+        serviceCollection.AddSingleton<IMediaSourceProvider>(sp => sp.GetRequiredService<YummyKodikMediaSourceProvider>());
+        var nativeSourceManager = serviceCollection.Last(descriptor => descriptor.ServiceType == typeof(IMediaSourceManager));
+        serviceCollection.Remove(nativeSourceManager);
+        serviceCollection.AddSingleton<IMediaSourceManager>(sp => new YummyKodikMediaSourceManager(
+            (IMediaSourceManager)(nativeSourceManager.ImplementationInstance ??
+                nativeSourceManager.ImplementationFactory?.Invoke(sp) ??
+                ActivatorUtilities.CreateInstance(sp, nativeSourceManager.ImplementationType!)),
+            sp.GetRequiredService<YummyKodikMediaSourceProvider>()));
         serviceCollection.AddSingleton<MediaBrowser.Controller.MediaSegments.IMediaSegmentProvider, YummyKodikMediaSegmentProvider>();
-        serviceCollection.AddSingleton<AllohaPlaybackService>();
+        serviceCollection.AddHttpClient(HttpClientNames.AllohaBrowserIdentity, client =>
+        {
+            client.Timeout = TimeSpan.FromSeconds(3);
+            client.MaxResponseContentBufferSize = 64 * 1024;
+        });
+        serviceCollection.AddSingleton(sp => new AllohaBrowserIdentity(
+            sp.GetRequiredService<IHttpClientFactory>().CreateClient(HttpClientNames.AllohaBrowserIdentity),
+            System.IO.Path.Combine(sp.GetRequiredService<MediaBrowser.Common.Configuration.IApplicationPaths>().CachePath,
+                "YummyKodik", "alloha-browser-major.txt")));
+        serviceCollection.AddSingleton(sp => new AllohaPlaybackService(
+            sp.GetRequiredService<ILogger<AllohaPlaybackService>>(), sp.GetRequiredService<AllohaBrowserIdentity>()));
 
         // Inject the series translation widget into Jellyfin Web once on startup.
         serviceCollection.AddHostedService<JellyfinWebSeriesTranslationBootstrapHostedService>();
@@ -144,7 +168,9 @@ public sealed class PluginServiceRegistrator : IPluginServiceRegistrator
         serviceCollection.AddSingleton<IItemResolver, YummyKodikNativeEpisodeResolver>();
         serviceCollection.AddSingleton<IHostedService>(sp => sp.GetRequiredService<YummyKodikEpisodeVersionsMergeHostedService>());
         serviceCollection.AddSingleton<YummyKodikPostRefreshMergeBarrier>();
-        serviceCollection.AddSingleton<MediaBrowser.Model.Tasks.IScheduledTask, RefreshYummyKodikLibraryTask>();
+        serviceCollection.AddSingleton<RefreshYummyKodikLibraryTask>();
+        serviceCollection.AddSingleton<MediaBrowser.Model.Tasks.IScheduledTask>(sp => sp.GetRequiredService<RefreshYummyKodikLibraryTask>());
+        serviceCollection.AddSingleton<MediaBrowser.Model.Tasks.IScheduledTask, RefreshSecondYummyKodikLibraryTask>();
 
         // Warm Jellyfin media segments for newly scanned YummyKodik STRM episodes instead of
         // waiting for the next global "Detect and Analyze Media Segments" scheduled task.

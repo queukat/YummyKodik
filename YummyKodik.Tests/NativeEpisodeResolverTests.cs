@@ -12,6 +12,17 @@ using YummyKodik.Versioning;
 
 internal static class NativeEpisodeResolverTests
 {
+    public static void NativeResolutionRecognizesSecondRoot()
+    {
+        using var fixture = new Fixture();
+        fixture.Configuration.SecondOutputRootPath = fixture.Configuration.OutputRootPath;
+        fixture.Configuration.OutputRootPath = Path.Combine(fixture.Root, "other-library");
+        fixture.Configuration.UseSecondUserListSubscription = true;
+        Require(fixture.Resolve()?.Items.Single().Id == fixture.Primary.Id, "A proven selected version in the second library must survive native scanning.");
+        fixture.Configuration.UseSecondUserListSubscription = false;
+        Require(fixture.Resolve() == null, "Disabled roots must not be intercepted by native resolution.");
+    }
+
     public static void RepeatedResolutionPreservesSelectedOwnerWithoutMutatingStoredItems()
     {
         using var fixture = new Fixture();
@@ -91,6 +102,7 @@ internal static class NativeEpisodeResolverTests
         Require(fixture.Resolver.Priority < ResolverPriority.Fourth && fixture.Resolver.ResolvePath(null!) == null,
             "The scoped multi-item resolver must precede the host movie resolver and never intercept individual paths.");
         var services = new ServiceCollection();
+        services.AddSingleton(DispatchProxy.Create<IMediaSourceManager, NativePlaybackSessionTests.Proxy>());
         new PluginServiceRegistrator().RegisterServices(services, null!);
         Require(services.Any(service => service.ServiceType == typeof(IItemResolver) &&
                 service.ImplementationType == typeof(YummyKodikNativeEpisodeResolver)),

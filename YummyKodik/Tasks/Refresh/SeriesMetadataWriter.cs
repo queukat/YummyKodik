@@ -42,7 +42,7 @@ internal sealed class SeriesMetadataWriter
                 }
             }
         }
-        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or IOException)
+        catch (Exception ex) when (!cancellationToken.IsCancellationRequested && ex is HttpRequestException or TaskCanceledException or IOException)
         {
             logger.LogWarning(
                 ex,
@@ -69,7 +69,7 @@ internal sealed class SeriesMetadataWriter
             return false;
         }
 
-        var resp = await http.GetAsync(url, cancellationToken).ConfigureAwait(false);
+        using var resp = await http.GetAsync(url, cancellationToken).ConfigureAwait(false);
         resp.EnsureSuccessStatusCode();
 
         Directory.CreateDirectory(seriesRoot);

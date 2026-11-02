@@ -143,7 +143,7 @@ public static class EpisodeArtifactMaintenance
         }
 
         var episodeArtifactPattern = new Regex(
-            @"^S(?<season>\d{2})E(?<episode>\d{2})(?: - .+)?$",
+            @"^S(?<season>\d{2})E(?<episode>\d{2,})(?: - .+)?$",
             RegexOptions.CultureInvariant | RegexOptions.IgnoreCase,
             TimeSpan.FromSeconds(1));
 
@@ -206,7 +206,7 @@ public static class EpisodeArtifactMaintenance
         }
 
         if (!int.TryParse(match.Groups["season"].Value, out var parsedSeason) ||
-            parsedSeason != Math.Max(1, seasonNumber))
+            parsedSeason != (seasonNumber >= 0 ? seasonNumber : 1))
         {
             return false;
         }

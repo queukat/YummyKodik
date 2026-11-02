@@ -50,63 +50,12 @@
         return requestJson(url);
     }
 
-    // Widget and native version choices share one write queue: a slower catalog
-    // response must never overwrite a newer explicit choice.
+    // Serialize priority changes so an older save cannot overwrite a newer choice.
     let selectionSaveQueue = Promise.resolve();
     function queueSelectionSave(operation) {
         const result = selectionSaveQueue.then(operation);
         selectionSaveQueue = result.catch(() => {});
         return result;
-    }
-
-    function voiceKey(value) {
-        return String(value || "").normalize("NFKC").toLowerCase().replace(/[^\p{L}\p{N}]/gu, "");
-    }
-
-    async function saveNativeVersion(event) {
-        const select = event.target;
-        if (event.isTrusted === false || !isDetailsPage()
-            || !select || !select.matches("select.selectSource")
-            || !select.isConnected || !select.getClientRects().length) {
-            return;
-        }
-
-        const page = select.closest(".page");
-        if (page && (page.classList.contains("hide") || page.getAttribute("aria-hidden") === "true")) {
-            return;
-        }
-
-        // Capture the active item and option now; Jellyfin retains old details
-        // pages and can navigate away while the authenticated request is pending.
-        const seriesId = parseItemIdFromHash();
-        const option = select.selectedOptions[0];
-        const selectedVoice = option && voiceKey(option.textContent);
-        if (!seriesId || !select.value || !selectedVoice) return;
-
-        try {
-            const saved = await queueSelectionSave(async () => {
-                const data = await apiGetTranslations(seriesId);
-                if (!data.seriesKey || data.reason === "not-managed") return false;
-
-                const matches = normalizeTranslations(data.translations)
-                    .filter(item => voiceKey(item.label) === selectedVoice);
-                if (matches.length !== 1) return false;
-
-                await apiSetTranslation(seriesId, matches[0].id);
-                return true;
-            });
-            if (!saved) return;
-
-            if (isDetailsPage() && parseItemIdFromHash() === seriesId) {
-                const widget = document.getElementById(WIDGET_ID);
-                if (widget && widget._reload) await widget._reload();
-            }
-            // The selected version and widget already confirm the choice.
-            // Jellyfin 12 may turn a toast into a modal that interrupts Play.
-        } catch (e) {
-            console.error("[YummyKodik] native version preference failed:", e);
-            toast("Не удалось сохранить озвучку для следующих серий");
-        }
     }
 
     async function requestJson(url) {
@@ -165,7 +114,7 @@
 
     function isManagedPartialResponse(data) {
         const reason = String(data && data.reason || "").trim().toLowerCase();
-        if (reason === "not-managed") {
+        if (reason === "not-managed" || reason === "local-empty") {
             return false;
         }
 
@@ -193,9 +142,17 @@
         wrapper.id = WIDGET_ID;
         wrapper.className = WIDGET_CLASS;
 
+        // Keep Jellyfin's fixed desktop ribbon compact instead of expanding it around
+        // the floated poster. Scope the title rule to cards with our voice widget.
+        const titleStyle = document.createElement("style");
+        const titleSelector = ".layout-desktop .itemDetailPage:has(#" + WIDGET_ID + ") .nameContainer .parentName";
+        titleStyle.textContent = titleSelector + " { min-width: 0; max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }"
+            + titleSelector + " > bdi, " + titleSelector + " > bdi > a { display: block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }";
+        wrapper.appendChild(titleStyle);
+
         const label = document.createElement("div");
         label.className = "label";
-        label.textContent = "Озвучка";
+        label.textContent = "Приоритет озвучки";
 
         const content = document.createElement("div");
         content.className = "content focuscontainer-x";
@@ -215,7 +172,7 @@
                 setBusy(content, true);
                 await queueSelectionSave(() => apiSetTranslation(model.seriesId, translationId));
                 await reload();
-                toast(translationId ? "Озвучка сохранена" : "Автовыбор включён");
+                toast(translationId ? "Приоритет озвучки сохранён" : "Автовыбор включён");
             } catch (e) {
                 console.error("[YummyKodik] setTranslation failed:", e);
                 toast("Ошибка сохранения выбора");
@@ -241,7 +198,7 @@
                 id: item.id,
                 label: item.label,
                 active: savedTranslationId === item.id,
-                title: savedTranslationId === item.id ? "Сохранённый выбор" : item.label
+                title: savedTranslationId === item.id ? "Приоритет для сериала" : item.label
             })));
 
             items.forEach((item, index) => {
@@ -313,6 +270,7 @@
     }
 
     let lastSeriesId = "";
+    let emptySeriesId = "";
     let injectRequestId = 0;
     let pendingSeriesId = "";
     let retrySeriesId = "";
@@ -352,6 +310,7 @@
             removeWidget();
             return;
         }
+        if (emptySeriesId === seriesId) return;
 
         const host = findInjectHost();
         if (!host) {
@@ -364,6 +323,7 @@
         if (seriesId === lastSeriesId && currentWidget) {
             return;
         }
+        if (pendingSeriesId === seriesId) return;
 
         pendingSeriesId = seriesId;
         const requestId = ++injectRequestId;
@@ -381,6 +341,7 @@
                 if (isManagedPartialResponse(data)) {
                     scheduleCatalogRetry(seriesId);
                 } else {
+                    emptySeriesId = seriesId;
                     retrySeriesId = "";
                     retryCount = 0;
                 }
@@ -398,6 +359,12 @@
 
             removeWidget();
             const widget = buildWidget({ seriesId }, data);
+
+            const detailsPage = currentHost.container.closest(".itemDetailPage");
+            const title = detailsPage && detailsPage.querySelector(".nameContainer .parentName");
+            if (title && !title.getAttribute("title")) {
+                title.setAttribute("title", title.textContent.trim());
+            }
 
             if (currentHost.before && currentHost.before.parentElement === currentHost.container) {
                 currentHost.container.insertBefore(widget, currentHost.before);
@@ -418,13 +385,24 @@
 
     let timer = 0;
     function scheduleInject(delay) {
-        if (timer) window.clearTimeout(timer);
-        timer = window.setTimeout(() => injectIfNeeded(), typeof delay === "number" ? delay : 150);
+        // Page mutations must not postpone work indefinitely or replace an in-flight request.
+        if (timer) return;
+        timer = window.setTimeout(() => {
+            timer = 0;
+            return injectIfNeeded();
+        }, typeof delay === "number" ? delay : 150);
     }
 
-    window.addEventListener("hashchange", scheduleInject);
+    window.addEventListener("hashchange", () => {
+        if (timer) window.clearTimeout(timer);
+        timer = 0;
+        pendingSeriesId = "";
+        emptySeriesId = "";
+        injectRequestId++;
+        scheduleInject();
+    });
     document.addEventListener("viewshow", scheduleInject);
-    document.addEventListener("change", saveNativeVersion, true);
+    // Native Version selection belongs to Jellyfin and never changes series priority.
     window.addEventListener("pageshow", scheduleInject);
 
     const observer = new MutationObserver(() => {

@@ -1,3 +1,4 @@
+using YummyKodik.Util;
 ﻿// File: Kodik/KodikClient.cs
 
 using System;
@@ -29,8 +30,6 @@ namespace YummyKodik.Kodik
         private const int UnknownCryptStep = -1;
 
         // Verbose HTTP logging settings.
-        private const int HttpLogBodyMaxLen = 1500;
-        private const int HttpLogFormMaxLen = 900;
         private static readonly char[] ManifestLineSeparators = { '\r', '\n' };
         private static readonly TimeSpan RegexTimeout = TimeSpan.FromSeconds(1);
         private static readonly JsonSerializerOptions SearchJsonSerializerOptions = new JsonSerializerOptions
@@ -453,7 +452,7 @@ namespace YummyKodik.Kodik
             var lastSlash = directUrl.LastIndexOf('/');
             if (lastSlash < 0)
             {
-                _logger?.LogWarning("Direct url format not recognized. url={Url}", Short(linkData.Url, 300));
+                _logger?.LogWarning("Direct url format not recognized. url={Url}", ProviderDiagnostics.DescribePayload(linkData.Url));
                 throw new KodikUnexpectedException("Direct url format is not recognized.");
             }
 
@@ -461,7 +460,7 @@ namespace YummyKodik.Kodik
 
             _logger?.LogDebug(
                 "Kodik link resolved. basePath={BasePath} maxQ={MaxQ}",
-                Short(basePath, 200),
+                ProviderDiagnostics.DescribePayload(basePath),
                 linkData.MaxQuality);
 
             return new KodikLinkInfo(basePath, linkData.MaxQuality);
@@ -768,7 +767,7 @@ namespace YummyKodik.Kodik
                     "Kodik get-player returned error (HTTP {Status}). url={Url} error={Error}",
                     (int)response.StatusCode,
                     SanitizeUrl(requestUrl),
-                    apiError);
+                    ProviderDiagnostics.DescribePayload(apiError));
 
                 ThrowForKodikApiError(apiError, "Kodik get-player returned error");
             }
@@ -777,7 +776,7 @@ namespace YummyKodik.Kodik
                 "Kodik get-player HTTP failed. status={Status} url={Url} bodySnippet={Body}",
                 (int)response.StatusCode,
                 SanitizeUrl(requestUrl),
-                Short(content, 350));
+                ProviderDiagnostics.DescribePayload(content));
 
             throw new KodikServiceException(
                 $"Unexpected status code {response.StatusCode} while calling get-player.");
@@ -812,7 +811,7 @@ namespace YummyKodik.Kodik
             _logger?.LogDebug(
                 "Kodik get-player returned HTML that does not look like a player page. url={Url} bodySnippet={Body}",
                 SanitizeUrl(requestUrl),
-                Short(content, 350));
+                ProviderDiagnostics.DescribePayload(content));
 
             throw new KodikUnexpectedException("Kodik get-player returned HTML instead of JSON.");
         }
@@ -825,7 +824,7 @@ namespace YummyKodik.Kodik
             if (root.TryGetProperty("error", out var errorProp))
             {
                 var error = errorProp.GetString();
-                _logger?.LogWarning("Kodik get-player returned error: {Error}", error);
+                _logger?.LogWarning("Kodik get-player returned error: {Error}", ProviderDiagnostics.DescribePayload(error));
                 ThrowForKodikApiError(error, "Kodik get-player returned error");
             }
 
@@ -870,7 +869,7 @@ namespace YummyKodik.Kodik
                 throw new KodikTokenException(TokenInvalidMessage);
             }
 
-            throw new KodikServiceException($"{messagePrefix}: {error}");
+            throw new KodikServiceException($"{messagePrefix}: {ProviderDiagnostics.DescribePayload(error)}");
         }
 
         private static bool LooksLikeHtmlResponse(HttpResponseMessage response, string content)
@@ -976,7 +975,7 @@ namespace YummyKodik.Kodik
         {
             if (!Uri.TryCreate(playerUrl, UriKind.Absolute, out var uri))
             {
-                throw new KodikUnexpectedException($"Player url is not absolute: {playerUrl}");
+                throw new KodikUnexpectedException($"Player url is not absolute: {SanitizeUrl(playerUrl)}");
             }
 
             // Keep same path (/serial/{mediaId}/{mediaHash}/720p)
@@ -1211,13 +1210,12 @@ namespace YummyKodik.Kodik
             try
             {
                 var json = ExtractJsAssignedJsonObject(html, "urlParams");
-                _logger?.LogDebug("urlParams json extracted. len={Len} snippet={Snippet}", json.Length, Short(json, 450));
+                _logger?.LogDebug("urlParams json extracted. len={Len} snippet={Snippet}", json.Length, ProviderDiagnostics.DescribePayload(json));
                 return ParseJsonToDict(json);
             }
             catch (Exception ex) when (ex is not KodikException)
             {
-                var near = TryGetSnippetNear(html, "urlParams", 900);
-                _logger?.LogWarning(ex, "Failed to extract urlParams. htmlLen={Len} near={Near}", html.Length, Short(near, 900));
+                _logger?.LogWarning(ex, "Failed to extract urlParams. htmlLen={Len} near={Near}", html.Length, ProviderDiagnostics.DescribePayload(html));
                 throw new KodikUnexpectedException("urlParams block not found in player page.", ex);
             }
         }
@@ -1231,7 +1229,7 @@ namespace YummyKodik.Kodik
 
                 if (root.ValueKind != JsonValueKind.Object)
                 {
-                    _logger?.LogWarning("urlParams json is not object. kind={Kind} snippet={Snippet}", root.ValueKind, Short(json, 450));
+                    _logger?.LogWarning("urlParams json is not object. kind={Kind} snippet={Snippet}", root.ValueKind, ProviderDiagnostics.DescribePayload(json));
                     throw new KodikUnexpectedException("urlParams json is not an object.");
                 }
 
@@ -1258,7 +1256,7 @@ namespace YummyKodik.Kodik
             }
             catch (JsonException ex)
             {
-                _logger?.LogWarning(ex, "Failed to parse urlParams json. snippet={Snippet}", Short(json, 700));
+                _logger?.LogWarning(ex, "Failed to parse urlParams json. snippet={Snippet}", ProviderDiagnostics.DescribePayload(json));
                 throw new KodikUnexpectedException("Failed to parse urlParams json block.", ex);
             }
         }
@@ -1504,7 +1502,7 @@ namespace YummyKodik.Kodik
 
                 EnsureVideoLinkQuality(maxQuality, jsonString);
 
-                _logger?.LogDebug("Video link selected. maxQ={MaxQ} urlSnippet={Url}", maxQuality, Short(finalUrl, 250));
+                _logger?.LogDebug("Video link selected. maxQ={MaxQ} urlSnippet={Url}", maxQuality, ProviderDiagnostics.DescribePayload(finalUrl));
                 return (finalUrl, maxQuality);
             }
             catch (Exception ex) when (ShouldInvalidatePostPath(ex, cancellationToken))
@@ -1582,7 +1580,7 @@ namespace YummyKodik.Kodik
                     "Video links returned error (HTTP {Status}). url={Url} error={Error}",
                     (int)response.StatusCode,
                     SanitizeUrl(postUrl),
-                    apiError);
+                    ProviderDiagnostics.DescribePayload(apiError));
 
                 ThrowForKodikApiError(apiError, "Video links request returned error");
             }
@@ -1591,7 +1589,7 @@ namespace YummyKodik.Kodik
                 "Video links HTTP failed. status={Status} url={Url} bodySnippet={Body}",
                 (int)response.StatusCode,
                 SanitizeUrl(postUrl),
-                Short(jsonString, 450));
+                ProviderDiagnostics.DescribePayload(jsonString));
 
             throw new KodikServiceException(
                 $"Unexpected status code {response.StatusCode} while requesting video links.");
@@ -1605,7 +1603,7 @@ namespace YummyKodik.Kodik
             if (root.TryGetProperty("error", out var errorProp))
             {
                 var error = errorProp.GetString();
-                _logger?.LogWarning("Video links returned error: {Error}", error);
+                _logger?.LogWarning("Video links returned error: {Error}", ProviderDiagnostics.DescribePayload(error));
                 ThrowForKodikApiError(error, "Video links request returned error");
             }
 
@@ -1613,7 +1611,7 @@ namespace YummyKodik.Kodik
             var (dataUrl, maxQuality) = ExtractVideoLinkData(linksElement);
             if (dataUrl == null)
             {
-                _logger?.LogWarning("Base video url not found in links payload. payloadSnippet={Payload}", Short(jsonString, 800));
+                _logger?.LogWarning("Base video url not found in links payload. payloadSnippet={Payload}", ProviderDiagnostics.DescribePayload(jsonString));
                 throw new KodikUnexpectedException("Base video url not found in links payload.");
             }
 
@@ -1676,7 +1674,7 @@ namespace YummyKodik.Kodik
         {
             if (maxQuality == 0)
             {
-                _logger?.LogWarning("Max quality could not be determined. payloadSnippet={Payload}", Short(jsonString, 800));
+                _logger?.LogWarning("Max quality could not be determined. payloadSnippet={Payload}", ProviderDiagnostics.DescribePayload(jsonString));
                 throw new KodikUnexpectedException("Max quality could not be determined from links payload.");
             }
         }
@@ -1794,7 +1792,7 @@ namespace YummyKodik.Kodik
                     "Script fetch failed. status={Status} url={Url} bodySnippet={Body}",
                     (int)response.StatusCode,
                     SanitizeUrl(url),
-                    Short(scriptBody, 450));
+                    ProviderDiagnostics.DescribePayload(scriptBody));
 
                 throw new KodikServiceException(
                     $"Unexpected status code {response.StatusCode} while requesting script file.");
@@ -1803,7 +1801,7 @@ namespace YummyKodik.Kodik
             var ajaxIndex = scriptBody.IndexOf("$.ajax", StringComparison.Ordinal);
             if (ajaxIndex < 0)
             {
-                _logger?.LogDebug("Script does not contain $.ajax. url={Url} snippet={Body}", SanitizeUrl(url), Short(scriptBody, 700));
+                _logger?.LogDebug("Script does not contain $.ajax. url={Url} snippet={Body}", SanitizeUrl(url), ProviderDiagnostics.DescribePayload(scriptBody));
                 throw new KodikUnexpectedException("$.ajax call not found inside script file.");
             }
 
@@ -1816,7 +1814,7 @@ namespace YummyKodik.Kodik
             var cacheIndex = scriptBody.IndexOf("cache:!1", start, StringComparison.Ordinal);
             if (cacheIndex < 0)
             {
-                _logger?.LogDebug("Script does not contain cache flag. url={Url} snippet={Body}", SanitizeUrl(url), Short(scriptBody, 700));
+                _logger?.LogDebug("Script does not contain cache flag. url={Url} snippet={Body}", SanitizeUrl(url), ProviderDiagnostics.DescribePayload(scriptBody));
                 throw new KodikUnexpectedException("cache flag not found while extracting post link.");
             }
 
@@ -1826,12 +1824,12 @@ namespace YummyKodik.Kodik
             {
                 var bytes = Convert.FromBase64String(encoded);
                 var decoded = Encoding.UTF8.GetString(bytes);
-                _logger?.LogDebug("Post link decoded. path={Path}", Short(decoded, 160));
+                _logger?.LogDebug("Post link decoded. path={Path}", ProviderDiagnostics.DescribePayload(decoded));
                 return decoded;
             }
             catch (FormatException ex)
             {
-                _logger?.LogWarning(ex, "Failed to decode base64 post link. encodedSnippet={Enc}", Short(encoded, 200));
+                _logger?.LogWarning(ex, "Failed to decode base64 post link. encodedSnippet={Enc}", ProviderDiagnostics.DescribePayload(encoded));
                 throw new KodikDecryptionException("Failed to decode base64 encoded post link.", ex);
             }
         }
@@ -1983,7 +1981,7 @@ namespace YummyKodik.Kodik
                 }
             }
 
-            throw new KodikUnexpectedException($"Failed to parse video type, hash or id from player script. url={urlForLogs}");
+            throw new KodikUnexpectedException($"Failed to parse video type, hash or id from player script. url={SanitizeUrl(urlForLogs)}");
         }
 
         private static List<string> ExtractScriptSrcCandidates(HtmlDocument doc)
@@ -2057,82 +2055,13 @@ namespace YummyKodik.Kodik
                     "HTTP GET failed. status={Status} url={Url} bodySnippet={Body}",
                     (int)response.StatusCode,
                     SanitizeUrl(url),
-                    Short(content, 450));
+                    ProviderDiagnostics.DescribePayload(content));
 
                 throw new KodikServiceException(
                     $"Unexpected status code {response.StatusCode} for url {SanitizeUrl(url)}.");
             }
 
             return content;
-        }
-
-        private static string Short(string? s, int maxLen)
-        {
-            if (string.IsNullOrEmpty(s))
-            {
-                return string.Empty;
-            }
-
-            if (s.Length <= maxLen)
-            {
-                return s;
-            }
-
-            return s.Substring(0, maxLen);
-        }
-
-        private static string TryGetSnippetNear(string source, string needle, int radius)
-        {
-            if (string.IsNullOrEmpty(source) || string.IsNullOrEmpty(needle))
-            {
-                return string.Empty;
-            }
-
-            var idx = source.IndexOf(needle, StringComparison.Ordinal);
-            if (idx < 0)
-            {
-                return Short(source, radius);
-            }
-
-            var start = Math.Max(0, idx - radius / 2);
-            var end = Math.Min(source.Length, start + radius);
-            return source.Substring(start, end - start);
-        }
-
-        private static bool IsSensitiveKey(string key)
-        {
-            if (string.IsNullOrWhiteSpace(key))
-            {
-                return false;
-            }
-
-            return key.Equals("token", StringComparison.OrdinalIgnoreCase) ||
-                   key.Equals("authorization", StringComparison.OrdinalIgnoreCase) ||
-                   key.Equals("password", StringComparison.OrdinalIgnoreCase) ||
-                   key.Equals("access_token", StringComparison.OrdinalIgnoreCase) ||
-                   key.Equals("cookie", StringComparison.OrdinalIgnoreCase) ||
-                   key.EndsWith("_token", StringComparison.OrdinalIgnoreCase) ||
-                   key.EndsWith("_password", StringComparison.OrdinalIgnoreCase);
-        }
-
-        private static string SanitizeValue(string key, string? value)
-        {
-            if (IsSensitiveKey(key))
-            {
-                return "***";
-            }
-
-            var v = (value ?? string.Empty).Trim();
-            if (v.Length == 0)
-            {
-                return string.Empty;
-            }
-
-            // Replace newlines for compact log lines.
-            v = v.Replace("\r", string.Empty, StringComparison.Ordinal).Replace("\n", "\\n", StringComparison.Ordinal);
-
-            // Keep it short.
-            return Short(v, 160);
         }
 
         private void LogHttpRequest(string method, string url, Dictionary<string, string>? form)
@@ -2152,22 +2081,7 @@ namespace YummyKodik.Kodik
                 return;
             }
 
-            // Log form keys and safe values, but keep it bounded.
-            var parts = new List<string>(form.Count);
-
-            foreach (var kv in form)
-            {
-                var k = kv.Key ?? string.Empty;
-                var v = SanitizeValue(k, kv.Value);
-                parts.Add($"{k}={v}");
-            }
-
-            var formDump = string.Join("&", parts);
-            _logger.LogInformation(
-                "HTTP {Method} request. url={Url} form={Form}",
-                method,
-                safeUrl,
-                Short(formDump, HttpLogFormMaxLen));
+            _logger.LogInformation("HTTP {Method} request. url={Url} formFields={Count}", method, safeUrl, form.Count);
         }
 
         private void AddMetric(string key, long delta = 1)
@@ -2185,33 +2099,16 @@ namespace YummyKodik.Kodik
             var safeUrl = SanitizeUrl(url);
             var len = body?.Length ?? 0;
 
-            var snippet = body ?? string.Empty;
-            snippet = snippet.Replace("\r", string.Empty, StringComparison.Ordinal).Replace("\n", "\\n", StringComparison.Ordinal);
-
             _logger.LogInformation(
                 "HTTP {Method} response. status={Status} url={Url} len={Len} bodySnippet={Body}",
                 method,
                 (int)response.StatusCode,
                 safeUrl,
                 len,
-                Short(snippet, HttpLogBodyMaxLen));
+                ProviderDiagnostics.DescribePayload(body));
         }
 
-        private static string SanitizeUrl(string url)
-        {
-            if (string.IsNullOrWhiteSpace(url))
-            {
-                return string.Empty;
-            }
-
-            // Mask common secret query params.
-            return Regex.Replace(
-                url,
-                @"([?&](?:token|access_token|password|pwd|auth)=)[^&]+",
-                "$1***",
-                RegexOptions.CultureInvariant | RegexOptions.IgnoreCase,
-                RegexTimeout);
-        }
+        private static string SanitizeUrl(string url) => ProviderDiagnostics.DescribeUrl(url);
 
         private async Task<List<KodikSearchResult>> SearchAsync(
             string id,
@@ -2316,17 +2213,17 @@ namespace YummyKodik.Kodik
                     _logger?.LogWarning(
                         "Kodik search returned error (HTTP {Status}). error={Error}",
                         (int)resp.StatusCode,
-                        apiError);
+                        ProviderDiagnostics.DescribePayload(apiError));
 
                     if (IsTokenError(apiError))
                     {
                         throw new KodikTokenException(TokenInvalidMessage);
                     }
 
-                    throw new KodikServiceException($"Kodik search returned error: {apiError}");
+                    throw new KodikServiceException($"Kodik search returned error: {ProviderDiagnostics.DescribePayload(apiError)}");
                 }
 
-                _logger?.LogWarning("Kodik search HTTP failed. status={Status} bodySnippet={Body}", (int)resp.StatusCode, Short(json, 350));
+                _logger?.LogWarning("Kodik search HTTP failed. status={Status} bodySnippet={Body}", (int)resp.StatusCode, ProviderDiagnostics.DescribePayload(json));
                 throw new KodikServiceException($"Kodik search failed: {resp.StatusCode}");
             }
 
@@ -2334,14 +2231,14 @@ namespace YummyKodik.Kodik
 
             if (!string.IsNullOrWhiteSpace(parsed?.Error))
             {
-                _logger?.LogWarning("Kodik search returned error: {Error}", parsed!.Error);
+                _logger?.LogWarning("Kodik search returned error: {Error}", ProviderDiagnostics.DescribePayload(parsed!.Error));
 
                 if (IsTokenError(parsed.Error))
                 {
                     throw new KodikTokenException(TokenInvalidMessage);
                 }
 
-                throw new KodikServiceException($"Kodik search returned error: {parsed.Error}");
+                throw new KodikServiceException($"Kodik search returned error: {ProviderDiagnostics.DescribePayload(parsed.Error)}");
             }
 
             return parsed?.Results ?? new List<KodikSearchResult>(0);

@@ -105,15 +105,45 @@ namespace YummyKodik.Configuration
         /// </summary>
         public bool DeleteReleasesNotInYummyList { get; set; } = false;
 
-        public int YummyUserId { get; set; } = 219413;
+        public int YummyUserId { get; set; }
 
         public int YummyUserListId { get; set; } = 0;
+
+        /// <summary>Enables another list from the same Yummy account in a separate library folder.</summary>
+        public bool UseSecondUserListSubscription { get; set; } = false;
+
+        public int SecondYummyUserListId { get; set; } = 0;
+
+        public string SecondOutputRootPath { get; set; } = string.Empty;
+
+        internal bool ContainsLibraryPath(string? path) =>
+            LibraryTarget.ContainsPath(OutputRootPath, path) ||
+            (UseSecondUserListSubscription && LibraryTarget.ContainsPath(SecondOutputRootPath, path));
+
+        internal IReadOnlyList<LibraryTarget> GetLibraryTargets()
+        {
+            var targets = new List<LibraryTarget>
+            {
+                new((OutputRootPath ?? string.Empty).Trim(), UseUserListSubscription, YummyUserListId, Slugs?.ToArray() ?? Array.Empty<string>())
+            };
+            if (UseSecondUserListSubscription)
+            {
+                targets.Add(new LibraryTarget((SecondOutputRootPath ?? string.Empty).Trim(), true, SecondYummyUserListId, Array.Empty<string>()));
+            }
+
+            return targets;
+        }
 
         /// <summary>
         /// Optional: user access token for private endpoints (Authorization: Bearer).
         /// If empty, plugin can login using YummyLogin and YummyPassword.
         /// </summary>
         public string YummyAccessToken { get; set; } = string.Empty;
+
+        // Safe diagnostic state, never an upstream response or credential.
+        public string YummyAccountStatus { get; set; } = "unknown";
+        public DateTime? YummyAccountCheckedUtc { get; set; }
+
 
         /// <summary>
         /// Optional: login for /profile/login.

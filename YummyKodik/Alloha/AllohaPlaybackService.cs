@@ -15,14 +15,15 @@ using YummyKodik.Yummy;
 
 namespace YummyKodik.Alloha;
 
-public sealed class AllohaPlaybackService
+public sealed partial class AllohaPlaybackService
 {
     private static readonly char[] VoiceLabelSeparators = ['/', '&', '+', ','];
     private static readonly string[] AllohaManifestFallbackNames = ["manifest", "url", "src"];
     private static readonly string[] ProxyResourceFileSuffixes = [".m3u8", ".m4s", ".mp4", ".ts", ".aac", ".vtt"];
     private const string WrapperUrl = "https://site.yummyani.me/";
     private const string AllohaOrigin = "https://alloha.yani.tv";
-    private const string BrowserUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36";
+    // Offline bootstrap identity. Verified automatic replacements are pinned per session.
+    internal static readonly string BrowserUserAgent = AllohaBrowserIdentity.ForMajor(AllohaBrowserIdentity.BootstrapMajor);
     private const string BrowserAcceptLanguage = "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7";
     private const string AcceptsControlsPrefix = "9badb2c5dd28e9cd0bed84e7391523d9d308a48b690428dae6049233218645d9";
     private const string ManifestGuardToken = "pXzvbyDGLYyB6VkwsWZDv3iMKZtsXNzpzRyxZUcsKHXxsSeaYakbo3hw9mBFRc5VQTpqAX6BW8aDEqyLaHYcXSQiV6KHYTVTK6MYRphNAy5sBjtrevqkDzKmLqNdfMZGEU9NELjmtKfZy3RNGzCd767sNh1mXEj4tCcvqndHtzmwAbZNkhm4ghDEasodotMBewypNQ56uotJAQGX11csfeRfBAPk8DcUWWkkqzxca8vbnEw12vUFbBzT6hz8ZB3F3dzUhUXoL2cr1WM1bXQArRCS1MUNMz3X5WDMMQoZKxj2AMTRqp7QQX4dDB9B7VzEZTmyFULhm1AcHHMkoMvSVvKYoBoAKLycYAgMHeD4ECJcGEAGpnkJhrV57zQ7";
@@ -53,11 +54,28 @@ public sealed class AllohaPlaybackService
 
     private readonly ILogger<AllohaPlaybackService> _logger;
     private readonly HttpClient _httpClient;
+    private readonly ConcurrentDictionary<string, DateTime> _failedResolutions = new(StringComparer.Ordinal);
+    internal TimeSpan ResolutionTimeout { get; init; } = TimeSpan.FromSeconds(30);
+    private readonly AllohaBrowserIdentity? _browserIdentity;
     private readonly Func<AllohaStreamTokenRequest, CancellationToken, Task<string?>> _resolveStreamTokenAsync;
 
     public AllohaPlaybackService(ILogger<AllohaPlaybackService> logger)
         : this(logger, CreateDefaultHttpClient(), CreateDefaultStreamTokenResolver(new YummyKodikLogger<AllohaPlaybackService>(logger)))
     {
+        _browserIdentity = new AllohaBrowserIdentity(_httpClient);
+    }
+
+    internal AllohaPlaybackService(ILogger<AllohaPlaybackService> logger, AllohaBrowserIdentity browserIdentity)
+        : this(logger)
+    {
+        _browserIdentity = browserIdentity;
+    }
+
+    internal AllohaPlaybackService(ILogger<AllohaPlaybackService> logger, HttpClient httpClient,
+        Func<AllohaStreamTokenRequest, CancellationToken, Task<string?>> resolver, AllohaBrowserIdentity browserIdentity)
+        : this(logger, httpClient, resolver)
+    {
+        _browserIdentity = browserIdentity;
     }
 
     internal AllohaPlaybackService(ILogger<AllohaPlaybackService> logger, HttpClient httpClient)
@@ -93,24 +111,38 @@ public sealed class AllohaPlaybackService
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(source);
+        cancellationToken.ThrowIfCancellationRequested();
 
         CleanupExpiredEntries();
 
         var sourceSnapshot = CloneSource(source);
         var normalizedVoiceName = (preferredVoiceName ?? string.Empty).Trim();
         var resolutionKey = BuildResolutionFlightKey(sourceSnapshot, preferredQuality, normalizedVoiceName);
+        foreach (var failure in _failedResolutions)
+            if (failure.Value <= DateTime.UtcNow)
+                ((ICollection<KeyValuePair<string, DateTime>>)_failedResolutions).Remove(failure);
+        if (_failedResolutions.ContainsKey(resolutionKey))
+            throw new InvalidOperationException("Alloha source recently failed; use provider fallback before retrying this source.");
         Lazy<Task<ResolvedAllohaPayload>>? createdFlight = null;
         createdFlight = new Lazy<Task<ResolvedAllohaPayload>>(
             async () =>
             {
+                using var deadline = new CancellationTokenSource(ResolutionTimeout);
                 try
                 {
                     return await ResolveViaHttpAsync(
                             sourceSnapshot,
                             preferredQuality,
                             normalizedVoiceName,
-                            CancellationToken.None)
+                            deadline.Token)
                         .ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is HttpRequestException or InvalidOperationException or OperationCanceledException)
+                {
+                    _failedResolutions[resolutionKey] = DateTime.UtcNow.AddSeconds(30);
+                    if (ex is OperationCanceledException)
+                        throw new InvalidOperationException("Alloha source resolution exceeded its time budget.", ex);
+                    throw;
                 }
                 finally
                 {
@@ -121,7 +153,14 @@ public sealed class AllohaPlaybackService
         var resolutionFlight = ResolutionFlights.GetOrAdd(resolutionKey, createdFlight);
         var payload = await resolutionFlight.Value.WaitAsync(cancellationToken).ConfigureAwait(false);
 
-        var session = new AllohaPlaybackSession
+        var session = CreatePlaybackSession(payload, sourceSnapshot);
+        SessionCache[session.SessionId] = session;
+        return session;
+    }
+
+    private static AllohaPlaybackSession CreatePlaybackSession(ResolvedAllohaPayload payload, YummyAllohaSource? source)
+    {
+        return new AllohaPlaybackSession
         {
             SessionId = Guid.NewGuid().ToString("N"),
             ManifestUrl = payload.ManifestUrl,
@@ -136,12 +175,11 @@ public sealed class AllohaPlaybackService
             SelectedVoiceName = payload.SelectedVoiceName,
             AvailableVoiceNames = payload.AvailableVoiceNames,
             SelectedQuality = payload.SelectedQuality,
-            Source = sourceSnapshot,
+            Source = source,
+            UserAgent = payload.UserAgent,
             ExpiresAtUtc = DateTime.UtcNow.Add(SessionTtl)
         };
 
-        SessionCache[session.SessionId] = session;
-        return session;
     }
 
     public static bool TryGetSession(string sessionId, out AllohaPlaybackSession session)
@@ -181,11 +219,20 @@ public sealed class AllohaPlaybackService
         return true;
     }
 
-    public async Task<AllohaProxyResource> DownloadProxyResourceAsync(
+    public Task<AllohaProxyResource> DownloadProxyResourceAsync(
         AllohaPlaybackSession session,
         string resourceId,
         string resourceUrl,
         string proxyBaseUrl,
+        CancellationToken cancellationToken)
+        => DownloadProxyResourceCoreAsync(session, resourceId, resourceUrl, proxyBaseUrl, true, cancellationToken);
+
+    private async Task<AllohaProxyResource> DownloadProxyResourceCoreAsync(
+        AllohaPlaybackSession session,
+        string resourceId,
+        string resourceUrl,
+        string proxyBaseUrl,
+        bool prefetch,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(session);
@@ -199,7 +246,7 @@ public sealed class AllohaPlaybackService
         var normalizedResourceId = NormalizeProxyResourceId(resourceId);
         if (TryGetBufferedProxyResource(session, normalizedResourceId, out var buffered))
         {
-            QueueProxyResourcePrefetch(session, normalizedResourceId, proxyBaseUrl);
+            if (prefetch) QueueProxyResourcePrefetch(session, normalizedResourceId, proxyBaseUrl);
             return new AllohaProxyResource
             {
                 Content = buffered.Body,
@@ -228,7 +275,7 @@ public sealed class AllohaPlaybackService
         if ((int)statusCode < 200 || (int)statusCode >= 300)
         {
             throw new InvalidOperationException(
-                $"Alloha proxy resource request failed. status={(int)statusCode} url={effectiveUpstreamUrl} body={TrimForLog(TryDecodeBody(body))}");
+                $"Alloha proxy resource request failed. status={(int)statusCode} url={ProviderDiagnostics.DescribeUrl(effectiveUpstreamUrl)} body={ProviderDiagnostics.DescribePayload(TryDecodeBody(body))}");
         }
 
         session.ExpiresAtUtc = DateTime.UtcNow.Add(SessionTtl);
@@ -246,7 +293,7 @@ public sealed class AllohaPlaybackService
 
         var contentType = ResolveProxyResourceContentType(mediaType);
         StoreBufferedProxyResource(session, normalizedResourceId, effectiveUpstreamUrl, mediaType, body);
-        QueueProxyResourcePrefetch(session, normalizedResourceId, proxyBaseUrl);
+        if (prefetch) QueueProxyResourcePrefetch(session, normalizedResourceId, proxyBaseUrl);
 
         return new AllohaProxyResource
         {
@@ -306,19 +353,52 @@ public sealed class AllohaPlaybackService
         YummyAllohaSource source,
         int preferredQuality,
         string? preferredVoiceName,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? pinnedUserAgent = null)
+    {
+        var userAgent = pinnedUserAgent ?? _browserIdentity?.Current ?? BrowserUserAgent;
+        try
+        {
+            return await ResolveViaHttpCoreAsync(source, preferredQuality, preferredVoiceName, cancellationToken, userAgent).ConfigureAwait(false);
+        }
+        catch (AllohaManifestRejectedException) when (_browserIdentity != null)
+        {
+            ResolvedAllohaPayload? verified = null;
+            var replacement = await _browserIdentity.TryRecoverAsync(userAgent, async (candidate, ct) =>
+            {
+                var payload = await ResolveViaHttpCoreAsync(source, preferredQuality, preferredVoiceName, ct, candidate).ConfigureAwait(false);
+                // No source on this isolated probe: a failed candidate cannot recursively rebuild sessions.
+                var probe = CreatePlaybackSession(payload, source: null);
+                await EnsurePlaybackReadyAsync(probe, "http://localhost/YummyKodik/alloha-proxy", ct).ConfigureAwait(false);
+                payload.StreamToken = probe.StreamToken;
+                verified = payload;
+            }, cancellationToken).ConfigureAwait(false);
+            if (replacement == null) throw;
+            if (verified != null)
+                _logger.LogInformation("Alloha playback recovered with a verified browser identity. userAgent={UserAgent}", replacement);
+            return verified ?? await ResolveViaHttpCoreAsync(source, preferredQuality, preferredVoiceName, cancellationToken, replacement).ConfigureAwait(false);
+        }
+    }
+
+    private async Task<ResolvedAllohaPayload> ResolveViaHttpCoreAsync(
+        YummyAllohaSource source,
+        int preferredQuality,
+        string? preferredVoiceName,
+        CancellationToken cancellationToken,
+        string userAgent)
     {
         var iframeUrl = BuildIframeRequestUrl(source.RefererUrl);
         var iframeOrigin = ResolveIframeOrigin(iframeUrl, source.RefererUrl);
-        var iframeHtml = await DownloadIframeHtmlAsync(iframeUrl, cancellationToken).ConfigureAwait(false);
+        var iframeHtml = await DownloadIframeHtmlAsync(iframeUrl, cancellationToken, userAgent).ConfigureAwait(false);
         var bootstrap = ParseBootstrapPayload(iframeHtml, source);
         var borth = BuildBorthHeader(bootstrap.Viewporti);
-        var playlist = await RequestBnsiPayloadAsync(source, iframeOrigin, bootstrap.FileId, borth, cancellationToken).ConfigureAwait(false);
+        var playlist = await RequestBnsiPayloadAsync(source, iframeOrigin, bootstrap.FileId, borth, cancellationToken, userAgent).ConfigureAwait(false);
         var manifestCandidate = SelectManifestCandidate(playlist.ManifestCandidates, preferredQuality, preferredVoiceName);
         var manifestUrl = manifestCandidate.Url;
         var selectedQuality = manifestCandidate.Quality ?? Math.Max(0, preferredQuality);
         var tokenRequest = new AllohaStreamTokenRequest
         {
+            UserAgent = userAgent,
             IframeUrl = iframeUrl,
             WebSocketBaseUrl = playlist.WebSocketBaseUrl,
             WebSocketSessionId = playlist.WebSocketSessionId,
@@ -343,7 +423,7 @@ public sealed class AllohaPlaybackService
             manifestCandidate.AudioTrackId,
             manifestCandidate.VoiceName,
             !string.IsNullOrWhiteSpace(streamToken),
-            manifestUrl);
+            ProviderDiagnostics.DescribeUrl(manifestUrl));
 
         return new ResolvedAllohaPayload
         {
@@ -353,6 +433,7 @@ public sealed class AllohaPlaybackService
             Guard = ManifestGuardToken,
             OriginUrl = iframeOrigin,
             RefererUrl = source.RefererUrl,
+            UserAgent = userAgent,
             IframeUrl = iframeUrl,
             WebSocketBaseUrl = playlist.WebSocketBaseUrl,
             WebSocketSessionId = playlist.WebSocketSessionId,
@@ -367,11 +448,11 @@ public sealed class AllohaPlaybackService
         };
     }
 
-    private async Task<string> DownloadIframeHtmlAsync(string requestUrl, CancellationToken cancellationToken)
+    private async Task<string> DownloadIframeHtmlAsync(string requestUrl, CancellationToken cancellationToken, string userAgent)
     {
         var requestUri = CreateAllowedIframeRequestUri(requestUrl);
         using var message = new HttpRequestMessage(HttpMethod.Get, requestUri);
-        ConfigureCommonBrowserHeaders(message);
+        ConfigureCommonBrowserHeaders(message, userAgent);
         message.Headers.TryAddWithoutValidation("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8");
         message.Headers.TryAddWithoutValidation("Sec-Fetch-Dest", "iframe");
         message.Headers.TryAddWithoutValidation("Sec-Fetch-Mode", "navigate");
@@ -384,7 +465,7 @@ public sealed class AllohaPlaybackService
         if (!response.IsSuccessStatusCode)
         {
             throw new InvalidOperationException(
-                $"Alloha iframe request failed. status={(int)response.StatusCode} url={requestUri.AbsoluteUri} body={TrimForLog(body)}");
+                $"Alloha iframe request failed. status={(int)response.StatusCode} url={ProviderDiagnostics.DescribeUrl(requestUri.AbsoluteUri)} body={ProviderDiagnostics.DescribePayload(body)}");
         }
 
         if (string.IsNullOrWhiteSpace(body))
@@ -541,10 +622,11 @@ public sealed class AllohaPlaybackService
         string originUrl,
         long fileId,
         string borth,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string userAgent)
     {
         using var message = new HttpRequestMessage(HttpMethod.Post, $"{originUrl}/bnsi/movies/{fileId}");
-        ConfigureCommonBrowserHeaders(message);
+        ConfigureCommonBrowserHeaders(message, userAgent);
         message.Headers.TryAddWithoutValidation("Accept", "*/*");
         message.Headers.TryAddWithoutValidation("Origin", originUrl);
         message.Headers.TryAddWithoutValidation("Referer", source.RefererUrl);
@@ -563,7 +645,7 @@ public sealed class AllohaPlaybackService
         if (!response.IsSuccessStatusCode)
         {
             throw new InvalidOperationException(
-                $"Alloha bnsi request failed. status={(int)response.StatusCode} fileId={fileId} body={TrimForLog(body)}");
+                $"Alloha bnsi request failed. status={(int)response.StatusCode} fileId={fileId} body={ProviderDiagnostics.DescribePayload(body)}");
         }
 
         if (string.IsNullOrWhiteSpace(body))
@@ -690,7 +772,8 @@ public sealed class AllohaPlaybackService
                 source,
                 originUrl,
                 AcceptsControlsPrefix,
-                cancellationToken)
+                cancellationToken,
+                tokenRequest.UserAgent)
             .ConfigureAwait(false);
         if (IsManifestDownloadSuccessful(statusCode, manifestText))
         {
@@ -708,7 +791,8 @@ public sealed class AllohaPlaybackService
                         source,
                         originUrl,
                         streamToken,
-                        cancellationToken)
+                        cancellationToken,
+                        tokenRequest.UserAgent)
                     .ConfigureAwait(false);
                 if (IsManifestDownloadSuccessful(statusCode, manifestText))
                 {
@@ -726,10 +810,11 @@ public sealed class AllohaPlaybackService
         YummyAllohaSource source,
         string originUrl,
         string acceptsControls,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string userAgent)
     {
         using var message = new HttpRequestMessage(HttpMethod.Get, manifestUrl);
-        ConfigureCommonBrowserHeaders(message);
+        ConfigureCommonBrowserHeaders(message, userAgent);
         message.Headers.TryAddWithoutValidation("Accept", "application/vnd.apple.mpegurl, application/x-mpegURL, */*");
         message.Headers.TryAddWithoutValidation(
             "Accepts-Controls",
@@ -757,10 +842,12 @@ public sealed class AllohaPlaybackService
 
     private static void ThrowManifestDownloadFailure(HttpStatusCode statusCode, string manifestUrl, string manifestText)
     {
+        if (statusCode == HttpStatusCode.Forbidden)
+            throw new AllohaManifestRejectedException();
         if ((int)statusCode < 200 || (int)statusCode >= 300)
         {
             throw new InvalidOperationException(
-                $"Alloha manifest request failed. status={(int)statusCode} url={manifestUrl} body={TrimForLog(manifestText)}");
+                $"Alloha manifest request failed. status={(int)statusCode} url={ProviderDiagnostics.DescribeUrl(manifestUrl)} body={ProviderDiagnostics.DescribePayload(manifestText)}");
         }
 
         if (string.IsNullOrWhiteSpace(manifestText))
@@ -776,7 +863,7 @@ public sealed class AllohaPlaybackService
         CancellationToken cancellationToken)
     {
         var message = new HttpRequestMessage(HttpMethod.Get, resourceUrl);
-        ConfigureCommonBrowserHeaders(message);
+        ConfigureCommonBrowserHeaders(message, session.UserAgent);
         message.Headers.TryAddWithoutValidation("Accept", ResolveProxyRequestAcceptHeader(resourceUrl));
         message.Headers.TryAddWithoutValidation("Cache-Control", "no-cache");
         message.Headers.TryAddWithoutValidation("Pragma", "no-cache");
@@ -849,8 +936,14 @@ public sealed class AllohaPlaybackService
         bool allowRecovery,
         CancellationToken cancellationToken)
     {
-        var requestRefererUrl = ResolveProxyRequestReferer(session, resourceRefererUrl, upstreamUrl);
         var observedRefreshGeneration = Volatile.Read(ref session.ProxyResourceRefreshGeneration);
+        // The caller may have resolved this URL before another request renewed the session.
+        if (session.ProxyResources.TryGetValue(resourceId, out var currentUrl) && !string.IsNullOrWhiteSpace(currentUrl))
+        {
+            upstreamUrl = currentUrl;
+            resourceRefererUrl = ResolveProxyResourceReferer(session, resourceId, upstreamUrl);
+        }
+        var requestRefererUrl = ResolveProxyRequestReferer(session, resourceRefererUrl, upstreamUrl);
         HttpStatusCode statusCode;
         string mediaType;
         byte[] body;
@@ -891,8 +984,9 @@ public sealed class AllohaPlaybackService
             resourceRefererUrl = ResolveProxyResourceReferer(session, resourceId, upstreamUrl);
             requestRefererUrl = ResolveProxyRequestReferer(session, resourceRefererUrl, upstreamUrl);
 
-            (statusCode, mediaType, body) = await DownloadProxyResourcePayloadAsync(
+            (statusCode, mediaType, body) = await DownloadRecoveredProxyResourcePayloadAsync(
                     session,
+                    resourceId,
                     upstreamUrl,
                     requestRefererUrl,
                     cancellationToken)
@@ -925,8 +1019,9 @@ public sealed class AllohaPlaybackService
                     : upstreamUrl;
                 resourceRefererUrl = ResolveProxyResourceReferer(session, resourceId, upstreamUrl);
                 requestRefererUrl = ResolveProxyRequestReferer(session, resourceRefererUrl, upstreamUrl);
-                (statusCode, mediaType, body) = await DownloadProxyResourcePayloadAsync(
+                (statusCode, mediaType, body) = await DownloadRecoveredProxyResourcePayloadAsync(
                         session,
+                        resourceId,
                         upstreamUrl,
                         requestRefererUrl,
                         cancellationToken)
@@ -936,6 +1031,37 @@ public sealed class AllohaPlaybackService
 
         return (statusCode, mediaType, body, upstreamUrl);
     }
+
+    private async Task<(HttpStatusCode StatusCode, string MediaType, byte[] Body)> DownloadRecoveredProxyResourcePayloadAsync(
+        AllohaPlaybackSession session,
+        string resourceId,
+        string upstreamUrl,
+        string refererUrl,
+        CancellationToken cancellationToken)
+    {
+        if (TryGetBufferedProxyResource(session, resourceId, out var recovered))
+            return (HttpStatusCode.OK, recovered.ContentType, recovered.Body);
+        try
+        {
+            var result = await DownloadProxyResourcePayloadAsync(session, upstreamUrl, refererUrl, cancellationToken)
+                .ConfigureAwait(false);
+            // A new playlist/token alone does not prove that recovery restored video access.
+            if ((int)result.StatusCode < 200 || (int)result.StatusCode >= 300)
+            {
+                BlockProxyResourceRecovery(session);
+            }
+            return result;
+        }
+        catch (Exception ex) when (IsRecoverableProxyResourceException(ex, cancellationToken))
+        {
+            BlockProxyResourceRecovery(session);
+            throw;
+        }
+    }
+
+    private static void BlockProxyResourceRecovery(AllohaPlaybackSession session)
+        => Volatile.Write(ref session.ProxyResourceRefreshBlockedUntilUtcTicks,
+            DateTime.UtcNow.Add(ProxyResourceRefreshFailureCooldown).Ticks);
 
     private static bool TryGetBufferedProxyResource(
         AllohaPlaybackSession session,
@@ -1226,12 +1352,12 @@ public sealed class AllohaPlaybackService
         {
             return await _resolveStreamTokenAsync(request, cancellationToken).ConfigureAwait(false);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
         {
             _logger.LogWarning(
                 ex,
                 "Alloha stream token resolution failed. iframe={IframeUrl} quality={Quality} audioTrackId={AudioTrackId}",
-                request.IframeUrl,
+                ProviderDiagnostics.DescribeUrl(request.IframeUrl),
                 request.SelectedQuality,
                 request.AudioTrackId);
             return null;
@@ -1248,8 +1374,16 @@ public sealed class AllohaPlaybackService
         CancellationToken cancellationToken)
     {
         await session.ProxyResourceRefreshSemaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
+        var callerToken = cancellationToken;
+        using var recoveryDeadline = CancellationTokenSource.CreateLinkedTokenSource(callerToken);
+        recoveryDeadline.CancelAfter(ResolutionTimeout);
+        cancellationToken = recoveryDeadline.Token;
         try
         {
+            if (TryGetProxyResourceRefreshCooldown(session, out _))
+            {
+                return false;
+            }
             var currentRefreshGeneration = Volatile.Read(ref session.ProxyResourceRefreshGeneration);
             if (currentRefreshGeneration == observedRefreshGeneration)
             {
@@ -1263,19 +1397,41 @@ public sealed class AllohaPlaybackService
 
                 CancelPendingProxyResourcePrefetches(session);
 
-                var refreshed = await TryRefreshSessionAsync(session, proxyBaseUrl, cancellationToken)
-                    .ConfigureAwait(false);
-                if (!refreshed)
+                // Renew access to the existing cut before rebuilding its playlist/session.
+                // A token alone is not proof: retry the exact failed resource first.
+                var refreshed = false;
+                if (await TryRefreshStreamTokenAsync(session, cancellationToken).ConfigureAwait(false))
                 {
-                    refreshed = await TryRefreshStreamTokenAsync(session, cancellationToken).ConfigureAwait(false);
+                    try
+                    {
+                        var currentUrl = session.ProxyResources.GetValueOrDefault(resourceId, upstreamUrl);
+                        var proof = await DownloadProxyResourcePayloadAsync(session, currentUrl,
+                            ResolveProxyRequestReferer(session, refererUrl, currentUrl), cancellationToken).ConfigureAwait(false);
+                        refreshed = (int)proof.StatusCode is >= 200 and < 300 && proof.Body.Length > 0 &&
+                            !proof.MediaType.Contains("text/html", StringComparison.OrdinalIgnoreCase);
+                        if (refreshed)
+                            StoreBufferedProxyResource(session, resourceId, currentUrl, proof.MediaType, proof.Body);
+                    }
+                    catch (Exception ex) when (IsRecoverableProxyResourceException(ex, cancellationToken))
+                    {
+                        _logger.LogDebug(ex, "Alloha token renewal did not restore the resource; rebuilding session.");
+                    }
                 }
+                if (!refreshed)
+                    refreshed = await TryRefreshSessionAsync(session, proxyBaseUrl, cancellationToken).ConfigureAwait(false);
 
                 if (!refreshed)
                 {
-                    Volatile.Write(
-                        ref session.ProxyResourceRefreshBlockedUntilUtcTicks,
-                        DateTime.UtcNow.Add(ProxyResourceRefreshFailureCooldown).Ticks);
+                    BlockProxyResourceRecovery(session);
                     return false;
+                }
+
+                // Existing client playlists still contain the old resource IDs. Renew their
+                // known parent chains together so each next fragment does not renew again.
+                foreach (var resource in session.ProxyResources)
+                {
+                    TryRebindProxyResourceAfterRefresh(session, resource.Key, resource.Value,
+                        ResolveProxyResourceReferer(session, resource.Key, resource.Value));
                 }
 
                 Volatile.Write(ref session.ProxyResourceRefreshBlockedUntilUtcTicks, 0);
@@ -1286,19 +1442,19 @@ public sealed class AllohaPlaybackService
                     session,
                     resourceId,
                     upstreamUrl,
-                    refererUrl,
-                    out var refreshedUrl,
-                    out var refreshedReferer))
+                    refererUrl))
             {
-                session.ProxyResources[resourceId] = refreshedUrl;
-                session.ProxyResourceReferers[resourceId] = refreshedReferer;
-
                 _logger.LogInformation(
                     "Alloha proxy resource rebound after session refresh. resource={ResourceId}",
                     resourceId);
             }
 
             return true;
+        }
+        catch (OperationCanceledException) when (!callerToken.IsCancellationRequested && recoveryDeadline.IsCancellationRequested)
+        {
+            BlockProxyResourceRecovery(session);
+            return false;
         }
         finally
         {
@@ -1341,11 +1497,14 @@ public sealed class AllohaPlaybackService
 
         try
         {
+            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            deadline.CancelAfter(ResolutionTimeout);
             var refreshed = await ResolveViaHttpAsync(
                     CloneSource(source),
                     session.SelectedQuality,
                     session.SelectedVoiceName,
-                    cancellationToken)
+                    deadline.Token,
+                    session.UserAgent)
                 .ConfigureAwait(false);
 
             ApplyResolvedPayload(session, source, refreshed);
@@ -1355,11 +1514,11 @@ public sealed class AllohaPlaybackService
                 "Alloha session refreshed after upstream resource failure. quality={Quality} selectedVoice={SelectedVoice} manifest={ManifestUrl}",
                 session.SelectedQuality,
                 session.SelectedVoiceName,
-                session.ManifestUrl);
+                ProviderDiagnostics.DescribeUrl(session.ManifestUrl));
 
             return true;
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
         {
             _logger.LogWarning(
                 ex,
@@ -1376,6 +1535,7 @@ public sealed class AllohaPlaybackService
     {
         var request = new AllohaStreamTokenRequest
         {
+            UserAgent = session.UserAgent,
             IframeUrl = session.IframeUrl,
             WebSocketBaseUrl = session.WebSocketBaseUrl,
             WebSocketSessionId = session.WebSocketSessionId,
@@ -1407,7 +1567,7 @@ public sealed class AllohaPlaybackService
         _logger.LogInformation(
             "Alloha stream token refreshed after upstream 403. quality={Quality} iframe={IframeUrl}",
             session.SelectedQuality,
-            session.IframeUrl);
+            ProviderDiagnostics.DescribeUrl(session.IframeUrl));
 
         return true;
     }
@@ -1417,6 +1577,7 @@ public sealed class AllohaPlaybackService
         YummyAllohaSource source,
         ResolvedAllohaPayload payload)
     {
+        session.UserAgent = payload.UserAgent;
         session.ManifestUrl = payload.ManifestUrl;
         session.ManifestText = payload.ManifestText;
         session.RefererUrl = payload.RefererUrl;
@@ -1769,9 +1930,9 @@ public sealed class AllohaPlaybackService
         return new string(output);
     }
 
-    private static void ConfigureCommonBrowserHeaders(HttpRequestMessage message)
+    private static void ConfigureCommonBrowserHeaders(HttpRequestMessage message, string userAgent)
     {
-        message.Headers.TryAddWithoutValidation("User-Agent", BrowserUserAgent);
+        message.Headers.TryAddWithoutValidation("User-Agent", userAgent);
         message.Headers.TryAddWithoutValidation("Accept-Language", BrowserAcceptLanguage);
     }
 
@@ -2241,18 +2402,23 @@ public sealed class AllohaPlaybackService
         AllohaPlaybackSession session,
         string resourceId,
         string upstreamUrl,
-        string refererUrl,
-        out string refreshedUrl,
-        out string refreshedReferer)
+        string refererUrl)
     {
-        return TryResolveCurrentProxyResourceUrl(
+        if (!TryResolveCurrentProxyResourceUrl(
             session,
             resourceId,
             upstreamUrl,
             refererUrl,
             new HashSet<string>(StringComparer.Ordinal),
-            out refreshedUrl,
-            out refreshedReferer);
+            out var refreshedUrl,
+            out var refreshedReferer))
+        {
+            return false;
+        }
+
+        session.ProxyResources[resourceId] = refreshedUrl;
+        session.ProxyResourceReferers[resourceId] = refreshedReferer;
+        return true;
     }
 
     private static bool TryResolveCurrentProxyResourceUrl(
@@ -2418,16 +2584,6 @@ public sealed class AllohaPlaybackService
         return Encoding.UTF8.GetString(body);
     }
 
-    private static string TrimForLog(string? value)
-    {
-        var normalized = (value ?? string.Empty).Trim();
-        if (normalized.Length <= 200)
-        {
-            return normalized;
-        }
-
-        return normalized.Substring(0, 200);
-    }
 
     private static void CleanupExpiredEntries()
     {
@@ -2500,8 +2656,11 @@ public sealed class AllohaPlaybackService
         };
     }
 
+    private sealed class AllohaManifestRejectedException() : InvalidOperationException("Alloha manifest request failed. status=403");
+
     private sealed class ResolvedAllohaPayload
     {
+        public string UserAgent { get; init; } = BrowserUserAgent;
         public string ManifestUrl { get; init; } = string.Empty;
         public string ManifestText { get; init; } = string.Empty;
         public string AcceptsControls { get; init; } = string.Empty;
@@ -2514,7 +2673,7 @@ public sealed class AllohaPlaybackService
         public string AudioTrackId { get; init; } = string.Empty;
         public string SelectedVoiceName { get; init; } = string.Empty;
         public IReadOnlyList<string> AvailableVoiceNames { get; init; } = Array.Empty<string>();
-        public string StreamToken { get; init; } = string.Empty;
+        public string StreamToken { get; set; } = string.Empty;
         public int SelectedQuality { get; init; }
     }
 
@@ -2547,6 +2706,7 @@ public sealed class AllohaPlaybackService
 
 public sealed class AllohaPlaybackSession
 {
+    internal string UserAgent { get; set; } = AllohaPlaybackService.BrowserUserAgent;
     private const int ProxyResourcePrefetchConcurrency = 2;
 
     public string SessionId { get; init; } = string.Empty;
@@ -2562,6 +2722,8 @@ public sealed class AllohaPlaybackSession
     internal ConcurrentDictionary<string, Lazy<Task<AllohaBufferedProxyResource?>>> ProxyResourcePrefetches { get; } = new(StringComparer.Ordinal);
     internal SemaphoreSlim ProxyResourcePrefetchSemaphore { get; } = new(ProxyResourcePrefetchConcurrency, ProxyResourcePrefetchConcurrency);
     internal SemaphoreSlim ProxyResourceRefreshSemaphore { get; } = new(1, 1);
+    internal SemaphoreSlim PlaybackReadinessSemaphore { get; } = new(1, 1);
+    internal bool PlaybackReady { get; set; }
     internal object ProxyResourcePrefetchCancellationLock { get; } = new();
     internal CancellationTokenSource ProxyResourcePrefetchCancellationSource { get; set; } = new();
     internal long ProxyResourceRefreshGeneration;

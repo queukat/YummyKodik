@@ -9,7 +9,7 @@ internal static class EpisodeRuntimeBackfillService
     private const int MinimumPlausibleDurationSeconds = 60;
 
     private static readonly Regex EpisodeNfoPattern = new(
-        @"^S(?<season>\d{2})E(?<episode>\d{2})(?: - .+)?\.nfo$",
+        @"^S(?<season>\d{2})E(?<episode>\d{2,})(?: - .+)?\.nfo$",
         RegexOptions.CultureInvariant | RegexOptions.IgnoreCase,
         TimeSpan.FromSeconds(1));
 

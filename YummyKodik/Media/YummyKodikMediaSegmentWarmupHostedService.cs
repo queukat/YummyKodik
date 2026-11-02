@@ -12,7 +12,6 @@ using MediaBrowser.Controller.Entities.TV;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.MediaSegments;
 using MediaBrowser.Model.Configuration;
-using MediaBrowser.Model.IO;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using YummyKodik.Logging;
@@ -36,7 +35,6 @@ public sealed class YummyKodikMediaSegmentWarmupHostedService : IHostedService, 
 
     private readonly ILibraryManager _libraryManager;
     private readonly IMediaSegmentManager _mediaSegmentManager;
-    private readonly IFileSystem _fileSystem;
     private readonly ILogger<YummyKodikMediaSegmentWarmupHostedService> _logger;
     private readonly ConcurrentDictionary<Guid, byte> _pendingItemIds = new();
     private readonly ConcurrentDictionary<Guid, DateTime> _nextRetryUtcByItemId = new();
@@ -59,12 +57,10 @@ public sealed class YummyKodikMediaSegmentWarmupHostedService : IHostedService, 
     public YummyKodikMediaSegmentWarmupHostedService(
         ILibraryManager libraryManager,
         IMediaSegmentManager mediaSegmentManager,
-        IFileSystem fileSystem,
         ILogger<YummyKodikMediaSegmentWarmupHostedService> logger)
     {
         _libraryManager = libraryManager;
         _mediaSegmentManager = mediaSegmentManager;
-        _fileSystem = fileSystem;
         _logger = new YummyKodikLogger<YummyKodikMediaSegmentWarmupHostedService>(logger);
     }
 
@@ -89,7 +85,7 @@ public sealed class YummyKodikMediaSegmentWarmupHostedService : IHostedService, 
         return Task.CompletedTask;
     }
 
-    public Task StopAsync(CancellationToken cancellationToken)
+    public async Task StopAsync(CancellationToken cancellationToken)
     {
         _logger.LogInformation("[YummyKodik] Media segment warmup service stopping.");
 
@@ -109,18 +105,21 @@ public sealed class YummyKodikMediaSegmentWarmupHostedService : IHostedService, 
         _scanPollTimer = null;
         _missingSegmentsTimer = null;
 
-        return Task.CompletedTask;
+        await _workerLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        _workerLock.Release();
     }
 
     public void Dispose()
     {
+        _stopping = true;
         try { _debounceTimer?.Dispose(); } catch { /* ignore */ }
         try { _scanPollTimer?.Dispose(); } catch { /* ignore */ }
         try { _missingSegmentsTimer?.Dispose(); } catch { /* ignore */ }
         try { _stopCts.Cancel(); } catch { /* ignore */ }
 
-        _workerLock.Dispose();
-        _stopCts.Dispose();
+        // A bounded host shutdown may abandon the drain while a provider is still
+        // unwinding. Neither gate nor CTS owns a wait handle here; leave their
+        // managed lifetime to GC so late workers can release/read them safely.
         GC.SuppressFinalize(this);
     }
 
@@ -247,6 +246,7 @@ public sealed class YummyKodikMediaSegmentWarmupHostedService : IHostedService, 
 
         try
         {
+            if (_stopping) return;
             if (_fullPassRequested)
             {
                 _fullPassRequested = false;
@@ -276,19 +276,15 @@ public sealed class YummyKodikMediaSegmentWarmupHostedService : IHostedService, 
 
     private void EnqueueMissingSegmentItems(string reason)
     {
-        var root = (Plugin.Instance.Configuration.OutputRootPath ?? string.Empty).Trim();
-        if (string.IsNullOrWhiteSpace(root))
+        var targets = Plugin.Instance.Configuration.GetLibraryTargets();
+        if (targets.All(target => string.IsNullOrWhiteSpace(target.OutputRootPath)))
         {
             return;
         }
 
         var now = DateTime.UtcNow;
-        var candidates = _libraryManager.GetItemList(new InternalItemsQuery
-        {
-            IncludeItemTypes = new[] { BaseItemKind.Episode },
-            Recursive = true
-        })
-            .OfType<Episode>()
+        var candidates = ManagedEpisodeInventory.Load(_libraryManager,
+                targets.Select(target => target.OutputRootPath).ToArray())
             .Where(IsEligibleEpisode)
             .Where(item => !_mediaSegmentManager.HasSegments(item.Id))
             .Where(item => CanRetryMissingItem(item.Id, now))
@@ -396,38 +392,13 @@ public sealed class YummyKodikMediaSegmentWarmupHostedService : IHostedService, 
             return false;
         }
 
-        var root = (Plugin.Instance.Configuration.OutputRootPath ?? string.Empty).Trim();
-        if (string.IsNullOrWhiteSpace(root) ||
-            string.IsNullOrWhiteSpace(ep.Path) ||
+        if (string.IsNullOrWhiteSpace(ep.Path) ||
             !ep.Path.EndsWith(".strm", StringComparison.OrdinalIgnoreCase))
         {
             return false;
         }
 
-        return IsUnderRoot(root, ep.Path);
-    }
-
-    private bool IsUnderRoot(string root, string itemPath)
-    {
-        try
-        {
-            return _fileSystem.ContainsSubPath(root, itemPath);
-        }
-        catch
-        {
-            try
-            {
-                var fullRoot = Path.GetFullPath(root)
-                    .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
-                    + Path.DirectorySeparatorChar;
-                var fullItem = Path.GetFullPath(itemPath);
-                return fullItem.StartsWith(fullRoot, StringComparison.OrdinalIgnoreCase);
-            }
-            catch
-            {
-                return false;
-            }
-        }
+        return Plugin.Instance.Configuration.ContainsLibraryPath(ep.Path);
     }
 
     private void TryHookScanCompletedEvent()

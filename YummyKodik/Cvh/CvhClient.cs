@@ -303,7 +303,7 @@ public sealed class CvhClient
         if (!response.IsSuccessStatusCode)
         {
             throw new InvalidOperationException(
-                $"CVH manifest request failed for animeId={source.AnimeId} episode={source.EpisodeNumber} status={(int)response.StatusCode} body={TrimForLog(text)}");
+                $"CVH manifest request failed for animeId={source.AnimeId} episode={source.EpisodeNumber} status={(int)response.StatusCode} body={ProviderDiagnostics.DescribePayload(text)}");
         }
 
         if (string.IsNullOrWhiteSpace(text))
@@ -890,7 +890,9 @@ public sealed class CvhClient
 
     private static string ResolveManifestContentType(string mediaType)
     {
-        return string.IsNullOrWhiteSpace(mediaType) ? "application/vnd.apple.mpegurl" : mediaType;
+        return mediaType.Contains("mpegurl", StringComparison.OrdinalIgnoreCase)
+            ? mediaType
+            : "application/vnd.apple.mpegurl";
     }
 
     private static string TryDecodeBody(byte[] body)
@@ -935,16 +937,7 @@ public sealed class CvhClient
         }
     }
 
-    private static string TrimForLog(string? value)
-    {
-        var normalized = (value ?? string.Empty).Trim();
-        if (normalized.Length <= 200)
-        {
-            return normalized;
-        }
 
-        return normalized.Substring(0, 200);
-    }
 
     private static string BuildIframeReferer(YummyCvhSource source)
     {

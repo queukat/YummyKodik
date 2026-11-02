@@ -19,6 +19,70 @@ internal static class LateNativeMergeTests
     public static void CycleAfterAuthoritativePassSurvivesBatchRelease()
         => RunLateCycleAsync(duringPass: false).GetAwaiter().GetResult();
 
+    public static void ScopedRefreshPreservesOtherRootAndLateRequests()
+        => RunScopedRequestsAsync().GetAwaiter().GetResult();
+
+    public static void BackgroundPassYieldsAtGroupBoundaryToScheduledRefresh()
+        => RunBackgroundYieldAsync().GetAwaiter().GetResult();
+
+    private static async Task RunBackgroundYieldAsync()
+    {
+        using var fixture = new Fixture();
+        var anotherPrimary = fixture.CreateEpisode("AniLiberty", 24253, number: 2);
+        var anotherChild = fixture.CreateEpisode("AniBaza", 24253, number: 2);
+        fixture.Library.Episodes.AddRange([anotherPrimary, anotherChild]);
+        Task<IDisposable>? pendingBatch = null;
+        fixture.Library.AfterBatch = () =>
+        {
+            fixture.Library.AfterBatch = null;
+            pendingBatch = fixture.Service.BeginRefreshBatchAsync(CancellationToken.None);
+        };
+        fixture.Library.RaiseAdded(fixture.Primary);
+        await fixture.RunWorkerAsync();
+        Require(pendingBatch != null, "The scheduled refresh must request admission during the background pass.");
+        using (await pendingBatch!.WaitAsync(TimeSpan.FromSeconds(2)))
+        {
+            Require(fixture.Library.BatchCount == 1 && fixture.Service.HasPendingMergeRequests &&
+                    !anotherChild.PrimaryVersionId.HasValue,
+                "Background work must yield after its current group and retain the unfinished root.");
+            await fixture.Service.MergeAfterRefreshAsync([fixture.Configuration.OutputRootPath], CancellationToken.None);
+            Require(fixture.Library.BatchCount == 2 && anotherChild.PrimaryVersionId == anotherPrimary.Id,
+                "The authoritative pass must finish the retained group without rewriting the completed group.");
+        }
+        fixture.PauseTimer();
+        await fixture.RunWorkerAsync();
+        Require(fixture.Library.BatchCount == 2 && !fixture.Pending,
+            "Completed work must not restart after the batch is released.");
+    }
+
+    private static async Task RunScopedRequestsAsync()
+    {
+        using var fixture = new Fixture();
+        fixture.Configuration.UseSecondUserListSubscription = true;
+        fixture.Configuration.SecondOutputRootPath = fixture.Configuration.OutputRootPath + "-second";
+        var primaryRoot = fixture.Configuration.OutputRootPath;
+        var secondRoot = fixture.Configuration.SecondOutputRootPath;
+        using var batch = await fixture.Service.BeginRefreshBatchAsync(CancellationToken.None);
+        fixture.Service.RequestTranslationPreferenceMerge(Path.Combine(secondRoot, "A series"));
+        fixture.Library.RaiseAdded(fixture.Primary);
+        fixture.Library.AfterBatch = () =>
+        {
+            fixture.Library.AfterBatch = null;
+            fixture.Library.RaiseAdded(fixture.Primary);
+        };
+        await fixture.Service.MergeAfterRefreshAsync([primaryRoot], CancellationToken.None);
+        var pending = (HashSet<string>)Field("_pendingMergeRoots").GetValue(fixture.Service)!;
+        var priority = (System.Collections.Concurrent.ConcurrentQueue<string>)Field("_prioritySeriesDirectories").GetValue(fixture.Service)!;
+        Require(pending.SetEquals([primaryRoot, secondRoot]) && priority.Count == 1,
+            "A scoped pass must preserve another folder's request/voice priority and same-root events arriving during the pass.");
+        await fixture.Service.MergeAfterRefreshAsync([secondRoot], CancellationToken.None);
+        Require(pending.SetEquals([primaryRoot]) && priority.IsEmpty,
+            "Even an empty second-folder pass may consume only its own pending work.");
+        await fixture.Service.MergeAfterRefreshAsync([primaryRoot], CancellationToken.None);
+        Require(!fixture.Service.HasPendingMergeRequests && fixture.Library.BatchCount == 1,
+            "The late request must drain without rewriting an already canonical group.");
+    }
+
     private static async Task RunLateCycleAsync(bool duringPass)
     {
         using var fixture = new Fixture();
@@ -36,7 +100,7 @@ internal static class LateNativeMergeTests
                     fixture.RaiseCycle();
                 };
             }
-            await fixture.Service.MergeAfterRefreshAsync(CancellationToken.None);
+            await fixture.Service.MergeAfterRefreshAsync([fixture.Configuration.OutputRootPath], CancellationToken.None);
             Require(fixture.Library.BatchCount == 1, "The authoritative pass must execute one host batch.");
             if (!duringPass)
             {
@@ -217,7 +281,7 @@ internal static class LateNativeMergeTests
         public PluginConfiguration Configuration { get; }
         public Episode Primary { get; }
         public Episode Child { get; }
-        public bool GeneralPending => (bool)Field("_mergeRequested").GetValue(Service)!;
+        public bool GeneralPending => Service.HasPendingMergeRequests;
         public int CyclePendingCount
         {
             get
@@ -245,11 +309,11 @@ internal static class LateNativeMergeTests
             Child = CreateEpisode("AniBaza", 24253);
             Library.Episodes.AddRange(new[] { Primary, Child });
             RestoreCycle();
-            Service = new YummyKodikEpisodeVersionsMergeHostedService(library, null!,
+            Service = new YummyKodikEpisodeVersionsMergeHostedService(library,
                 NullLogger<YummyKodikEpisodeVersionsMergeHostedService>.Instance);
             Service.StartAsync(CancellationToken.None).GetAwaiter().GetResult();
             PauseTimer();
-            Field("_mergeRequested").SetValue(Service, false);
+            ((HashSet<string>)Field("_pendingMergeRoots").GetValue(Service)!).Clear();
             Require(Library.UpdateSubscriberCount == 1, "Start must subscribe to ItemUpdated.");
         }
 
@@ -339,6 +403,8 @@ internal static class LateNativeMergeTests
                 case "add_ItemAdded": _added += (EventHandler<ItemChangeEventArgs>)args![0]!; return null;
                 case "remove_ItemAdded": _added -= (EventHandler<ItemChangeEventArgs>)args![0]!; return null;
                 case "get_IsScanRunning": return false;
+                case nameof(ILibraryManager.FindByPath):
+                    return new Folder { Id = Guid.NewGuid(), Path = (string)args![0]! };
                 case nameof(ILibraryManager.GetNewItemId):
                     return Episodes.FirstOrDefault(item => string.Equals(item.Path, (string)args![0]!, StringComparison.OrdinalIgnoreCase))?.Id ?? Guid.Empty;
                 case nameof(ILibraryManager.GetItemById):

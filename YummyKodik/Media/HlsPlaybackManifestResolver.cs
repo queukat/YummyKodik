@@ -71,9 +71,12 @@ internal static class HlsPlaybackManifestResolver
 
     private static bool IsLocalProxy(Uri gateway, Uri url)
     {
+        var routeStart = gateway.AbsolutePath.LastIndexOf("/YummyKodik/", StringComparison.OrdinalIgnoreCase);
+        if (routeStart < 0) return false;
+        var routeRoot = gateway.AbsolutePath[..routeStart] + "/YummyKodik/";
         return url.Scheme == gateway.Scheme && url.Authority == gateway.Authority &&
-            (url.AbsolutePath.StartsWith("/YummyKodik/alloha-proxy/", StringComparison.OrdinalIgnoreCase) ||
-             url.AbsolutePath.StartsWith("/YummyKodik/cvh-proxy/", StringComparison.OrdinalIgnoreCase) ||
-             url.AbsolutePath.StartsWith("/YummyKodik/kodik-proxy/", StringComparison.OrdinalIgnoreCase));
+            (url.AbsolutePath.StartsWith(routeRoot + "alloha-proxy/", StringComparison.OrdinalIgnoreCase) ||
+             url.AbsolutePath.StartsWith(routeRoot + "cvh-proxy/", StringComparison.OrdinalIgnoreCase) ||
+             url.AbsolutePath.StartsWith(routeRoot + "kodik-proxy/", StringComparison.OrdinalIgnoreCase));
     }
 }

@@ -69,11 +69,11 @@ internal sealed class KodikSupplementService
 
             return new KodikLookupResult(info, idType, id);
         }
-        catch (Exception ex) when (ex is KodikException or HttpRequestException or TaskCanceledException or JsonException)
+        catch (Exception ex) when (!cancellationToken.IsCancellationRequested && ex is KodikException or HttpRequestException or TaskCanceledException or JsonException)
         {
             logger.LogWarning(
                 ex,
-                "[YummyKodik] Kodik metadata is unavailable for '{Title}'. Series card was created/updated, STRM generation is skipped for now.",
+                "[YummyKodik] Kodik metadata is unavailable for '{Title}'. Existing Kodik streams are retained; available Yummy streams can still be generated.",
                 refresh.TitleInfo.Title);
             return null;
         }
@@ -532,7 +532,7 @@ internal sealed class KodikSupplementService
                         resolvedLinks[episode] = link;
                     }
                 }
-                catch (Exception ex) when (ex is KodikException or HttpRequestException or TaskCanceledException or JsonException)
+                catch (Exception ex) when (!cancellationToken.IsCancellationRequested && ex is KodikException or HttpRequestException or TaskCanceledException or JsonException)
                 {
                     completed = false;
                     perf?.AddCount("kodik.translation_link_failures");

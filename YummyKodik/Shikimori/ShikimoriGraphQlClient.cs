@@ -1,3 +1,4 @@
+using YummyKodik.Util;
 using System.Globalization;
 using System.Collections.Concurrent;
 using System.Net.Http;
@@ -142,7 +143,7 @@ public sealed class ShikimoriGraphQlClient
         if (!response.IsSuccessStatusCode)
         {
             throw new InvalidOperationException(
-                $"Shikimori GraphQL request failed. status={(int)response.StatusCode} body={TrimForLog(body)}");
+                $"Shikimori GraphQL request failed. status={(int)response.StatusCode} body={ProviderDiagnostics.DescribePayload(body)}");
         }
 
         var envelope = JsonSerializer.Deserialize<GraphQlEnvelope>(body, JsonOptions);
@@ -175,11 +176,7 @@ public sealed class ShikimoriGraphQlClient
             : 0;
     }
 
-    private static string TrimForLog(string? value)
-    {
-        var normalized = (value ?? string.Empty).Trim();
-        return normalized.Length <= 400 ? normalized : normalized[..400];
-    }
+
 
     private sealed class GraphQlEnvelope
     {

@@ -187,7 +187,7 @@ namespace YummyKodik.Yummy
 
             if (wrapper?.Response == null || !wrapper.Response.Success || string.IsNullOrWhiteSpace(wrapper.Response.Token))
             {
-                throw new InvalidOperationException("Yummy login did not return a valid token.");
+                throw new JsonException("Yummy login did not return a valid token.");
             }
 
             _accessToken = wrapper.Response.Token.Trim();
@@ -224,11 +224,24 @@ namespace YummyKodik.Yummy
             var token = wrapper?.Response?.Token?.Trim() ?? string.Empty;
             if (string.IsNullOrWhiteSpace(token))
             {
-                throw new InvalidOperationException("Yummy token refresh did not return a valid token.");
+                throw new JsonException("Yummy token refresh did not return a valid token.");
             }
 
             _accessToken = token;
             return _accessToken;
+        }
+
+        public async Task<int> GetProfileIdAsync(CancellationToken cancellationToken)
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, $"{_baseUrl}/profile");
+            ApplyHeaders(request, includeBearer: true);
+            using var response = await _httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
+            var content = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode) ThrowTypedError(response.StatusCode, content);
+            using var json = JsonDocument.Parse(content);
+            if (json.RootElement.ValueKind == JsonValueKind.Object && json.RootElement.TryGetProperty("response", out var profile) && profile.ValueKind == JsonValueKind.Object &&
+                profile.TryGetProperty("id", out var idValue) && idValue.ValueKind == JsonValueKind.Number && idValue.TryGetInt32(out var id) && id > 0) return id;
+            throw new JsonException("Yummy profile has no valid user ID.");
         }
 
         private void ApplyHeaders(HttpRequestMessage request, bool includeBearer)
@@ -246,12 +259,18 @@ namespace YummyKodik.Yummy
 
         private static void ThrowTypedError(HttpStatusCode status, string content)
         {
-            if (status == HttpStatusCode.Unauthorized || status == HttpStatusCode.Forbidden)
+            int? code = null;
+            try
             {
-                throw new UnauthorizedAccessException($"Yummy API returned {status}: {content}");
+                using var json = JsonDocument.Parse(content);
+                if (json.RootElement.ValueKind == JsonValueKind.Object && json.RootElement.TryGetProperty("error_code", out var value) && value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out var number)) code = number;
             }
-
-            throw new InvalidOperationException($"Yummy API returned {status}: {content}");
+            catch (JsonException) { }
+            if ((int)status == 420) throw new YummyAccountException("captcha_required");
+            if (code == 7) throw new YummyAccountException("invalid_credentials");
+            if (status == HttpStatusCode.Unauthorized || status == HttpStatusCode.Forbidden)
+                throw new YummyAccountException("access_denied");
+            throw new HttpRequestException($"Yummy API returned HTTP {(int)status}.", null, status);
         }
 
         public static string ExtractSlugOrId(string urlOrSlugOrId)

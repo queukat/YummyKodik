@@ -61,59 +61,7 @@ function Get-SitemapSlugs {
     return @($slugs)
 }
 
-function Normalize-VoiceName {
-    param([string]$Name)
-
-    $value = ($Name ?? '').Trim()
-    if ($value.StartsWith('Озвучка ', [System.StringComparison]::OrdinalIgnoreCase)) {
-        $value = $value.Substring('Озвучка '.Length).Trim()
-    }
-
-    return $value
-}
-
-function Normalize-VoiceKey {
-    param([string]$Name)
-
-    $value = Normalize-VoiceName -Name $Name
-    if ([string]::IsNullOrWhiteSpace($value)) {
-        return ''
-    }
-
-    $trailingAliasMatch = [regex]::Match($value, '^(?<primary>.+?)\s*\((?<alias>[^()]+)\)\s*$')
-    if ($trailingAliasMatch.Success) {
-        $primary = ($trailingAliasMatch.Groups['primary'].Value ?? '').Trim()
-        $alias = ($trailingAliasMatch.Groups['alias'].Value ?? '').Trim()
-        if ($primary.Length -gt 0 -and $alias.Length -gt 0) {
-            $value = if ($alias.Length -le $primary.Length) { $alias } else { $primary }
-        }
-    }
-
-    $tokens = [regex]::Matches($value.ToLowerInvariant(), '[\p{L}\p{Nd}]+') | ForEach-Object { $_.Value }
-    $tokenList = New-Object System.Collections.Generic.List[string]
-    foreach ($token in $tokens) {
-        if (-not [string]::IsNullOrWhiteSpace($token)) {
-            $tokenList.Add($token) | Out-Null
-        }
-    }
-
-    if ($tokenList.Count -gt 0 -and $tokenList[0] -eq 'озвучка') {
-        $tokenList.RemoveAt(0)
-    }
-
-    while ($tokenList.Count -gt 0 -and $tokenList[$tokenList.Count - 1] -eq 'tv') {
-        $tokenList.RemoveAt($tokenList.Count - 1)
-    }
-
-    $key = [string]::Concat($tokenList.ToArray())
-    switch ($key) {
-        '2х2' { return '2x2' }
-        'anilib' { return 'anilibria' }
-        'aniliberty' { return 'anilibria' }
-        'anilibertyanilibria' { return 'anilibria' }
-        default { return $key }
-    }
-}
+. (Join-Path $PSScriptRoot "VoiceNames.ps1")
 
 if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
     $OutputDirectory = Join-Path $PSScriptRoot '..\artifacts'
@@ -127,62 +75,12 @@ if ($Limit -gt 0) {
     $slugs = @($slugs | Select-Object -First $Limit)
 }
 
+$voiceNamesPath = Join-Path $PSScriptRoot "VoiceNames.ps1"
 $results = @(
     $slugs | ForEach-Object -ThrottleLimit $ThrottleLimit -Parallel {
         $slug = $_
 
-        function Normalize-VoiceNameInner {
-            param([string]$Name)
-            $value = ($Name ?? '').Trim()
-            if ($value.StartsWith('Озвучка ', [System.StringComparison]::OrdinalIgnoreCase)) {
-                $value = $value.Substring('Озвучка '.Length).Trim()
-            }
-
-            return $value
-        }
-
-        function Normalize-VoiceKeyInner {
-            param([string]$Name)
-
-            $value = Normalize-VoiceNameInner -Name $Name
-            if ([string]::IsNullOrWhiteSpace($value)) {
-                return ''
-            }
-
-            $trailingAliasMatch = [regex]::Match($value, '^(?<primary>.+?)\s*\((?<alias>[^()]+)\)\s*$')
-            if ($trailingAliasMatch.Success) {
-                $primary = ($trailingAliasMatch.Groups['primary'].Value ?? '').Trim()
-                $alias = ($trailingAliasMatch.Groups['alias'].Value ?? '').Trim()
-                if ($primary.Length -gt 0 -and $alias.Length -gt 0) {
-                    $value = if ($alias.Length -le $primary.Length) { $alias } else { $primary }
-                }
-            }
-
-            $tokens = [regex]::Matches($value.ToLowerInvariant(), '[\p{L}\p{Nd}]+') | ForEach-Object { $_.Value }
-            $tokenList = New-Object System.Collections.Generic.List[string]
-            foreach ($token in $tokens) {
-                if (-not [string]::IsNullOrWhiteSpace($token)) {
-                    $tokenList.Add($token) | Out-Null
-                }
-            }
-
-            if ($tokenList.Count -gt 0 -and $tokenList[0] -eq 'озвучка') {
-                $tokenList.RemoveAt(0)
-            }
-
-            while ($tokenList.Count -gt 0 -and $tokenList[$tokenList.Count - 1] -eq 'tv') {
-                $tokenList.RemoveAt($tokenList.Count - 1)
-            }
-
-            $key = [string]::Concat($tokenList.ToArray())
-            switch ($key) {
-                '2х2' { return '2x2' }
-                'anilib' { return 'anilibria' }
-                'aniliberty' { return 'anilibria' }
-                'anilibertyanilibria' { return 'anilibria' }
-                default { return $key }
-            }
-        }
+        . $using:voiceNamesPath
 
         try {
             $response = Invoke-RestMethod -Method Get -Uri ("https://api.yani.tv/anime/" + [Uri]::EscapeDataString($slug) + "?need_videos=true") -Headers @{
@@ -245,8 +143,8 @@ $results = @(
                 }
 
                 $providerName = $providerKeys[$playerId]
-                $voiceName = Normalize-VoiceNameInner -Name ($video.data.dubbing ?? '')
-                $voiceKey = Normalize-VoiceKeyInner -Name $voiceName
+                $voiceName = Normalize-VoiceName -Name ($video.data.dubbing ?? '')
+                $voiceKey = Normalize-VoiceKey -Name $voiceName
 
                 if (-not [string]::IsNullOrWhiteSpace($voiceName)) {
                     [void]$providerNames[$providerName].Add($voiceName)

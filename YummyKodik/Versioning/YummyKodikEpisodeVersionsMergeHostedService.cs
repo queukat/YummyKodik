@@ -16,12 +16,12 @@ using MediaBrowser.Controller.Entities.TV;
 using MediaBrowser.Controller.Dto;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Model.Entities;
-using MediaBrowser.Model.IO;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using YummyKodik.Configuration;
 using YummyKodik.Kodik;
 using YummyKodik.Logging;
+using YummyKodik.Media;
 using YummyKodik.Util;
 
 namespace YummyKodik.Versioning;
@@ -32,7 +32,7 @@ namespace YummyKodik.Versioning;
 ///
 /// Constraints from your requirements:
 /// - Only Episodes (TV).
-/// - Only within one root path: PluginConfiguration.OutputRootPath.
+/// - Only within configured library output folders; groups never cross season folders.
 /// - Primary version is selected via PreferredTranslationFilter (substring match against STRM filename).
 /// - STRM quality is irrelevant.
 /// </summary>
@@ -45,7 +45,6 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
     private static readonly char[] PreferredTokenSeparators = { '|', ',', ';' };
 
     private readonly ILibraryManager _libraryManager;
-    private readonly IFileSystem _fileSystem;
     private readonly ILogger<YummyKodikEpisodeVersionsMergeHostedService> _logger;
 
     private readonly SemaphoreSlim _mergeLock = new(1, 1);
@@ -55,7 +54,12 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
     private Timer? _mergeDebounceTimer;
     private Timer? _scanPollTimer;
 
-    private volatile bool _mergeRequested;
+    private readonly object _mergeRequestLock = new();
+    private readonly HashSet<string> _pendingMergeRoots = new(StringComparer.OrdinalIgnoreCase);
+    internal bool HasPendingMergeRequests
+    {
+        get { lock (_mergeRequestLock) return _pendingMergeRoots.Count > 0; }
+    }
     private volatile bool _stopping;
     private volatile string _pendingMergeReason = "Unknown";
 
@@ -69,11 +73,9 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
 
     public YummyKodikEpisodeVersionsMergeHostedService(
         ILibraryManager libraryManager,
-        IFileSystem fileSystem,
         ILogger<YummyKodikEpisodeVersionsMergeHostedService> logger)
     {
         _libraryManager = libraryManager;
-        _fileSystem = fileSystem;
         _logger = new YummyKodikLogger<YummyKodikEpisodeVersionsMergeHostedService>(logger);
     }
 
@@ -98,7 +100,7 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
         return Task.CompletedTask;
     }
 
-    public Task StopAsync(CancellationToken cancellationToken)
+    public async Task StopAsync(CancellationToken cancellationToken)
     {
         _logger.LogInformation("[YummyKodik] Episode versions auto-merge service stopping.");
 
@@ -115,7 +117,8 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
         _scanPollTimer?.Dispose();
         _scanPollTimer = null;
 
-        return Task.CompletedTask;
+        await _mergeLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        _mergeLock.Release();
     }
 
     public void RequestTranslationPreferenceMerge(string? seriesDirectory = null)
@@ -124,7 +127,7 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
         {
             _prioritySeriesDirectories.Enqueue(NormalizeDir(seriesDirectory));
         }
-        RequestMerge(TimeSpan.FromSeconds(1), "TranslationPreferenceChanged");
+        RequestMerge(TimeSpan.FromSeconds(1), "TranslationPreferenceChanged", seriesDirectory);
     }
 
     /// <summary>
@@ -166,7 +169,7 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
     /// <summary>
     /// Runs the single authoritative merge pass after a managed refresh readiness barrier.
     /// </summary>
-    public async Task MergeAfterRefreshAsync(CancellationToken cancellationToken)
+    public async Task MergeAfterRefreshAsync(IReadOnlyList<string> outputRoots, CancellationToken cancellationToken)
     {
         await _mergeLock.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
@@ -177,8 +180,8 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
                 return;
             }
 
-            _mergeRequested = false;
-            await MergeAllEligibleEpisodesAsync("PostRefresh").ConfigureAwait(false);
+            TakePendingMergeRoots(outputRoots);
+            await MergeAllEligibleEpisodesAsync("PostRefresh", Plugin.Instance.Configuration, outputRoots).ConfigureAwait(false);
         }
         finally
         {
@@ -188,13 +191,15 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
 
     public void Dispose()
     {
+        _stopping = true;
         try { _mergeDebounceTimer?.Dispose(); } catch { /* ignore */ }
         try { _scanPollTimer?.Dispose(); } catch { /* ignore */ }
 
         _mergeDebounceTimer = null;
         _scanPollTimer = null;
 
-        _mergeLock.Dispose();
+        // StopAsync is bounded by the host deadline. An in-flight host write may
+        // still release this managed gate afterwards; no WaitHandle is allocated.
         GC.SuppressFinalize(this);
     }
 
@@ -216,7 +221,7 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
             }
 
             // Debounce: a scan/filewatcher will add many episodes quickly.
-            RequestMerge(ItemAddedDebounce, "ItemAdded");
+            RequestMerge(ItemAddedDebounce, "ItemAdded", item.Path);
         }
         catch (Exception ex)
         {
@@ -240,13 +245,13 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
     internal void ObserveNativeVersionUpdate(Episode? item, PluginConfiguration cfg)
     {
         if (_stopping || item == null ||
-            !IsUnderRoot(cfg.OutputRootPath, item.Path) ||
+            !cfg.ContainsLibraryPath(item.Path) ||
             !item.Path.EndsWith(".strm", StringComparison.OrdinalIgnoreCase) ||
             item.LocalAlternateVersions.Length == 0) return;
 
         Episode? ReadPeer(string path)
         {
-            if (!IsUnderRoot(cfg.OutputRootPath, path) ||
+            if (!cfg.ContainsLibraryPath(path) ||
                 !path.EndsWith(".strm", StringComparison.OrdinalIgnoreCase)) return null;
             // This is the host's own native-version identity lookup. FindByPath would
             // issue a query on every event and can hide owned items on Jellyfin 12.
@@ -331,14 +336,22 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
         }
     }
 
-    private void RequestMerge(TimeSpan delay, string reason)
+    private void RequestMerge(TimeSpan delay, string reason, string? changedPath = null)
     {
         if (_stopping)
         {
             return;
         }
 
-        _mergeRequested = true;
+        lock (_mergeRequestLock)
+        {
+            foreach (var target in Plugin.Instance.Configuration.GetLibraryTargets())
+            {
+                if (!string.IsNullOrWhiteSpace(target.OutputRootPath) &&
+                    (string.IsNullOrWhiteSpace(changedPath) || target.ContainsPath(changedPath)))
+                    _pendingMergeRoots.Add(target.OutputRootPath);
+            }
+        }
         _pendingMergeReason = reason;
 
         if (Volatile.Read(ref _activeRefreshBatches) > 0)
@@ -347,6 +360,17 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
         }
 
         ScheduleMergeWorker(delay);
+    }
+
+    private string[] TakePendingMergeRoots(IReadOnlyList<string>? selectedRoots = null)
+    {
+        lock (_mergeRequestLock)
+        {
+            var roots = _pendingMergeRoots.Where(root => selectedRoots == null ||
+                selectedRoots.Contains(root, StringComparer.OrdinalIgnoreCase)).ToArray();
+            foreach (var root in roots) _pendingMergeRoots.Remove(root);
+            return roots;
+        }
     }
 
     private void ScheduleMergeWorker(TimeSpan delay)
@@ -372,18 +396,19 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
         if (!await _mergeLock.WaitAsync(0).ConfigureAwait(false))
         {
             if (!_pendingNativeCycleGroups.IsEmpty ||
-                (_mergeRequested && Volatile.Read(ref _activeRefreshBatches) == 0))
+                (HasPendingMergeRequests && Volatile.Read(ref _activeRefreshBatches) == 0))
                 ScheduleMergeWorker(TimeSpan.FromSeconds(1));
             return;
         }
 
         try
         {
+            if (_stopping) return;
             var cfg = Plugin.Instance.Configuration;
             await MergePendingNativeCyclesAsync(cfg).ConfigureAwait(false);
-            if (Volatile.Read(ref _activeRefreshBatches) > 0 || !_mergeRequested) return;
-            _mergeRequested = false;
-            await MergeAllEligibleEpisodesAsync(reason, cfg).ConfigureAwait(false);
+            if (Volatile.Read(ref _activeRefreshBatches) > 0 || !HasPendingMergeRequests) return;
+            var roots = TakePendingMergeRoots();
+            await MergeAllEligibleEpisodesAsync(reason, cfg, roots, deferToRefresh: true).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -393,7 +418,7 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
         {
             _mergeLock.Release();
             if (!_stopping && (!_pendingNativeCycleGroups.IsEmpty ||
-                (_mergeRequested && Volatile.Read(ref _activeRefreshBatches) == 0)))
+                (HasPendingMergeRequests && Volatile.Read(ref _activeRefreshBatches) == 0)))
                 ScheduleMergeWorker(TimeSpan.FromSeconds(1));
         }
     }
@@ -418,7 +443,7 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
                 IncludeOwnedItems = true,
                 GroupByPresentationUniqueKey = false,
                 DtoOptions = new DtoOptions(true)
-            }).OfType<Episode>().Where(item => IsUnderRoot(cfg.OutputRootPath, item.Path) &&
+            }).OfType<Episode>().Where(item => cfg.ContainsLibraryPath(item.Path) &&
                 string.Equals(NormalizeDir(Path.GetDirectoryName(item.Path) ?? string.Empty),
                     key.SeasonDir, StringComparison.OrdinalIgnoreCase) &&
                 item.Path.EndsWith(".strm", StringComparison.OrdinalIgnoreCase) && File.Exists(item.Path)).ToList();
@@ -433,20 +458,19 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
         }
     }
 
-    private Task MergeAllEligibleEpisodesAsync(string reason)
-        => MergeAllEligibleEpisodesAsync(reason, Plugin.Instance.Configuration);
-
-    internal async Task MergeAllEligibleEpisodesAsync(string reason, PluginConfiguration cfg)
+    internal async Task MergeAllEligibleEpisodesAsync(string reason, PluginConfiguration cfg, IReadOnlyList<string>? outputRoots = null, bool deferToRefresh = false)
     {
-        var root = (cfg.OutputRootPath ?? string.Empty).Trim();
+        var configuredRoots = cfg.GetLibraryTargets().Select(target => target.OutputRootPath).ToArray();
+        var roots = outputRoots == null ? configuredRoots : configuredRoots
+            .Where(root => outputRoots.Contains(root, StringComparer.OrdinalIgnoreCase)).ToArray();
 
-        if (string.IsNullOrWhiteSpace(root))
+        if (roots.All(string.IsNullOrWhiteSpace))
         {
-            _logger.LogDebug("[YummyKodik] OutputRootPath is empty -> skip merge pass.");
+            _logger.LogDebug("[YummyKodik] No output folders configured -> skip merge pass.");
             return;
         }
 
-        // Load all episodes, then filter by root path.
+        // Scope the host query to these roots before materializing any episodes.
         //
         // IMPORTANT:
         // .strm-based items are often marked as "virtual" by Jellyfin.
@@ -456,23 +480,15 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
         // - OutputRootPath containment
         // - .strm extension
         // - complete metadata or corroborated managed-file episode identity
-        var allEpisodes = _libraryManager.GetItemList(new InternalItemsQuery
-        {
-            IncludeItemTypes = new[] { BaseItemKind.Episode },
-            // Jellyfin 12 treats linked alternate versions as owned items and hides them by default.
-            IncludeOwnedItems = true,
-            GroupByPresentationUniqueKey = false,
-            Recursive = true
-        })
-        .OfType<Episode>()
-        .Where(ep => IsUnderRoot(root, ep.Path))
-        .Where(ep => ep.Path != null && ep.Path.EndsWith(".strm", StringComparison.OrdinalIgnoreCase))
+        var allEpisodes = ManagedEpisodeInventory.Load(_libraryManager, roots, includeOwnedItems: true)
         .Where(ep => File.Exists(ep.Path))
         .ToList();
 
+        if (deferToRefresh && DeferBackgroundMergeForRefresh(roots)) return;
+
         if (allEpisodes.Count == 0)
         {
-            _prioritySeriesDirectories.Clear();
+            _ = TakePriorityDirectories(roots).ToArray();
             return;
         }
 
@@ -494,7 +510,7 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
 
         if (groups.Count == 0)
         {
-            _prioritySeriesDirectories.Clear();
+            _ = TakePriorityDirectories(roots).ToArray();
             _logger.LogDebug("[YummyKodik] No duplicate episodes to merge. reason={Reason}", reason);
             return;
         }
@@ -512,13 +528,15 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
 
         foreach (var g in groups)
         {
+            // A scheduled refresh need only drain the current atomic group, not an entire archive.
+            if (deferToRefresh && DeferBackgroundMergeForRefresh(roots)) return;
             await MergePendingNativeCyclesAsync(cfg).ConfigureAwait(false);
             // Keep the existing merge owner/lock, but apply an interactive choice
             // before continuing the bulk pass. Include already visited groups:
             // their preference may have changed while another title was saved.
-            while (_prioritySeriesDirectories.TryDequeue(out var priorityDirectory))
+            foreach (var priorityDirectory in TakePriorityDirectories(roots))
             {
-                foreach (var priorityGroup in groups.Where(group => IsUnderRoot(priorityDirectory, group.Key.SeasonDir)))
+                foreach (var priorityGroup in groups.Where(group => LibraryTarget.ContainsPath(priorityDirectory, group.Key.SeasonDir)))
                 {
                     if (await MergeEpisodeGroupAsync(priorityGroup.Items.Cast<Video>().ToList(), cfg, preferredTokens,
                             forceReload: true).ConfigureAwait(false))
@@ -547,6 +565,27 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
             mergedGroups.Count,
             groups.Count,
             reason);
+    }
+
+    private IEnumerable<string> TakePriorityDirectories(IReadOnlyList<string> roots)
+    {
+        var count = _prioritySeriesDirectories.Count;
+        while (count-- > 0 && _prioritySeriesDirectories.TryDequeue(out var directory))
+        {
+            if (roots.Any(root => LibraryTarget.ContainsPath(root, directory))) yield return directory;
+            else _prioritySeriesDirectories.Enqueue(directory);
+        }
+    }
+
+    private bool DeferBackgroundMergeForRefresh(IReadOnlyList<string> roots)
+    {
+        if (_stopping) return true;
+        if (Volatile.Read(ref _activeRefreshBatches) == 0) return false;
+        lock (_mergeRequestLock)
+        {
+            foreach (var root in roots) _pendingMergeRoots.Add(root);
+        }
+        return true;
     }
 
     private async Task<bool> MergeEpisodeGroupAsync(List<Video> items, PluginConfiguration cfg, string[] preferredTokens,
@@ -1177,44 +1216,13 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
         }
 
         var cfg = Plugin.Instance.Configuration;
-        var root = (cfg.OutputRootPath ?? string.Empty).Trim();
-        if (string.IsNullOrWhiteSpace(root))
+        var targets = cfg.GetLibraryTargets();
+        if (targets.All(target => string.IsNullOrWhiteSpace(target.OutputRootPath)))
         {
             return false;
         }
 
-        return IsUnderRoot(root, ep.Path);
-    }
-
-    private bool IsUnderRoot(string root, string? itemPath)
-    {
-        if (string.IsNullOrWhiteSpace(root) || string.IsNullOrWhiteSpace(itemPath))
-        {
-            return false;
-        }
-
-        try
-        {
-            // Preferred way (handles separators and case properly across platforms).
-            return _fileSystem.ContainsSubPath(root, itemPath);
-        }
-        catch
-        {
-            // Fallback: fullpath startswith.
-            try
-            {
-                var fullRoot = Path.GetFullPath(root)
-                    .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
-                    + Path.DirectorySeparatorChar;
-
-                var fullItem = Path.GetFullPath(itemPath);
-                return fullItem.StartsWith(fullRoot, StringComparison.OrdinalIgnoreCase);
-            }
-            catch
-            {
-                return false;
-            }
-        }
+        return targets.Any(target => target.ContainsPath(ep.Path));
     }
 
     private static string NormalizeDir(string dir)
@@ -1379,7 +1387,7 @@ public sealed class YummyKodikEpisodeVersionsMergeHostedService : IHostedService
 
         // The authoritative pass consumes requests before it starts. A later metadata
         // save may invalidate a group already processed; retain and drain that request.
-        if (!_stopping && (_mergeRequested || !_pendingNativeCycleGroups.IsEmpty))
+        if (!_stopping && (HasPendingMergeRequests || !_pendingNativeCycleGroups.IsEmpty))
             ScheduleMergeWorker(TimeSpan.FromSeconds(1));
     }
 

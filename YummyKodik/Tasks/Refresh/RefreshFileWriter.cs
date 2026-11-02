@@ -180,7 +180,9 @@ internal static class RefreshFileWriter
             };
 
             using var reader = XmlReader.Create(new StringReader(content), settings);
-            return reader.MoveToContent() == XmlNodeType.Element;
+            if (reader.MoveToContent() != XmlNodeType.Element) return false;
+            while (reader.Read()) { }
+            return true;
         }
         catch (XmlException)
         {

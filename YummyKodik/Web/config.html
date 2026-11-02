@@ -1,148 +1,159 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="ru">
 <head>
     <meta charset="utf-8" />
     <title>YummyKodik</title>
-    <style>
-        .fieldDescription {
-            font-size: .75em;
-            line-height: 1.3;
-            opacity: .8;
-            margin-top: .35em;
-        }
-        .spaced-buttons {
-            margin-top: 1.1em;
-            display: flex;
-            flex-wrap: wrap;
-            gap: .6em;
-        }
-        .mini {
-            font-size: .7em;
-            opacity: .75;
-            margin-top: .35em;
-        }
-        .hr {
-            height: 1px;
-            background: rgba(255,255,255,.08);
-            margin: 16px 0;
-        }
-    </style>
+
 </head>
 <body>
 <div class="page type-interior pluginConfigurationPage"
      data-role="page"
      id="YummyKodikConfigPage">
+    <style>
+        #YummyKodikConfigPage .fieldDescription {
+            font-size: .75em;
+            line-height: 1.3;
+            opacity: .8;
+            margin-top: .35em;
+        }
+        #YummyKodikConfigPage .spaced-buttons {
+            margin-top: 1.1em;
+            display: flex;
+            flex-wrap: wrap;
+            gap: .6em;
+        }
+        #YummyKodikConfigPage .mini {
+            font-size: .7em;
+            opacity: .75;
+            margin-top: .35em;
+        }
+        #YummyKodikConfigPage .hr {
+            height: 1px;
+            background: rgba(255,255,255,.08);
+            margin: 16px 0;
+        }
+        #YummyKodikConfigPage .spaced-buttons button { margin: 0; min-width: 10em; }
+        #YummyKodikConfigPage .account-status { padding: 1em; margin: 1em 0; border-left: 4px solid #888; background: rgba(128,128,128,.12); white-space: pre-line; }
+        #YummyKodikConfigPage .account-status[data-state="connected"] { border-color: #58b87a; }
+        #YummyKodikConfigPage .account-status[data-state="error"] { border-color: #ec9671; }
+        #YummyKodikConfigPage details { margin: 1em 0; }
+        #YummyKodikConfigPage summary { cursor: pointer; padding: .6em 0; }
+    </style>
     <div data-role="content">
         <div class="content-primary">
 
             <form id="YummyKodikConfigurationForm">
                 <div class="verticalSection verticalSection-extrabottompadding">
                     <div class="sectionTitleContainer flex align-items-center">
-                        <h2 class="sectionTitle">YummyKodik configuration</h2>
+                        <h2 class="sectionTitle" data-i18n="title">Настройки YummyKodik</h2>
                     </div>
 
+                    <h3 data-i18n="accountTitle">Аккаунт Yummy</h3>
+                    <div id="yummyAccountStatus" class="account-status" role="status" aria-live="polite"></div>
                     <div class="inputContainer">
-                        <label for="yummyClientId">Yummy public token (X-Application)</label>
+                        <label for="yummyLogin" data-i18n="login">Email / логин Yummy</label>
+                        <input id="yummyLogin" is="emby-input" type="text" autocomplete="username" />
+                    </div>
+                    <div class="inputContainer">
+                        <label for="yummyPassword" data-i18n="password">Пароль Yummy</label>
+                        <input id="yummyPassword" is="emby-input" type="password" autocomplete="current-password" />
+                        <div class="fieldDescription" data-i18n="passwordHelp"></div>
+                    </div>
+                    <div class="spaced-buttons">
+                        <button id="BtnYummySignIn" is="emby-button" class="raised" type="button"><span data-i18n="signIn">Войти и подключить мои списки</span></button>
+                    </div>
+                    <div class="fieldDescription" data-i18n="signInHelp"></div>
+                    <details>
+                        <summary data-i18n="advancedAccount">Вход по готовому токену</summary>
+                        <div class="inputContainer">
+                            <label for="yummyAccessToken" data-i18n="accessToken"></label>
+                            <input id="yummyAccessToken" is="emby-input" type="password" autocomplete="off" />
+                            <div class="fieldDescription" data-i18n="accessHelp"></div>
+                        </div>
+                        <button id="BtnYummyToken" is="emby-button" class="raised" type="button"><span data-i18n="useToken">Проверить и сохранить токен</span></button>
+                    </details>
+                    <details><summary data-i18n="providersTitle">Подключение к API и провайдерам</summary>
+                    <div class="inputContainer">
+                        <label for="yummyClientId" data-i18n="clientId">Публичный токен Yummy (X-Application)</label>
                         <input id="yummyClientId" is="emby-input" type="text" autocomplete="off" />
                     </div>
 
                     <div class="inputContainer">
-                        <label for="yummyApiBaseUrl">Yummy API base URL</label>
+                        <label for="yummyApiBaseUrl" data-i18n="yummyApi">Базовый адрес API Yummy</label>
                         <input id="yummyApiBaseUrl" is="emby-input" type="text" autocomplete="off" placeholder="https://api.yani.tv" />
-                        <div class="fieldDescription">
-                            Оставляй <b>https://api.yani.tv</b>, если не используешь зеркало.
-                        </div>
+                        <div class="fieldDescription" data-i18n="yummyApiHelp">Оставьте https://api.yani.tv, если не используете зеркало.</div>
                     </div>
 
                     <div class="inputContainer">
-                        <label for="allohaApiToken">Alloha API token (optional)</label>
+                        <label for="allohaApiToken" data-i18n="allohaToken">Токен API Alloha (необязательно)</label>
                         <input id="allohaApiToken" is="emby-input" type="text" autocomplete="off" />
-                        <div class="fieldDescription">
-                            Если указан, плагин сможет добирать <code>Alloha</code> серии и озвучки напрямую по <code>kp_id</code>,
-                            даже когда в <code>Yummy videos[]</code> часть записей отсутствует.
-                        </div>
+                        <div class="fieldDescription" data-i18n="allohaTokenHelp">Позволяет получать серии и озвучки напрямую из Alloha по kp_id, даже если они отсутствуют в каталоге видео Yummy.</div>
                     </div>
 
                     <div class="inputContainer">
-                        <label for="allohaApiBaseUrl">Alloha API base URL</label>
+                        <label for="allohaApiBaseUrl" data-i18n="allohaApi">Базовый адрес API Alloha</label>
                         <input id="allohaApiBaseUrl" is="emby-input" type="text" autocomplete="off" placeholder="https://api.alloha.tv" />
                     </div>
 
+                    </details>
                     <div class="inputContainer">
-                        <label for="outputRootPath">Output root path</label>
-                        <input id="outputRootPath" is="emby-input" type="text" autocomplete="off" placeholder="/media/YummyKodik или D:\Media\YummyKodik" />
-                        <div class="fieldDescription">
-                            Путь на машине, где крутится Jellyfin, куда плагин будет писать структуру
-                            <code>Series/Season 01/*.strm</code> и <code>*.nfo</code>.
-                        </div>
+                        <label for="outputRootPath" data-i18n="outputRoot">Основная папка медиатеки</label>
+                        <input id="outputRootPath" is="emby-input" type="text" autocomplete="off" placeholder="/media/YummyKodik / D:\Media\YummyKodik" />
+                        <div class="fieldDescription" data-i18n="outputHelp">Папка на сервере Jellyfin для основного списка и ручных релизов. Плагин создаёт Series/Season 01/*.strm и *.nfo. Добавьте эту папку в медиатеку Jellyfin.</div>
                     </div>
 
                     <div class="inputContainer">
-                        <label for="preferredTranslationFilter">Preferred translation filter</label>
+                        <label for="preferredTranslationFilter" data-i18n="preferredTranslation">Предпочтительные озвучки</label>
                         <input id="preferredTranslationFilter" is="emby-input" type="text" autocomplete="off" placeholder="AniLibria | SHIZA | Субтитры" />
-                        <div class="fieldDescription">
-                            Подстрока для приоритизации источников. Можно несколько через <code>|</code>.
-                        </div>
+                        <div class="fieldDescription" data-i18n="translationHelp">Часть названия озвучки для выбора приоритета. Несколько вариантов разделяйте символом |.</div>
                     </div>
 
                     <div class="inputContainer">
                         <label>
                             <input id="createStrmPerVoiceTranslation" type="checkbox" />
-                            Create separate STRM for each voice translation
+                            <span data-i18n="perVoice">Создавать отдельный STRM для каждой озвучки</span>
                         </label>
-                        <div class="fieldDescription">
-                            Если включено, refresh будет создавать отдельные файлы на каждую озвучку, например
-                            <code>S01E01 - AniLibria.strm</code>. Внутри будет ссылка со своим <code>tr=...</code>.
-                        </div>
+                        <div class="fieldDescription" data-i18n="perVoiceHelp">При обновлении создаются отдельные файлы для каждой озвучки, например S01E01 - AniLibria.strm, со ссылкой на выбранную озвучку.</div>
                     </div>
 
                     <div class="inputContainer" style="max-width:320px">
-                        <label for="preferredQuality">Preferred quality (360/480/720/1080)</label>
+                        <label for="preferredQuality" data-i18n="quality">Предпочтительное качество (360/480/720/1080)</label>
                         <input id="preferredQuality" is="emby-input" type="number" min="1" step="1" placeholder="720" />
                     </div>
 
                     <div class="selectContainer" style="max-width:320px">
-                        <label for="minimumLogLevel">Minimum plugin log level</label>
+                        <label for="minimumLogLevel" data-i18n="logLevel">Минимальный уровень журналирования</label>
                         <select id="minimumLogLevel" is="emby-select">
-                            <option value="Trace">Trace</option>
-                            <option value="Debug">Debug</option>
-                            <option value="Information">Information</option>
-                            <option value="Warning">Warning</option>
-                            <option value="Error">Error</option>
-                            <option value="Critical">Critical</option>
-                            <option value="None">None</option>
+                            <option value="Trace" data-i18n="logTrace">Трассировка (Trace)</option>
+                            <option value="Debug" data-i18n="logDebug">Отладка (Debug)</option>
+                            <option value="Information" data-i18n="logInformation">Информация (Information)</option>
+                            <option value="Warning" data-i18n="logWarning">Предупреждения (Warning)</option>
+                            <option value="Error" data-i18n="logError">Ошибки (Error)</option>
+                            <option value="Critical" data-i18n="logCritical">Критические ошибки (Critical)</option>
+                            <option value="None" data-i18n="logNone">Не записывать (None)</option>
                         </select>
-                        <div class="fieldDescription">
-                            По умолчанию <code>Warning</code>, чтобы скрыть обычные информационные refresh/playback сообщения.
-                            Для диагностики выбери <code>Information</code> или ниже.
-                        </div>
+                        <div class="fieldDescription" data-i18n="logHelp">По умолчанию: предупреждения (Warning). Для диагностики выберите информационные сообщения (Information) или более подробный уровень.</div>
                     </div>
 
                     <div class="inputContainer">
                         <label>
                             <input id="enableHttpDebugLogging" type="checkbox" />
-                            Enable Kodik HTTP request debug logs
+                            <span data-i18n="httpDebug">Подробный журнал HTTP-запросов Kodik</span>
                         </label>
-                        <div class="fieldDescription">
-                            Включает подробные логи HTTP запросов/ответов к Kodik (url, form, bodySnippet).
-                            Может быть шумно — включай только для дебага.
-                        </div>
+                        <div class="fieldDescription" data-i18n="httpHelp">Записывает подробности HTTP-запросов и ответов Kodik. Включайте только для диагностики: журнал может быстро расти.</div>
                     </div>
 
                     <div class="inputContainer">
                         <label>
                             <input id="enablePerformanceDebugLogging" type="checkbox" />
-                            Enable refresh performance diagnostics
+                            <span data-i18n="performanceDebug">Диагностика скорости обновления</span>
                         </label>
-                        <div class="fieldDescription">
-                            Добавляет тайминги по этапам refresh, счётчики операций с файлами и количество
-                            дорогих Kodik-проверок. Нужен, когда refresh “замирает” на одном проценте.
-                        </div>
+                        <div class="fieldDescription" data-i18n="performanceHelp">Показывает длительность этапов обновления, операции с файлами и проверки Kodik. Помогает выяснить причину медленного обновления.</div>
                     </div>
 
                     <div class="inputContainer">
-                        <label for="slugs">Yummy slugs (one per line)</label>
-                        <textarea id="slugs" is="emby-textarea" rows="8" placeholder="one-slug-per-line"></textarea>
+                        <label for="slugs" data-i18n="slugs">Релизы Yummy вручную (по одному slug в строке)</label>
+                        <textarea id="slugs" is="emby-textarea" rows="8" placeholder="sousou-no-frieren"></textarea>
                     </div>
 
                     <div class="hr"></div>
@@ -150,83 +161,67 @@
                     <div class="inputContainer">
                         <label>
                             <input id="useUserListSubscription" type="checkbox" />
-                            Use user list subscription
+                            <span data-i18n="useList">Загружать основной список Yummy</span>
                         </label>
-                        <div class="fieldDescription">
-                            Если включено, плагин будет подтягивать аниме из списка пользователя через API <code>/users/{id}/lists/{list_id}</code>.
-                            Для этого нужен user token.
-                        </div>
+                        <div class="fieldDescription" data-i18n="listHelp">Аниме из основного списка сохраняются в основную папку. Для обоих списков используется один аккаунт Yummy: подключённый в разделе «Аккаунт Yummy».</div>
                     </div>
 
                     <div class="inputContainer">
                         <label>
                             <input id="deleteReleasesNotInYummyList" type="checkbox" />
-                            Удалять релизы, отсутствующие в списке Yummy
+                            <span data-i18n="deleteReleases">Удалять релизы, отсутствующие в списках Yummy</span>
                         </label>
-                        <div class="fieldDescription">
-                            Удаляет подтверждённые state-файлом сезоны или сериалы, которых нет в успешно полученном списке пользователя Yummy.
-                            Ручные Slugs и каталоги с неизвестными либо изменёнными файлами сохраняются; при ошибке API ничего не удаляется.
-                        </div>
+                        <div class="fieldDescription" data-i18n="deleteHelp">Действует для обоих списков, каждый в своей папке. Удаляются только подтверждённые файлы плагина после успешного получения соответствующего списка. Ручные релизы, неизвестные и изменённые файлы сохраняются; при ошибке API удаление не выполняется.</div>
                     </div>
 
                     <div class="inputContainer" style="max-width:320px">
-                        <label for="yummyUserId">Yummy user ID</label>
-                        <input id="yummyUserId" is="emby-input" type="number" min="1" step="1" placeholder="219413" />
+                        <label for="yummyUserId" data-i18n="userId">ID пользователя Yummy</label>
+                        <div class="fieldDescription" data-i18n="userIdHelp"></div>
+                        <input id="yummyUserId" is="emby-input" type="number" min="1" step="1" placeholder="ID после входа" />
                     </div>
 
                     <div class="inputContainer" style="max-width:320px">
-                        <label for="yummyUserListId">Yummy list ID</label>
-                        <input id="yummyUserListId" is="emby-input" type="number" min="0" step="1" placeholder="0" />
+                        <label for="yummyUserListId" data-i18n="listId">Основной список Yummy</label>
+                        <select id="yummyUserListId" is="emby-select"></select>
                     </div>
 
                     <div class="inputContainer">
-                        <label for="yummyAccessToken">Yummy access token (optional)</label>
-                        <input id="yummyAccessToken" is="emby-input" type="text" autocomplete="off" />
-                        <div class="fieldDescription">
-                            Если указан, будет использован как <code>Authorization: Bearer</code>. Иначе плагин попробует логиниться по учётке ниже.
-                        </div>
+                        <label>
+                            <input id="useSecondUserListSubscription" type="checkbox" />
+                            <span data-i18n="useSecondList">Загружать второй список Yummy в отдельную папку</span>
+                        </label>
+                        <div class="fieldDescription" data-i18n="secondListHelp">Вторая папка обновляется отдельной задачей YummyKodik: second library refresh — по умолчанию раз в сутки. Расписание меняется в задачах Jellyfin. Ручные релизы добавляются только в основную папку. Настройки качества и озвучек общие.</div>
+                    </div>
+
+                    <div class="inputContainer" style="max-width:320px">
+                        <label for="secondYummyUserListId" data-i18n="secondListId">Второй список Yummy</label>
+                        <select id="secondYummyUserListId" is="emby-select"></select>
                     </div>
 
                     <div class="inputContainer">
-                        <label for="yummyLogin">Yummy login (optional)</label>
-                        <input id="yummyLogin" is="emby-input" type="text" autocomplete="off" />
-                    </div>
-
-                    <div class="inputContainer">
-                        <label for="yummyPassword">Yummy password (optional)</label>
-                        <input id="yummyPassword" is="emby-input" type="password" autocomplete="off" />
-                        <div class="fieldDescription">
-                            Пароль будет сохранён в конфиге Jellyfin. Если это не ок, используй только токен.
-                        </div>
-                    </div>
-
-                    <div class="inputContainer">
-                        <label for="yummyRecaptchaResponse">reCAPTCHA response (optional)</label>
-                        <input id="yummyRecaptchaResponse" is="emby-input" type="text" autocomplete="off" />
-                        <div class="fieldDescription">
-                            Оставь пустым, если не требуется.
-                        </div>
+                        <label for="secondOutputRootPath" data-i18n="secondOutputRoot">Папка второй медиатеки</label>
+                        <input id="secondOutputRootPath" is="emby-input" type="text" autocomplete="off" placeholder="/media/YummyKodik-2 / D:\Media\YummyKodik-2" />
+                        <div class="fieldDescription" data-i18n="secondOutputHelp">Укажите отдельную папку на сервере Jellyfin, не совпадающую с основной: папки не должны быть вложены друг в друга. Добавьте её во вторую медиатеку Jellyfin.</div>
                     </div>
 
                     <div class="hr"></div>
 
                     <div class="inputContainer" style="max-width:320px">
-                        <label for="refreshIntervalMinutes">Refresh interval (minutes)</label>
+                        <label for="refreshIntervalMinutes" data-i18n="interval">Начальный интервал основной медиатеки (минуты)</label>
                         <input id="refreshIntervalMinutes" is="emby-input" type="number" min="1" step="1" placeholder="360" />
+                        <div class="fieldDescription" data-i18n="intervalHelp"></div>
                     </div>
 
                     <div class="spaced-buttons">
                         <button class="raised button-submit" data-theme="b" is="emby-button" type="submit">
-                            💾 <span>Save</span>
+                            <span data-i18n="save">Сохранить</span>
                         </button>
                         <button class="raised" id="BtnReloadCfg" is="emby-button" type="button">
-                            ⟳ <span>Reload</span>
+                            <span data-i18n="reload">Перезагрузить</span>
                         </button>
-                        <button class="raised button-cancel" is="emby-button" type="button">
-                            ✖ <span>Cancel</span>
-                        </button>
+
                     </div>
-                    <div class="mini">Reload discards unsaved edits.</div>
+                    <div class="mini" data-i18n="reloadHelp">Перезагрузка отменяет несохранённые изменения.</div>
                 </div>
             </form>
 
@@ -239,6 +234,308 @@
             const pluginId = "6801ee3f-27f2-4d4e-ab37-e569c025b7c5";
             const $ = id => document.getElementById(id);
 
+            // Jellyfin Web publishes its current interface culture on the host html element.
+            // Keep unsupported interface languages in Russian, without an extra plugin setting.
+            const messages = {
+                "accountTitle": {"ru": "Аккаунт Yummy", "en": "Yummy account"},
+                "providersTitle": {"ru": "Дополнительно: API и провайдеры", "en": "Advanced: APIs and providers"},
+                "advancedAccount": {"ru": "Вход по готовому токену (дополнительно)", "en": "Sign in with an existing token (advanced)"},
+                "signIn": {"ru": "Войти и подключить мои списки", "en": "Sign in and use my lists"},
+                "useToken": {"ru": "Проверить и сохранить токен", "en": "Verify and save token"},
+                "signInHelp": {"ru": "Кнопка сразу проверяет вход, сохраняет аккаунт и выбирает ваши списки. Остальные настройки сохраняются отдельно. После входа запустите обновление списка в задачах Jellyfin.", "en": "This button checks sign-in now, saves the account and selects your lists. Save other settings separately. Then run the library refresh in Jellyfin Scheduled Tasks."},
+                "auth_unknown": {"ru": "Вход ещё не проверен. Введите логин и пароль и нажмите «Войти и подключить мои списки».", "en": "Sign-in has not been checked. Enter your login and password, then select Sign in and use my lists."},
+                "auth_connected": {"ru": "Вход подтверждён. Токен сохранён; плагин использует и обновляет его автоматически.", "en": "Sign-in verified. The token is saved and refreshed automatically."},
+                "auth_invalid_credentials": {"ru": "Yummy отклонил логин или пароль. Введите актуальные данные и войдите снова. Новые тайтлы из списка пока не загружаются.", "en": "Yummy rejected the login or password. Sign in again with current credentials. New titles cannot be imported until access is restored."},
+                "auth_access_denied": {"ru": "Yummy отклонил доступ. Войдите снова; если ошибка повторится, проверьте доступ к аккаунту на сайте.", "en": "Yummy denied access. Sign in again; if this repeats, check your account on the website."},
+                "auth_sign_in_required": {"ru": "Требуется вход в Yummy. Старые локальные тайтлы могут обновляться, но изменения списка недоступны.", "en": "Sign in to Yummy. Existing local titles may still update, but list changes are unavailable."},
+                "auth_captcha_required": {"ru": "Yummy запросил hCaptcha. Войдите на сайте Yummy и повторите попытку позднее. Если ограничение сохраняется, используйте готовый токен в дополнительных настройках. Плагин не выполняет капчу автоматически.", "en": "Yummy requires hCaptcha. Sign in on the Yummy website and try again later. If the restriction persists, use an existing token in advanced settings. The plugin cannot complete a captcha automatically."},
+                "auth_network_error": {"ru": "Не удалось подтвердить результат: Yummy не ответил или произошла сетевая ошибка. Данные аккаунта не заменены; повторите попытку позже.", "en": "Could not confirm the result: Yummy did not respond or a network error occurred. Account settings were not replaced; try again later."},
+                "auth_unexpected_response": {"ru": "Yummy вернул неожиданный ответ. Аккаунт не сохранён.", "en": "Yummy returned an unexpected response. The account was not saved."},
+                "auth_settings_changed": {"ru": "Настройки изменились во время входа. Загрузите их заново и повторите вход.", "en": "Settings changed during sign-in. Reload settings and try again."},
+                "auth_credentials_required": {"ru": "Введите логин и пароль либо готовый токен.", "en": "Enter a login and password, or an existing token."},
+                "auth_working": {"ru": "Проверяем вход…", "en": "Checking sign-in…"},
+                "checkedAt": {"ru": "Последняя проверка: ", "en": "Last checked: "},
+                "intervalHelp": {"ru": "Только начальное значение при создании задачи. Действующее расписание меняется в панели Jellyfin → Задачи. Сохранение настроек не запускает обновление.", "en": "Only the initial value when the task is created. Change the active schedule in Jellyfin Dashboard → Scheduled Tasks. Saving settings does not start a refresh."},
+                "accountSaveFirst": {"ru":"Сначала нажмите кнопку входа в аккаунт: «Сохранить» не проверяет и не сохраняет пароль или токен.","en":"Use the account sign-in button first. Save does not verify or store a password or token."},
+                "userIdHelp": {"ru":"Заполняется при входе. Для доступного вам публичного списка другого пользователя можно указать его ID.","en":"Filled on sign-in. You may enter another user ID for a public list you can access."},
+                "auth_persistence_error": {"ru":"Вход выполнен, но сохранить аккаунт на сервере не удалось. Проверьте доступ к диску сервера и войдите повторно; после перезапуска сохранение не гарантировано.","en":"Sign-in succeeded but account settings could not be saved. Check server storage and sign in again; persistence across restart is not confirmed."},
+                "title": {
+                    "ru": "Настройки YummyKodik",
+                    "en": "YummyKodik settings"
+                },
+                "clientId": {
+                    "ru": "Публичный токен Yummy (X-Application)",
+                    "en": "Yummy public token (X-Application)"
+                },
+                "yummyApi": {
+                    "ru": "Базовый адрес API Yummy",
+                    "en": "Yummy API base URL"
+                },
+                "allohaToken": {
+                    "ru": "Токен API Alloha (необязательно)",
+                    "en": "Alloha API token (optional)"
+                },
+                "allohaApi": {
+                    "ru": "Базовый адрес API Alloha",
+                    "en": "Alloha API base URL"
+                },
+                "outputRoot": {
+                    "ru": "Основная папка медиатеки",
+                    "en": "Primary library folder"
+                },
+                "preferredTranslation": {
+                    "ru": "Предпочтительные озвучки",
+                    "en": "Preferred voice translations"
+                },
+                "quality": {
+                    "ru": "Предпочтительное качество (360/480/720/1080)",
+                    "en": "Preferred quality (360/480/720/1080)"
+                },
+                "logLevel": {
+                    "ru": "Минимальный уровень журналирования",
+                    "en": "Minimum plugin log level"
+                },
+                "slugs": {
+                    "ru": "Релизы Yummy вручную (по одному slug в строке)",
+                    "en": "Manual Yummy releases (one slug per line)"
+                },
+                "userId": {
+                    "ru": "ID пользователя Yummy",
+                    "en": "Yummy user ID"
+                },
+                "listId": {
+                    "ru": "Основной список Yummy",
+                    "en": "Primary Yummy list"
+                },
+                "accessToken": {
+                    "ru": "Токен доступа Yummy (необязательно)",
+                    "en": "Yummy access token (optional)"
+                },
+                "login": {"ru": "Email / логин Yummy", "en": "Yummy email / login"},
+                "password": {"ru": "Пароль Yummy", "en": "Yummy password"},
+                "interval": {
+                    "ru": "Начальный интервал основной медиатеки (минуты)",
+                    "en": "Primary library default interval (minutes)"
+                },
+                "perVoice": {
+                    "ru": "Создавать отдельный STRM для каждой озвучки",
+                    "en": "Create a separate STRM for each voice translation"
+                },
+                "httpDebug": {
+                    "ru": "Подробный журнал HTTP-запросов Kodik",
+                    "en": "Enable Kodik HTTP request debug logs"
+                },
+                "performanceDebug": {
+                    "ru": "Диагностика скорости обновления",
+                    "en": "Enable refresh performance diagnostics"
+                },
+                "useList": {
+                    "ru": "Загружать основной список Yummy",
+                    "en": "Import the primary Yummy list"
+                },
+                "deleteReleases": {
+                    "ru": "Удалять релизы, отсутствующие в списках Yummy",
+                    "en": "Delete releases removed from Yummy lists"
+                },
+                "yummyApiHelp": {
+                    "ru": "Оставьте https://api.yani.tv, если не используете зеркало.",
+                    "en": "Keep https://api.yani.tv unless you use a mirror."
+                },
+                "allohaTokenHelp": {
+                    "ru": "Позволяет получать серии и озвучки напрямую из Alloha по kp_id, даже если они отсутствуют в каталоге видео Yummy.",
+                    "en": "Allows episodes and voice translations to be fetched directly from Alloha by kp_id when they are missing from the Yummy video catalog."
+                },
+                "outputHelp": {
+                    "ru": "Папка на сервере Jellyfin для основного списка и ручных релизов. Плагин создаёт Series/Season 01/*.strm и *.nfo. Добавьте эту папку в медиатеку Jellyfin.",
+                    "en": "Folder on the Jellyfin server for the primary list and manual releases. The plugin creates Series/Season 01/*.strm and *.nfo. Add this folder to a Jellyfin library."
+                },
+                "translationHelp": {
+                    "ru": "Часть названия озвучки для выбора приоритета. Несколько вариантов разделяйте символом |.",
+                    "en": "Prioritize voices by part of their name. Separate multiple choices with |."
+                },
+                "perVoiceHelp": {
+                    "ru": "При обновлении создаются отдельные файлы для каждой озвучки, например S01E01 - AniLibria.strm, со ссылкой на выбранную озвучку.",
+                    "en": "Refresh creates separate files for each voice, such as S01E01 - AniLibria.strm, linking to that voice."
+                },
+                "logHelp": {
+                    "ru": "По умолчанию: предупреждения (Warning). Для диагностики выберите информационные сообщения (Information) или более подробный уровень.",
+                    "en": "Defaults to Warning. For diagnostics, choose Information or a more detailed level."
+                },
+                "httpHelp": {
+                    "ru": "Записывает подробности HTTP-запросов и ответов Kodik. Включайте только для диагностики: журнал может быстро расти.",
+                    "en": "Records Kodik HTTP request and response details. Enable only for diagnostics, as the log can grow quickly."
+                },
+                "performanceHelp": {
+                    "ru": "Показывает длительность этапов обновления, операции с файлами и проверки Kodik. Помогает выяснить причину медленного обновления.",
+                    "en": "Records refresh phase timings, file operations and Kodik checks to help diagnose slow refreshes."
+                },
+                "listHelp": {
+                    "ru": "Аниме из основного списка сохраняются в основную папку. Для обоих списков используется один аккаунт Yummy: подключённый в разделе «Аккаунт Yummy».",
+                    "en": "Anime from the primary list is saved to the primary folder. Both lists use the same Yummy account: connected in the Yummy account section."
+                },
+                "deleteHelp": {
+                    "ru": "Действует для обоих списков, каждый в своей папке. Удаляются только подтверждённые файлы плагина после успешного получения соответствующего списка. Ручные релизы, неизвестные и изменённые файлы сохраняются; при ошибке API удаление не выполняется.",
+                    "en": "Applies to both lists, each in its own folder. Only verified plugin files are removed after that list is fetched successfully. Manual releases and unknown or changed files are preserved; API errors prevent deletion."
+                },
+                "accessHelp": {"ru": "Для обычного входа токен не нужен. Этот вариант заменяет сохранённый аккаунт и очищает сохранённый пароль.", "en": "A token is not needed for normal sign-in. This option replaces the saved account and clears its stored password."},
+                "passwordHelp": {"ru": "Пароль сохраняется на сервере для повторного входа, если токен станет недействителен. Вход по готовому токену не сохраняет пароль.", "en": "The password is stored on the server to restore access if the token becomes invalid. Token-only sign-in stores no password."},
+                "logTrace": {
+                    "ru": "Трассировка (Trace)",
+                    "en": "Trace"
+                },
+                "logDebug": {
+                    "ru": "Отладка (Debug)",
+                    "en": "Debug"
+                },
+                "logInformation": {
+                    "ru": "Информация (Information)",
+                    "en": "Information"
+                },
+                "logWarning": {
+                    "ru": "Предупреждения (Warning)",
+                    "en": "Warning"
+                },
+                "logError": {
+                    "ru": "Ошибки (Error)",
+                    "en": "Error"
+                },
+                "logCritical": {
+                    "ru": "Критические ошибки (Critical)",
+                    "en": "Critical"
+                },
+                "logNone": {
+                    "ru": "Не записывать (None)",
+                    "en": "None"
+                },
+                "save": {
+                    "ru": "Сохранить",
+                    "en": "Save"
+                },
+                "reload": {"ru": "Загрузить сохранённое", "en": "Reload saved settings"},
+                "cancel": {
+                    "ru": "Отмена",
+                    "en": "Cancel"
+                },
+                "reloadHelp": {"ru": "«Загрузить сохранённое» сбрасывает несохранённые поля формы. Jellyfin не перезапускается.", "en": "Reload saved settings discards unsaved form changes. It does not restart Jellyfin."},
+                "useSecondList": {
+                    "ru": "Загружать второй список Yummy в отдельную папку",
+                    "en": "Import a second Yummy list into a separate folder"
+                },
+                "secondListHelp": {
+                    "ru": "Вторая папка обновляется отдельной задачей YummyKodik: second library refresh — по умолчанию раз в сутки. Расписание меняется в задачах Jellyfin. Ручные релизы добавляются только в основную папку. Настройки качества и озвучек общие.",
+                    "en": "The second folder uses its own YummyKodik: second library refresh task, daily by default. Change its schedule in Jellyfin Scheduled Tasks. Manual releases go only to the primary folder. Quality and voice settings are shared."
+                },
+                "secondListId": {
+                    "ru": "Второй список Yummy",
+                    "en": "Second Yummy list"
+                },
+                "secondOutputRoot": {
+                    "ru": "Папка второй медиатеки",
+                    "en": "Second library folder"
+                },
+                "secondOutputHelp": {
+                    "ru": "Укажите отдельную папку на сервере Jellyfin, не совпадающую с основной: папки не должны быть вложены друг в друга. Добавьте её во вторую медиатеку Jellyfin.",
+                    "en": "Choose a separate folder on the Jellyfin server that neither matches nor overlaps the primary folder. Add it to a second Jellyfin library."
+                },
+                "reloaded": {
+                    "ru": "Настройки перезагружены",
+                    "en": "Configuration reloaded"
+                },
+                "loadError": {
+                    "ru": "Ошибка загрузки: ",
+                    "en": "Load error: "
+                },
+                "saved": {
+                    "ru": "Настройки сохранены",
+                    "en": "Settings saved"
+                },
+                "saveError": {
+                    "ru": "Ошибка сохранения: ",
+                    "en": "Save error: "
+                },
+                "secondPathRequired": {
+                    "ru": "Укажите папку для второго списка.",
+                    "en": "Enter a folder for the second list."
+                },
+                "listWatching": {
+                    "ru": "Смотрю",
+                    "en": "Watching"
+                },
+                "listPlanned": {
+                    "ru": "В Планах",
+                    "en": "Plan to watch"
+                },
+                "listCompleted": {
+                    "ru": "Просмотрено",
+                    "en": "Completed"
+                },
+                "listOnHold": {
+                    "ru": "Отложено",
+                    "en": "On hold"
+                },
+                "listDropped": {
+                    "ru": "Брошено",
+                    "en": "Dropped"
+                },
+                "listFavorites": {
+                    "ru": "Любимые",
+                    "en": "Favorites"
+                },
+                "savedList": {
+                    "ru": "Сохранённый список (ID)",
+                    "en": "Saved list (ID)"
+                }
+            };
+            let language = "ru";
+            // Yummy's own list order and IDs: Watching, Planned, Completed, On hold, Dropped, Favorites.
+            const yummyLists = [[0, "listWatching"], [1, "listPlanned"], [2, "listCompleted"],
+                [5, "listOnHold"], [3, "listDropped"], [4, "listFavorites"]];
+
+            function setListSelection(id, value) {
+                const select = $(id);
+                const selected = String(value ?? 0);
+                select.replaceChildren();
+                for (const [listId, key] of yummyLists) {
+                    const option = document.createElement("option");
+                    option.value = String(listId);
+                    option.textContent = t(key);
+                    select.appendChild(option);
+                }
+                // Do not silently change an existing selection if Yummy introduces another list ID.
+                if (!yummyLists.some(([listId]) => String(listId) === selected)) {
+                    const option = document.createElement("option");
+                    option.value = selected;
+                    option.textContent = t("savedList") + " " + selected;
+                    select.appendChild(option);
+                }
+                select.value = selected;
+            }
+
+            function t(key) {
+                return messages[key][language];
+            }
+
+            function localizePage() {
+                const culture = document.documentElement.lang || "";
+                language = /^en(?:[-_]|$)/i.test(culture) ? "en" : "ru";
+                const page = $("YummyKodikConfigPage");
+                page.lang = language;
+                page.querySelectorAll("[data-i18n]").forEach(element => {
+                    element.textContent = t(element.getAttribute("data-i18n"));
+                });
+                setListSelection("yummyUserListId", $("yummyUserListId").value || 0);
+                setListSelection("secondYummyUserListId", $("secondYummyUserListId").value || 0);
+                updateSecondListFields();
+                showAccountStatus(accountStatusCode, accountCheckedAt);
+            }
+
+            function updateSecondListFields() {
+                const enabled = $("useSecondUserListSubscription").checked;
+                $("secondYummyUserListId").disabled = !enabled;
+                $("secondOutputRootPath").disabled = !enabled;
+                $("secondOutputRootPath").required = enabled;
+            }
+
             const DEFAULTS = {
                 YummyClientId: "e_y7qb7p9d_z1mdw",
                 YummyApiBaseUrl: "https://api.yani.tv",
@@ -248,8 +545,11 @@
                 MinimumLogLevel: "Warning",
                 RefreshIntervalMinutes: 360,
                 UseUserListSubscription: false,
+                UseSecondUserListSubscription: false,
+                SecondYummyUserListId: 0,
+                SecondOutputRootPath: "",
                 DeleteReleasesNotInYummyList: false,
-                YummyUserId: 219413,
+                YummyUserId: 0,
                 YummyUserListId: 0,
                 CreateStrmPerVoiceTranslation: false,
                 EnableHttpDebugLogging: false,
@@ -263,6 +563,43 @@
                 try { Dashboard.alert({ message: text }); } catch {}
             }
 
+            let accountStatusCode = "unknown";
+            let accountCheckedAt;
+            function showAccountStatus(code, checked) {
+                code = messages["auth_" + code] ? code : "unknown";
+                accountStatusCode = code;
+                accountCheckedAt = checked;
+                const box = $("yummyAccountStatus");
+                box.textContent = t("auth_" + code) + (checked ? "\n" + t("checkedAt") + new Date(checked).toLocaleString() : "");
+                box.setAttribute("data-state", code === "connected" ? "connected" : code === "unknown" || code === "working" ? "unknown" : "error");
+            }
+
+            async function signIn(useToken) {
+                $("BtnYummySignIn").disabled = true;
+                $("BtnYummyToken").disabled = true;
+                showAccountStatus("working");
+                try {
+                    const result = await ApiClient.ajax({
+                        type: "POST", url: ApiClient.getUrl("YummyKodik/Account/SignIn"),
+                        contentType: "application/json", dataType: "json",
+                        data: JSON.stringify({ Login: $("yummyLogin").value.trim(), Password: $("yummyPassword").value,
+                            Token: $("yummyAccessToken").value.trim(), UseToken: useToken })
+                    });
+                    showAccountStatus(result.Code || result.code || "unexpected_response");
+                    if (result.Success || result.success) {
+                        $("yummyUserId").value = result.UserId || result.userId;
+                        loadedUserId = String($("yummyUserId").value);
+                        $("yummyPassword").value = "";
+                        $("yummyAccessToken").value = "";
+                    }
+                } catch { showAccountStatus("network_error"); }
+                finally {
+                    $("BtnYummySignIn").disabled = false;
+                    $("BtnYummyToken").disabled = false;
+                }
+            }
+
+            let loadedUserId = "";
             async function loadCfg(showToast = false) {
                 Dashboard.showLoadingMsg();
                 try {
@@ -286,24 +623,38 @@
 
                     $("useUserListSubscription").checked = !!cfg.UseUserListSubscription;
                     $("deleteReleasesNotInYummyList").checked = !!cfg.DeleteReleasesNotInYummyList;
-                    $("yummyUserId").value = cfg.YummyUserId || DEFAULTS.YummyUserId;
-                    $("yummyUserListId").value = (cfg.YummyUserListId ?? DEFAULTS.YummyUserListId);
+                    $("useSecondUserListSubscription").checked = !!cfg.UseSecondUserListSubscription;
+                    setListSelection("secondYummyUserListId", cfg.SecondYummyUserListId ?? DEFAULTS.SecondYummyUserListId);
+                    $("secondOutputRootPath").value = cfg.SecondOutputRootPath || DEFAULTS.SecondOutputRootPath;
+                    updateSecondListFields();
+                    $("yummyUserId").value = cfg.YummyUserId || "";
+                    loadedUserId = String($("yummyUserId").value);
+                    setListSelection("yummyUserListId", cfg.YummyUserListId ?? DEFAULTS.YummyUserListId);
 
-                    $("yummyAccessToken").value = cfg.YummyAccessToken || "";
+                    $("yummyAccessToken").value = "";
                     $("yummyLogin").value = cfg.YummyLogin || "";
-                    $("yummyPassword").value = cfg.YummyPassword || "";
-                    $("yummyRecaptchaResponse").value = cfg.YummyRecaptchaResponse || "";
+                    $("yummyPassword").value = "";
+                    showAccountStatus(cfg.YummyAccountStatus || "unknown", cfg.YummyAccountCheckedUtc);
 
-                    if (showToast) toast("Configuration reloaded");
+                    if (showToast) toast(t("reloaded"));
                 } catch (e) {
                     console.error("[YummyKodik] loadCfg error:", e);
-                    toast("Load error: " + (e?.message || e));
+                    toast(t("loadError") + (e?.message || e));
                 } finally {
                     Dashboard.hideLoadingMsg();
                 }
             }
 
             async function saveCfg() {
+                if ($("yummyPassword").value || $("yummyAccessToken").value) {
+                    toast(t("accountSaveFirst"));
+                    return;
+                }
+                if ($("useSecondUserListSubscription").checked && !$("secondOutputRootPath").value.trim()) {
+                    toast(t("secondPathRequired"));
+                    $("secondOutputRootPath").focus();
+                    return;
+                }
                 Dashboard.showLoadingMsg();
                 try {
                     const cfg = await ApiClient.getPluginConfiguration(pluginId);
@@ -337,35 +688,46 @@
 
                     cfg.UseUserListSubscription = !!$("useUserListSubscription").checked;
                     cfg.DeleteReleasesNotInYummyList = !!$("deleteReleasesNotInYummyList").checked;
-                    cfg.YummyUserId = parseInt($("yummyUserId").value, 10) || DEFAULTS.YummyUserId;
+                    cfg.UseSecondUserListSubscription = !!$("useSecondUserListSubscription").checked;
+                    cfg.SecondYummyUserListId = parseInt($("secondYummyUserListId").value, 10);
+                    if (isNaN(cfg.SecondYummyUserListId)) cfg.SecondYummyUserListId = DEFAULTS.SecondYummyUserListId;
+                    cfg.SecondOutputRootPath = ($("secondOutputRootPath").value || "").trim();
+
+                    if (String($("yummyUserId").value) !== loadedUserId) cfg.YummyUserId = parseInt($("yummyUserId").value, 10) || 0;
                     cfg.YummyUserListId = parseInt($("yummyUserListId").value, 10);
                     if (isNaN(cfg.YummyUserListId)) cfg.YummyUserListId = DEFAULTS.YummyUserListId;
-
-                    cfg.YummyAccessToken = ($("yummyAccessToken").value || "").trim();
-                    cfg.YummyLogin = ($("yummyLogin").value || "").trim();
-                    cfg.YummyPassword = ($("yummyPassword").value || "");
-                    cfg.YummyRecaptchaResponse = ($("yummyRecaptchaResponse").value || "").trim();
 
                     const result = await ApiClient.updatePluginConfiguration(pluginId, cfg);
                     Dashboard.processPluginConfigurationUpdateResult(result);
 
                     await loadCfg(false);
-                    toast("Settings saved");
+                    toast(t("saved"));
                 } catch (e) {
                     console.error("[YummyKodik] saveCfg error:", e);
-                    toast("Save error: " + (e?.message || e));
+                    toast(t("saveError") + (e?.message || e));
                 } finally {
                     Dashboard.hideLoadingMsg();
                 }
             }
 
-            $("YummyKodikConfigPage").addEventListener("pageshow", () => loadCfg(false));
+            localizePage();
+            const languageObserver = new MutationObserver(localizePage);
+            languageObserver.observe(document.documentElement, { attributes: true, attributeFilter: ["lang"] });
+            $("YummyKodikConfigPage").addEventListener("pageshow", () => {
+                languageObserver.observe(document.documentElement, { attributes: true, attributeFilter: ["lang"] });
+                localizePage();
+                return loadCfg(false);
+            });
+            $("YummyKodikConfigPage").addEventListener("pagehide", () => languageObserver.disconnect());
+            $("useSecondUserListSubscription").addEventListener("change", updateSecondListFields);
             $("YummyKodikConfigurationForm").addEventListener("submit", e => {
                 e.preventDefault();
-                saveCfg();
+                return saveCfg();
             });
+            $("BtnYummySignIn").addEventListener("click", () => signIn(false));
+            $("BtnYummyToken").addEventListener("click", () => signIn(true));
             $("BtnReloadCfg").addEventListener("click", () => loadCfg(true));
-            document.querySelector("#YummyKodikConfigPage .button-cancel").addEventListener("click", () => Dashboard.close());
+
         })();
     </script>
 </div>

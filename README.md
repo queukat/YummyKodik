@@ -29,7 +29,7 @@ YummyKodik is a Jellyfin plugin that builds a local anime library from YummyAnim
 ## What It Does
 
 - Creates a local Jellyfin TV library layout with `tvshow.nfo`, `Season XX/*.nfo`, and `Season XX/*.strm`.
-- Reads anime from manually configured Yummy slugs or from a Yummy user list.
+- Reads anime from manually configured Yummy slugs or from two Yummy lists with separate output folders.
 - Can optionally remove plugin-managed releases that disappear from a successfully fetched Yummy user list.
 - Combines episode availability from three provider families under the hood: Alloha, CVH, and Kodik.
 - Generates as many episode files as it can from all available provider data, instead of assuming one player has complete coverage.
@@ -62,11 +62,11 @@ At startup, the plugin tries to patch Jellyfin Web `index.html` with a small boo
 /web/ConfigurationPage?name=seriesTranslation.js&v=<plugin-version>
 ```
 
-That script adds an `Озвучка` row to supported series details pages. The widget shows `Авто` plus the normalized union of voices available from managed Jellyfin versions and the provider catalog, including Kodik-only coverage.
+That script adds an `Озвучка` row to supported series details pages. The widget shows `Авто` plus the normalized voices already present in local STRM files for the whole series, including local Kodik versions. Opening a details page does not contact providers. New voices appear after library refresh generates their files.
 
 An explicit choice becomes the library-wide primary voice for that series. Jellyfin `Next` and autoplay then advance by episode in the chosen voice wherever it exists, while unmatched episodes use the normal safe fallback. Because Jellyfin stores the primary version globally, simultaneous independent voice locks for different users are not supported.
 
-Changing the voice does not require a library refresh. If the selected voice exists only in a neighboring provider, playback can move to that provider instead of silently playing another voice. Choosing `Авто` clears the explicit selection and returns to `Preferred translation filter` plus automatic fallback. While a voice is explicitly selected, Jellyfin's native version selector is informational; choose `Авто` before making a one-off native version choice.
+Changing the voice does not require a library refresh. If the selected voice exists only in a neighboring provider, playback can move to that provider instead of silently playing another voice. Choosing `Авто` clears the explicit selection and returns to `Preferred translation filter` plus automatic fallback. Jellyfin's native version selector chooses a voice for the current playback only; it does not change the series-wide preference or the widget.
 
 If Jellyfin Web `index.html` is not writable or not found, the widget is skipped. Playback still works through generated files, `Preferred translation filter`, and per-voice files if that mode is enabled.
 
@@ -107,7 +107,7 @@ Download `YummyKodik_<version>.zip` from GitHub Releases and extract the files d
 Windows service or tray install:
 
 ```powershell
-$version = "2.0.1.0"
+$version = "2.1.0.0"
 $plugins = "$env:ProgramData\Jellyfin\Server\plugins"
 New-Item -ItemType Directory -Force "$plugins\YummyKodik_$version"
 Expand-Archive ".\YummyKodik_$version.zip" "$plugins\YummyKodik_$version" -Force
@@ -116,7 +116,7 @@ Expand-Archive ".\YummyKodik_$version.zip" "$plugins\YummyKodik_$version" -Force
 Windows portable install:
 
 ```powershell
-$version = "2.0.1.0"
+$version = "2.1.0.0"
 $plugins = "$env:LOCALAPPDATA\jellyfin\plugins"
 New-Item -ItemType Directory -Force "$plugins\YummyKodik_$version"
 Expand-Archive ".\YummyKodik_$version.zip" "$plugins\YummyKodik_$version" -Force
@@ -125,7 +125,7 @@ Expand-Archive ".\YummyKodik_$version.zip" "$plugins\YummyKodik_$version" -Force
 Docker install by copying an already extracted package:
 
 ```powershell
-$version = "2.0.1.0"
+$version = "2.1.0.0"
 docker exec jellyfin mkdir -p /config/plugins/YummyKodik_$version
 docker cp .\artifacts\package\. jellyfin:/config/plugins/YummyKodik_$version/
 docker restart jellyfin
@@ -134,7 +134,7 @@ docker restart jellyfin
 Docker install from a zip inside the container:
 
 ```bash
-version=2.0.1.0
+version=2.1.0.0
 mkdir -p "/config/plugins/YummyKodik_$version"
 unzip "YummyKodik_$version.zip" -d "/config/plugins/YummyKodik_$version"
 ```
@@ -170,10 +170,14 @@ Optional settings:
 - `Enable refresh performance diagnostics`: logs refresh stage timings and file-operation counters.
 - `Use user list subscription`: pulls anime from `/users/{id}/lists/{list_id}`.
 - `Удалять релизы, отсутствующие в списке Yummy`: removes stale plugin-managed seasons after a successful complete list fetch. Manual slugs and directories with unknown or modified files are preserved.
-- `Yummy user ID` and `Yummy list ID`: identify the Yummy list to sync.
-- `Yummy access token`: bearer token for private Yummy endpoints.
-- `Yummy login` and `Yummy password`: fallback login flow if no access token is provided.
+- `Yummy user ID` and the named list selector identify the Yummy list to sync. The choices match Yummy: Watching, Plan to watch, Completed, On hold, Dropped, and Favorites.
+- **Sign in and use my lists**: verifies the entered Yummy login/password immediately, saves the account token, and fills your user ID. Other unsaved settings are kept in the form.
+- The account status shows the last verified result and actionable authentication errors. Token-only sign-in is available under advanced account settings and clears the saved password. Password sign-in stores the password on the server for recovery if the token is rejected.
 - `Refresh interval`: scheduled refresh interval in minutes.
+
+Authentication failures no longer appear as successful list refreshes: existing local titles may still be refreshed, but the task finishes as failed with an explanation. Jellyfin records failed tasks in dashboard activity and sends its standard task-completion event to administrator sessions. The settings banner persists the last authentication result; it is not a continuous connectivity check. A list access failure is distinct from an invalid account.
+
+The API currently uses hCaptcha only when requested by the provider (HTTP420). The plugin reports this challenge instead of asking every user for an unexplained captcha response; it does not automatically solve or embed a challenge. API address changes must be saved before using the sign-in button. The initial refresh interval applies when a task is first created; change existing schedules in Jellyfin Scheduled Tasks.
 
 ## Modes
 
@@ -186,9 +190,17 @@ Manual slug mode:
 User list mode:
 
 - Turn on `Use user list subscription`.
-- Set `Yummy user ID`, `Yummy list ID`, and either `Yummy access token` or login/password.
+- Sign in using the account button, choose the list by name, save the remaining settings, then run the corresponding Jellyfin scheduled refresh. For an accessible public list owned by another user, set its user ID manually. Saving general settings does not authenticate or start a refresh.
 - Manual slugs are still honored, so you can combine both sources.
 - Optionally enable stale-release deletion. Cleanup is skipped whenever the list request fails or its response is incomplete.
+
+To use a second Jellyfin library, enable the second Yummy list, choose its name, and enter a separate absolute output folder. Add that folder to another TV-show library in Jellyfin. The two folders cannot coincide or be nested. Both lists use the same Yummy account, quality and voice settings; manual slugs go only to the primary folder. Stale-release deletion applies independently to each successfully fetched list. Disabling the second list leaves its existing files untouched. Voice preferences for the same anime remain shared across libraries.
+
+For each generated Jellyfin library, open its library settings and disable **Missing Episode Fetcher** under **Series metadata downloaders** if TheTVDB is installed. YummyKodik already generates the available episodes. That optional fetcher adds unavailable-episode placeholders and can issue costly database queries on every episode update, especially when each voice has its own STRM file. Keep **TheTVDB** enabled if you use its regular metadata; it is a separate entry. Check this setting again when adding another library, because Jellyfin does not inherit it from the first one.
+
+The settings page follows the Jellyfin interface language, using English or Russian; other interface languages use Russian.
+
+Each folder has a separate scheduled task: **YummyKodik: primary library refresh** keeps the existing primary schedule, and **YummyKodik: second library refresh** defaults to once every 24 hours. Change their triggers independently in Jellyfin Scheduled Tasks. Each task refreshes only its own list, files, runtimes and episode versions. The second task does nothing while its list is disabled. The tasks share one execution gate: if one is already running, an overlapping start is skipped with a warning; stagger the triggers or run the skipped task again. Finished titles still receive safe metadata/state checks on their folder's schedule, since list membership and voice availability can change.
 
 Single episode file mode:
 
@@ -250,16 +262,27 @@ Run the lightweight regression suite:
 dotnet run --project .\YummyKodik.Tests\YummyKodik.Tests.csproj -c Release
 ```
 
+Use the same verification command locally and in CI (PowerShell 7, .NET 10, and Node.js):
+
+```powershell
+pwsh -File scripts/verify.ps1 -Mode Info
+pwsh -File scripts/verify.ps1
+pwsh -File scripts/verify.ps1 -Mode Tests -Filter KodikStreaming -NoBuild
+pwsh -File scripts/verify.ps1 -FfmpegSmoke
+```
+
+`Info` reports repository state, tool paths and versions, and the local Jellyfin installation without building. The default run builds the solution and runs all C#, browser-script, and voice-normalization tests. Use `-NoBuild` only when the existing build matches the source. The optional FFmpeg check generates a short local test video, reproduces the incorrect playlist MIME failure, then verifies probing and decoding through the corrected Kodik proxy. It needs FFmpeg/ffprobe 8 or newer and does not contact media providers. Pass `-FfmpegPath` and `-FfprobePath` to check Jellyfin's bundled executables.
+
 Create a local release ZIP on Windows:
 
 ```powershell
-.\scripts\package.ps1 -Version 2.0.1.0
+.\scripts\package.ps1 -Version 2.1.0.0
 ```
 
 Create a local release ZIP on Linux/macOS:
 
 ```bash
-bash ./scripts/package.sh 2.0.1.0
+bash ./scripts/package.sh 2.1.0.0
 ```
 
 This produces:
@@ -274,8 +297,8 @@ The release workflow runs on version tags and publishes the ZIP, MD5 checksum, G
 Recommended tag format follows the existing release convention:
 
 ```bash
-git tag 2.0.1.0
-git push origin 2.0.1.0
+git tag 2.1.0.0
+git push origin 2.1.0.0
 ```
 
 Tags with a leading `v` also work because the workflow normalizes versions.

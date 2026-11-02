@@ -70,7 +70,8 @@ public sealed class JellyfinWebSeriesTranslationBootstrapHostedService : IHosted
                 return;
             }
 
-            File.WriteAllText(indexPath, patchedHtml, new UTF8Encoding(false));
+            Tasks.Refresh.RefreshFileWriter.WriteTextAtomicallyAsync(
+                indexPath, patchedHtml, null, "web_bootstrap", CancellationToken.None).GetAwaiter().GetResult();
             _logger.LogInformation("[YummyKodik] Injected translation and playback buffering bootstrap into Jellyfin Web: {IndexPath}", indexPath);
         }
         catch (Exception ex)

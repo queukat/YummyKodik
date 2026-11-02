@@ -31,6 +31,7 @@ namespace YummyKodik.Kodik
             CancellationToken cancellationToken = default)
         {
             ArgumentNullException.ThrowIfNull(httpClient);
+            cancellationToken.ThrowIfCancellationRequested();
 
             var ttl = cacheTtl ?? DefaultCacheTtl;
             var now = DateTimeOffset.UtcNow;
@@ -77,7 +78,7 @@ namespace YummyKodik.Kodik
 
                     return _cachedToken!;
                 }
-                catch (Exception ex)
+                catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
                 {
                     // If allowed, return stale token (better than failing the whole plugin)
                     if (allowStaleOnFailure && !string.IsNullOrWhiteSpace(_cachedToken))
@@ -101,7 +102,7 @@ namespace YummyKodik.Kodik
         }
 
         /// <summary>
-        /// Safe variant: never throws. Returns Success=false with Error message.
+        /// Returns Success=false with Error message for failures. Caller cancellation propagates.
         /// Uses cache unless forceRefresh=true.
         /// </summary>
         public static async Task<(bool Success, string? Token, string? Error)> TryGetTokenAsync(
@@ -123,7 +124,7 @@ namespace YummyKodik.Kodik
 
                 return (true, token, null);
             }
-            catch (Exception ex)
+            catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
             {
                 // Don't leak giant stacktraces into logs unless caller wants it
                 Logger?.LogWarning(ex, "KodikTokenProvider.TryGetTokenAsync failed.");

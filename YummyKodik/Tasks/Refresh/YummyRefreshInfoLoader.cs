@@ -87,7 +87,7 @@ internal sealed class YummyRefreshInfoLoader
         {
             return await shikimori.TryResolveSeriesLayoutAsync(shikimoriId, cancellationToken).ConfigureAwait(false);
         }
-        catch (Exception)
+        catch (Exception) when (!cancellationToken.IsCancellationRequested)
         {
             return null;
         }

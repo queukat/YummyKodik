@@ -154,7 +154,7 @@ public sealed partial class KodikPlaybackService
         if (!payload.IsSuccessStatusCode)
         {
             throw new InvalidOperationException(
-                $"Kodik proxy resource request failed. status={(int)payload.StatusCode} url={upstreamUrl} body={TrimForLog(TryDecodeBody(payload.Body))}");
+                $"Kodik proxy resource request failed. status={(int)payload.StatusCode} url={ProviderDiagnostics.DescribeUrl(upstreamUrl)} body={ProviderDiagnostics.DescribePayload(TryDecodeBody(payload.Body))}");
         }
 
         session.ExpiresAtUtc = DateTime.UtcNow.Add(SessionTtl);
@@ -197,7 +197,7 @@ public sealed partial class KodikPlaybackService
     {
         if (TryGetCachedResource(upstreamUrl, out var cached))
         {
-            _logger?.LogDebug("Kodik proxy cache hit. url={Url}", Short(upstreamUrl, 200));
+            _logger?.LogDebug("Kodik proxy cache hit. url={Url}", ProviderDiagnostics.DescribeUrl(upstreamUrl));
             return cached;
         }
 
@@ -265,7 +265,7 @@ public sealed partial class KodikPlaybackService
                     attempt + 1,
                     MaxProxyDownloadAttempts,
                     retryDelay.TotalMilliseconds,
-                    Short(upstreamUrl, 200));
+                    ProviderDiagnostics.DescribeUrl(upstreamUrl));
             }
             catch (Exception ex) when (
                 (ex is HttpRequestException or IOException) &&
@@ -280,7 +280,7 @@ public sealed partial class KodikPlaybackService
                     attempt + 1,
                     MaxProxyDownloadAttempts,
                     retryDelay.TotalMilliseconds,
-                    Short(upstreamUrl, 200));
+                    ProviderDiagnostics.DescribeUrl(upstreamUrl));
             }
             catch (OperationCanceledException ex) when (
                 !cancellationToken.IsCancellationRequested &&
@@ -294,7 +294,7 @@ public sealed partial class KodikPlaybackService
                     attempt + 1,
                     MaxProxyDownloadAttempts,
                     retryDelay.TotalMilliseconds,
-                    Short(upstreamUrl, 200));
+                    ProviderDiagnostics.DescribeUrl(upstreamUrl));
             }
 
             await _delayAsync(retryDelay, cancellationToken).ConfigureAwait(false);
@@ -559,7 +559,9 @@ public sealed partial class KodikPlaybackService
 
     private static string ResolveManifestContentType(string mediaType)
     {
-        return string.IsNullOrWhiteSpace(mediaType) ? "application/vnd.apple.mpegurl" : mediaType;
+        return mediaType.Contains("mpegurl", StringComparison.OrdinalIgnoreCase)
+            ? mediaType
+            : "application/vnd.apple.mpegurl";
     }
 
     private static string ResolveBinaryContentType(string resourceUrl, string mediaType)
@@ -626,20 +628,9 @@ public sealed partial class KodikPlaybackService
         }
     }
 
-    private static string TrimForLog(string value)
-    {
-        return Short((value ?? string.Empty).Replace("\r", string.Empty, StringComparison.Ordinal).Replace("\n", "\\n", StringComparison.Ordinal), 450);
-    }
 
-    private static string Short(string? value, int maxLength)
-    {
-        if (string.IsNullOrEmpty(value))
-        {
-            return string.Empty;
-        }
 
-        return value.Length <= maxLength ? value : value[..maxLength];
-    }
+
 
     private static string NormalizeCacheKey(string upstreamUrl)
     {

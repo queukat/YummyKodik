@@ -1,3 +1,4 @@
+using YummyKodik.Util;
 using System.IO;
 using System.Net.WebSockets;
 using System.Text;
@@ -13,7 +14,6 @@ internal sealed class AllohaWebSocketStreamTokenResolver
     private const int ReceiveAttempts = 3;
 
     private const string AllohaOrigin = "https://alloha.yani.tv";
-    private const string BrowserUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36";
     private const string BrowserAcceptLanguage = "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7";
 
     private readonly ILogger _logger;
@@ -44,7 +44,7 @@ internal sealed class AllohaWebSocketStreamTokenResolver
         var websocketUrl = BuildWebSocketUrl(request.WebSocketBaseUrl, request.WebSocketSessionId);
         using var socket = new ClientWebSocket();
         socket.Options.SetRequestHeader("Origin", AllohaOrigin);
-        socket.Options.SetRequestHeader("User-Agent", BrowserUserAgent);
+        socket.Options.SetRequestHeader("User-Agent", request.UserAgent);
         socket.Options.SetRequestHeader("Accept-Language", BrowserAcceptLanguage);
 
         try
@@ -98,7 +98,7 @@ internal sealed class AllohaWebSocketStreamTokenResolver
                 "Alloha websocket token resolution finished without edge hash. quality={Quality} audioTrackId={AudioTrackId} ws={WebSocketUrl}",
                 request.SelectedQuality,
                 request.AudioTrackId,
-                websocketUrl);
+                ProviderDiagnostics.DescribeUrl(websocketUrl));
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -107,7 +107,7 @@ internal sealed class AllohaWebSocketStreamTokenResolver
                 "Alloha websocket token resolution failed. quality={Quality} audioTrackId={AudioTrackId} ws={WebSocketUrl}",
                 request.SelectedQuality,
                 request.AudioTrackId,
-                websocketUrl);
+                ProviderDiagnostics.DescribeUrl(websocketUrl));
         }
         finally
         {

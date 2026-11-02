@@ -2,6 +2,7 @@ namespace YummyKodik.Alloha;
 
 internal sealed class AllohaStreamTokenRequest
 {
+    public string UserAgent { get; init; } = AllohaPlaybackService.BrowserUserAgent;
     public string IframeUrl { get; init; } = string.Empty;
     public string WebSocketBaseUrl { get; init; } = string.Empty;
     public string WebSocketSessionId { get; init; } = string.Empty;

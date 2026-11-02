@@ -35,12 +35,12 @@ public static class KodikTokenResolver
                 return token.Trim();
             }
         }
-        catch
+        catch when (!cancellationToken.IsCancellationRequested)
         {
             // Ignore and try fallback source below.
         }
 
-        var scriptResponse = await httpClient.GetAsync(FallbackScriptUrl, cancellationToken).ConfigureAwait(false);
+        using var scriptResponse = await httpClient.GetAsync(FallbackScriptUrl, cancellationToken).ConfigureAwait(false);
         if (!scriptResponse.IsSuccessStatusCode)
         {
             throw new KodikTokenException($"Failed to download fallback Kodik script. HTTP {(int)scriptResponse.StatusCode}.");
@@ -83,7 +83,7 @@ public static class KodikTokenResolver
         HttpClient httpClient,
         CancellationToken cancellationToken)
     {
-        var response = await httpClient.GetAsync(OnlineModUrl, cancellationToken).ConfigureAwait(false);
+        using var response = await httpClient.GetAsync(OnlineModUrl, cancellationToken).ConfigureAwait(false);
         if (!response.IsSuccessStatusCode)
         {
             throw new KodikTokenException($"Failed to download online_mod.js. HTTP {(int)response.StatusCode}.");
@@ -195,7 +195,7 @@ public static class KodikTokenResolver
             var bytes = Convert.FromBase64String(b64);
             return Encoding.UTF8.GetString(bytes);
         }
-        catch
+        catch (FormatException)
         {
             return string.Empty;
         }

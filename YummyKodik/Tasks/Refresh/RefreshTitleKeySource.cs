@@ -8,26 +8,32 @@ internal sealed class RefreshTitleKeySource
 {
     private readonly ILogger _logger;
     private readonly Action _saveConfiguration;
+    private readonly Func<PluginConfiguration>? _currentConfiguration;
 
-    public RefreshTitleKeySource(ILogger logger, Action saveConfiguration)
+    public RefreshTitleKeySource(ILogger logger, Action saveConfiguration, Func<PluginConfiguration>? currentConfiguration = null)
     {
         _logger = logger;
         _saveConfiguration = saveConfiguration;
+        _currentConfiguration = currentConfiguration;
     }
 
     public bool UserListFetchFailed { get; private set; }
 
     public bool UserListFetchSucceeded { get; private set; }
 
+    public string FailureCode { get; private set; } = string.Empty;
+
     public async Task<List<string>> BuildAsync(
         PluginConfiguration cfg,
         YummyClient yummyClient,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        LibraryTarget? target = null)
     {
+        target ??= cfg.GetLibraryTargets()[0];
         var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        AddConfiguredAnimeKeys(cfg.Slugs, set);
-        await AddUserListAnimeKeysAsync(cfg, yummyClient, set, cancellationToken).ConfigureAwait(false);
+        AddConfiguredAnimeKeys(target.Slugs, set);
+        await AddUserListAnimeKeysAsync(cfg, target, yummyClient, set, cancellationToken).ConfigureAwait(false);
 
         return set.ToList();
     }
@@ -51,29 +57,34 @@ internal sealed class RefreshTitleKeySource
 
     private async Task AddUserListAnimeKeysAsync(
         PluginConfiguration cfg,
+        LibraryTarget target,
         YummyClient yummyClient,
         HashSet<string> keys,
         CancellationToken cancellationToken)
     {
         UserListFetchFailed = false;
         UserListFetchSucceeded = false;
+        FailureCode = string.Empty;
 
-        if (!cfg.UseUserListSubscription)
+        if (!target.UseUserListSubscription)
         {
             return;
         }
 
-        if (cfg.YummyUserId <= 0)
-        {
-            _logger.LogWarning("[YummyKodik] UseUserListSubscription enabled, but YummyUserId is not set.");
-            return;
-        }
-
-        var listId = cfg.YummyUserListId < 0 ? 0 : cfg.YummyUserListId;
+        var listId = Math.Max(0, target.YummyUserListId);
 
         try
         {
-            await EnsureAuthenticatedAsync(cfg, yummyClient, cancellationToken).ConfigureAwait(false);
+            cfg = await EnsureAuthenticatedAsync(cfg, yummyClient, cancellationToken).ConfigureAwait(false);
+            if (cfg.YummyUserId <= 0)
+            {
+                UserListFetchFailed = true;
+                FailureCode = "user_id_required";
+                _logger.LogWarning("[YummyKodik] UseUserListSubscription enabled, but YummyUserId is not set.");
+                return;
+            }
+
+
             var items = await FetchUserListWithRetryAsync(cfg, yummyClient, listId, cancellationToken).ConfigureAwait(false);
 
             _logger.LogInformation(
@@ -85,10 +96,13 @@ internal sealed class RefreshTitleKeySource
             AddUserListItemKeys(items, keys);
             UserListFetchSucceeded = true;
         }
-        catch (Exception ex)
+        catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
         {
             UserListFetchFailed = true;
-            _logger.LogError(ex, "[YummyKodik] Failed to fetch user list, falling back to manual slugs only.");
+            FailureCode = ex is YummyAccountException accountError ? accountError.Code : "list_unavailable";
+            _logger.LogError(ex,
+                "[YummyKodik] Failed to fetch Yummy list {ListId} for '{Root}'; keeping configured manual titles and any proven local fallback titles.",
+                listId, target.OutputRootPath);
         }
     }
 
@@ -104,14 +118,11 @@ internal sealed class RefreshTitleKeySource
                 .GetUserListAsync(cfg.YummyUserId, listId, cancellationToken)
                 .ConfigureAwait(false);
         }
-        catch (UnauthorizedAccessException ex) when (!string.IsNullOrWhiteSpace(yummyClient.GetAccessToken()))
+        catch (YummyAccountException ex) when (ex.Code == "access_denied" && !string.IsNullOrWhiteSpace(yummyClient.GetAccessToken()))
         {
-            _logger.LogWarning(ex, "[YummyKodik] User list unauthorized, trying token refresh and retry.");
-            await yummyClient.RefreshTokenAsync(cancellationToken).ConfigureAwait(false);
-
-            return await yummyClient
-                .GetUserListAsync(cfg.YummyUserId, listId, cancellationToken)
-                .ConfigureAwait(false);
+            yummyClient.SetAccessToken(null);
+            cfg = await EnsureAuthenticatedAsync(cfg, yummyClient, cancellationToken).ConfigureAwait(false);
+            return await yummyClient.GetUserListAsync(cfg.YummyUserId, listId, cancellationToken).ConfigureAwait(false);
         }
     }
 
@@ -133,56 +144,6 @@ internal sealed class RefreshTitleKeySource
         }
     }
 
-    private async Task EnsureAuthenticatedAsync(
-        PluginConfiguration cfg,
-        YummyClient yummyClient,
-        CancellationToken cancellationToken)
-    {
-        if (!string.IsNullOrWhiteSpace(cfg.YummyAccessToken))
-        {
-            yummyClient.SetAccessToken(cfg.YummyAccessToken);
-
-            try
-            {
-                var refreshed = await yummyClient.RefreshTokenAsync(cancellationToken).ConfigureAwait(false);
-
-                if (!string.Equals(cfg.YummyAccessToken, refreshed, StringComparison.Ordinal))
-                {
-                    cfg.YummyAccessToken = refreshed;
-                    _saveConfiguration();
-                    _logger.LogInformation("[YummyKodik] Yummy access token refreshed and saved.");
-                }
-
-                return;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "[YummyKodik] Token refresh failed, will try login if credentials exist.");
-            }
-        }
-
-        if (!string.IsNullOrWhiteSpace(cfg.YummyLogin) && !string.IsNullOrWhiteSpace(cfg.YummyPassword))
-        {
-            _logger.LogInformation("[YummyKodik] Logging in to Yummy to obtain user token.");
-
-            var token = await yummyClient.LoginAsync(
-                    cfg.YummyLogin.Trim(),
-                    cfg.YummyPassword,
-                    string.IsNullOrWhiteSpace(cfg.YummyRecaptchaResponse) ? null : cfg.YummyRecaptchaResponse.Trim(),
-                    cancellationToken)
-                .ConfigureAwait(false);
-
-            if (!string.IsNullOrWhiteSpace(token))
-            {
-                cfg.YummyAccessToken = token;
-                _saveConfiguration();
-                _logger.LogInformation("[YummyKodik] Yummy access token obtained and saved.");
-            }
-
-            return;
-        }
-
-        _logger.LogWarning(
-            "[YummyKodik] User list subscription enabled but no auth is configured. Set YummyAccessToken or YummyLogin and YummyPassword.");
-    }
+    private Task<PluginConfiguration> EnsureAuthenticatedAsync(PluginConfiguration cfg, YummyClient yummyClient, CancellationToken cancellationToken)
+        => YummyAccountAuthentication.EnsureAsync(cfg, yummyClient, _saveConfiguration, cancellationToken, _currentConfiguration);
 }

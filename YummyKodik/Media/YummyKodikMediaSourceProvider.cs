@@ -24,7 +24,7 @@ using YummyKodik.Yummy;
 
 namespace YummyKodik.Media;
 
-public sealed class YummyKodikMediaSourceProvider : IMediaSourceProvider
+public sealed partial class YummyKodikMediaSourceProvider : IMediaSourceProvider
 {
     private const string HlsFormatQuery = "&format=hls";
     private const string TranslationTypeVoice = "voice";
@@ -39,17 +39,20 @@ public sealed class YummyKodikMediaSourceProvider : IMediaSourceProvider
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly IInternalJellyfinUrlProvider _internalJellyfinUrlProvider;
     private readonly ILibraryManager _libraryManager;
+    private readonly Func<IMediaSourceManager>? _sourceManager;
 
     public YummyKodikMediaSourceProvider(
         ILogger<YummyKodikMediaSourceProvider> logger,
         IHttpClientFactory httpClientFactory,
         IInternalJellyfinUrlProvider internalJellyfinUrlProvider,
-        ILibraryManager libraryManager)
+        ILibraryManager libraryManager,
+        Func<IMediaSourceManager>? sourceManager = null)
     {
         _logger = new YummyKodikLogger<YummyKodikMediaSourceProvider>(logger);
         _httpClientFactory = httpClientFactory;
         _internalJellyfinUrlProvider = internalJellyfinUrlProvider;
         _libraryManager = libraryManager;
+        _sourceManager = sourceManager;
     }
 
     [SuppressMessage("Major Code Smell", "S2325:Methods and properties that don't access instance data should be static", Justification = "Jellyfin IMediaSourceProvider requires an instance Name property.")]
@@ -61,11 +64,18 @@ public sealed class YummyKodikMediaSourceProvider : IMediaSourceProvider
         List<ILiveStream> currentLiveStreams,
         CancellationToken cancellationToken)
     {
-        throw new NotSupportedException("OpenMediaSource is not supported by YummyKodik.");
+        return OpenNativeMediaSourceAsync(openToken, cancellationToken);
     }
 
     public async Task<IEnumerable<MediaSourceInfo>> GetMediaSources(BaseItem item, CancellationToken cancellationToken)
     {
+        // Native STRM versions use the host's open/close lifecycle, including explicit
+        // version IDs. Do not also offer a separately resolved dynamic copy.
+        if (_sourceManager != null && TryGetNativeGateway(item, out var nativeGateway) &&
+            HasExplicitNativeVoice(nativeGateway))
+        {
+            return Array.Empty<MediaSourceInfo>();
+        }
         var effectiveItem = ResolveMergedPrimaryVersion(item);
         if (!TryGetLogicalUri(effectiveItem, out var uri))
         {

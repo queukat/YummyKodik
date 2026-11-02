@@ -5,6 +5,8 @@ using System.Text.Json.Nodes;
 using MediaBrowser.Common.Configuration;
 using MediaBrowser.Common.Plugins;
 using MediaBrowser.Model.Plugins;
+using MediaBrowser.Model.Configuration;
+using YummyKodik.Yummy;
 using MediaBrowser.Model.Serialization;
 using Microsoft.Extensions.Logging;
 using YummyKodik.Configuration;
@@ -20,6 +22,8 @@ namespace YummyKodik
         private readonly Guid _id = new("6801ee3f-27f2-4d4e-ab37-e569c025b7c5");
 
         public static Plugin Instance { get; private set; } = null!;
+
+        internal static readonly SemaphoreSlim ConfigurationGate = new(1, 1);
 
         public override string Name => "YummyKodik";
 
@@ -38,6 +42,62 @@ namespace YummyKodik
         }
 
         public ILogger<Plugin> Logger { get; }
+
+        public override void UpdateConfiguration(BasePluginConfiguration configuration)
+        {
+            // The account endpoint owns credentials. A stale settings form must never restore an old token.
+            Plugin.ConfigurationGate.Wait();
+            try
+            {
+                var incoming = (PluginConfiguration)configuration;
+                var current = Configuration;
+                incoming.YummyAccessToken = current.YummyAccessToken;
+                incoming.YummyLogin = current.YummyLogin;
+                incoming.YummyPassword = current.YummyPassword;
+                incoming.YummyRecaptchaResponse = current.YummyRecaptchaResponse;
+                incoming.YummyAccountStatus = current.YummyAccountStatus;
+                incoming.YummyAccountCheckedUtc = current.YummyAccountCheckedUtc;
+                incoming.SeriesPreferredTranslations = current.SeriesPreferredTranslations;
+                incoming.UserSeriesPreferredTranslations = current.UserSeriesPreferredTranslations;
+                base.UpdateConfiguration(incoming);
+            }
+            finally { Plugin.ConfigurationGate.Release(); }
+        }
+
+        internal bool UpdateTranslationPreferences(Func<PluginConfiguration, bool> update)
+        {
+            Plugin.ConfigurationGate.Wait();
+            var cfg = Configuration;
+            var previousGlobal = cfg.SeriesPreferredTranslations;
+            var previousUsers = cfg.UserSeriesPreferredTranslations;
+            try
+            {
+                // Copy before mutation: readers and a failed save retain a coherent old snapshot.
+                var preferences = new PluginConfiguration
+                {
+                    SeriesPreferredTranslations = (previousGlobal ?? []).Where(x => x != null)
+                        .Select(x => new SeriesTranslationPreference { SeriesKey = x.SeriesKey, TranslationId = x.TranslationId }).ToList(),
+                    UserSeriesPreferredTranslations = (previousUsers ?? []).Where(x => x != null)
+                        .Select(x => new UserSeriesTranslationPreference { UserId = x.UserId, SeriesKey = x.SeriesKey, TranslationId = x.TranslationId }).ToList()
+                };
+                var changed = update(preferences);
+                if (changed)
+                {
+                    cfg.SeriesPreferredTranslations = preferences.SeriesPreferredTranslations;
+                    cfg.UserSeriesPreferredTranslations = preferences.UserSeriesPreferredTranslations;
+                    SaveConfiguration();
+                }
+                return changed;
+            }
+            catch
+            {
+                cfg.SeriesPreferredTranslations = previousGlobal;
+                cfg.UserSeriesPreferredTranslations = previousUsers;
+                throw;
+            }
+            finally { Plugin.ConfigurationGate.Release(); }
+        }
+
 
         public IEnumerable<PluginPageInfo> GetPages()
         {
@@ -98,7 +158,8 @@ namespace YummyKodik
                     WriteIndented = true
                 });
 
-                File.WriteAllText(metaPath, json);
+                Tasks.Refresh.RefreshFileWriter.WriteTextAtomicallyAsync(
+                    metaPath, json, null, "plugin_manifest", CancellationToken.None).GetAwaiter().GetResult();
             }
             catch (Exception ex)
             {

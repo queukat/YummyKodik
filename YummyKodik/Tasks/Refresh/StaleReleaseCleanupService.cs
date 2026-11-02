@@ -318,7 +318,7 @@ internal static class StaleReleaseCleanupService
         foreach (var season in state.Seasons)
         {
             if (!TryGetStrictDirectChildPath(seriesDirectory, season.Key, out var seasonDirectory) ||
-                IsReparsePoint(seasonDirectory, logger) ||
+                (Directory.Exists(seasonDirectory) && IsReparsePoint(seasonDirectory, logger)) ||
                 !await IsExactManagedSeasonDirectoryAsync(seasonDirectory, season.Key, season.Value!, logger, cancellationToken).ConfigureAwait(false))
             {
                 return false;
@@ -370,7 +370,9 @@ internal static class StaleReleaseCleanupService
                 }
             }
 
-            if (!actualDirectories.SetEquals(state.Seasons.Keys))
+            // A tracked season may never have produced episodes or may already be gone.
+            // Unknown directories still prevent deleting the series and its remaining metadata.
+            if (!actualDirectories.IsSubsetOf(state.Seasons.Keys))
             {
                 return false;
             }
