@@ -9,6 +9,14 @@
     "imageUrl": "https://raw.githubusercontent.com/queukat/YummyKodik/main/YummyKodik/Assets/logo.png",
     "versions": [
       {
+        "version": "2.1.0.0",
+        "changelog": "- Added a second YummyAnime list with its own library folder and refresh schedule.\n- Added explicit account sign-in and clearer authentication errors while preserving unsaved settings.\n- Fixed Kodik and CVH playback failures with FFmpeg 8 when providers return an incorrect playlist content type.\n- Improved playback startup, seeking, and selected-voice consistency in Jellyfin 12.\n- Improved Alloha recovery and same-voice fallback; canceled recovery attempts can be retried immediately.\n- Made the voice selector load from local library files without waiting for providers. Native version choices affect only the current playback.\n- Improved refresh isolation between libraries and safe cleanup of removed releases.\n- Added English settings-page text and kept long series titles available on hover.\n\nRequires Jellyfin 12.",
+        "targetAbi": "12.0.0.0",
+        "sourceUrl": "https://github.com/queukat/YummyKodik/releases/download/2.1.0.0/YummyKodik_2.1.0.0.zip",
+        "checksum": "73a2abdb471bd885be9165226dbce28c",
+        "timestamp": "2026-11-02T12:24:04Z"
+      },
+      {
         "version": "2.0.1.0",
         "changelog": "- Reduced unnecessary CPU and disk activity during library refreshes.\n- Fixed selected voice tracks changing after a library scan.\n- Fixed episodes ending a few seconds early when playback switches to a backup source.\n- Fixed cleanup of releases removed from your YummyAnime list when automatic removal is enabled.\n- Improved borrowed intro and outro timings by comparing available voice tracks. Existing fallback behavior is preserved when timings disagree.\n\nRequires Jellyfin 12.",
         "targetAbi": "12.0.0.0",
