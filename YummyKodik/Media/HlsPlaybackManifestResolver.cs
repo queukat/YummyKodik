@@ -6,13 +6,13 @@ namespace YummyKodik.Media;
 /// <summary>Binds playback and duration to one gateway-selected provider session.</summary>
 internal static class HlsPlaybackManifestResolver
 {
-    internal sealed record ResolvedManifest(string Url, long RunTimeTicks);
+    internal sealed record ResolvedManifest(string Url, long RunTimeTicks, float? FrameRate);
 
     public static async Task<ResolvedManifest> ResolveAsync(HttpClient client, string gatewayUrl, CancellationToken cancellationToken)
     {
         var gateway = new Uri(gatewayUrl);
         var current = gateway;
-        Uri? playback = null;
+        float? selectedFrameRate = null;
         for (var depth = 0; depth < 4; depth++)
         {
             using var response = await client.GetAsync(current, cancellationToken).ConfigureAwait(false);
@@ -25,7 +25,6 @@ internal static class HlsPlaybackManifestResolver
                 throw new InvalidOperationException("Playback manifest did not identify a stable local provider session.");
             }
 
-            playback ??= resolved;
             var manifest = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
             var lines = manifest.Split('\n', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
             if (lines.Length == 0 || lines[0] != "#EXTM3U")
@@ -56,10 +55,20 @@ internal static class HlsPlaybackManifestResolver
                 {
                     throw new InvalidOperationException("Invalid HLS total duration.");
                 }
-                return new ResolvedManifest(playback.AbsoluteUri, TimeSpan.FromSeconds(seconds).Ticks);
+                return new ResolvedManifest(resolved.AbsoluteUri, TimeSpan.FromSeconds(seconds).Ticks, selectedFrameRate);
             }
 
-            var variant = lines.FirstOrDefault(line => !line.StartsWith('#'));
+            var variantIndex = Array.FindIndex(lines, line => !line.StartsWith('#'));
+            var variant = variantIndex < 0 ? null : lines[variantIndex];
+            if (variantIndex >= 0)
+            {
+                // The first rendition is also the stream Jellyfin would select as 0:0.
+                // Carry its declared frame rate across nested media playlists.
+                var streamInfo = lines.Take(variantIndex)
+                    .LastOrDefault(line => line.StartsWith("#EXT-X-STREAM-INF:", StringComparison.OrdinalIgnoreCase));
+                selectedFrameRate = HlsVideoFrameRatePolicy.ParseDeclaredFrameRate(streamInfo) ?? selectedFrameRate;
+            }
+
             if (variant == null || !Uri.TryCreate(resolved, variant, out current) || !IsLocalProxy(gateway, current))
             {
                 throw new InvalidOperationException("Playback master has no local media playlist.");

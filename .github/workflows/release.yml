@@ -2,6 +2,10 @@ name: Release
 
 on:
   push:
+    branches:
+      - main
+    paths:
+      - "YummyKodik/YummyKodik.csproj"
     tags:
       - "v*"
       - "*.*.*"
@@ -40,7 +44,13 @@ jobs:
           set -euo pipefail
           TAG="${{ github.event.inputs.tag }}"
           if [[ -z "$TAG" ]]; then
-            TAG="${GITHUB_REF_NAME}"
+            if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+              TAG="${GITHUB_REF_NAME}"
+            else
+              # A project version bump on main publishes its corresponding release.
+              TAG="$(sed -n 's:.*<Version>\([^<]*\)</Version>.*:\1:p' "${PROJECT_PATH}" | head -n 1)"
+              test -n "$TAG"
+            fi
           fi
 
           V="${{ github.event.inputs.version }}"
@@ -57,6 +67,10 @@ jobs:
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "version=$V" >> "$GITHUB_OUTPUT"
           echo "zip=YummyKodik_${V}.zip" >> "$GITHUB_OUTPUT"
+
+      - name: Verify before publishing
+        shell: pwsh
+        run: ./scripts/verify.ps1
 
       - name: Restore
         run: dotnet restore "${PROJECT_PATH}"
@@ -120,6 +134,7 @@ jobs:
         with:
           tag_name: ${{ steps.ver.outputs.tag }}
           name: ${{ steps.ver.outputs.tag }}
+          target_commitish: ${{ github.sha }}
           body_path: release-body.md
           files: |
             artifacts/${{ steps.ver.outputs.zip }}

@@ -18,10 +18,11 @@ internal static class HlsPlaybackManifestTests
             throw new Exception("Fallback must replace the 1430-second catalog duration and bind the same selected session.");
     }
 
-    public static void MasterResolvesOnlyPlaylistsAndPreservesPinnedMaster()
+    public static void MasterResolvesOnlyPlaylistsAndPinsSelectedRendition()
     {
         const string gateway = "http://localhost:8096/YummyKodik/stream?provider=alloha";
         const string master = "http://localhost:8096/YummyKodik/alloha-proxy/master.m3u8?sessionId=one";
+        const string selected = "http://localhost:8096/YummyKodik/alloha-proxy/video.m3u8?sessionId=one";
         using var handler = new Handler((request, call) => call switch
         {
             1 => Response(request, "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\nvideo.m3u8?sessionId=one", master),
@@ -31,8 +32,27 @@ internal static class HlsPlaybackManifestTests
         });
         using var client = new HttpClient(handler);
         var result = HlsPlaybackManifestResolver.ResolveAsync(client, gateway, CancellationToken.None).GetAwaiter().GetResult();
-        if (result.Url != master || result.RunTimeTicks != TimeSpan.FromSeconds(1430.02).Ticks)
-            throw new Exception("Master URL and fractional final segment duration must survive resolution.");
+        if (result.Url != selected || result.RunTimeTicks != TimeSpan.FromSeconds(1430.02).Ticks)
+            throw new Exception("Use the selected HLS media playlist and retain the exact fractional duration.");
+    }
+
+    public static void MasterCarriesOnlySelectedRenditionFrameRate()
+    {
+        const string gateway = "http://localhost:8096/YummyKodik/stream?provider=cvh";
+        const string master = "http://localhost:8096/YummyKodik/cvh-proxy/master.m3u8?sessionId=pinned";
+        using var handler = new Handler((request, call) => call switch
+        {
+            1 => Response(request,
+                "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1500000,FRAME-RATE=23.976,RESOLUTION=852x480\nfirst.m3u8?sessionId=pinned\n#EXT-X-STREAM-INF:BANDWIDTH=5000000,FRAME-RATE=60.000,RESOLUTION=1920x1080\nsecond.m3u8?sessionId=pinned", master),
+            2 when request.RequestUri!.AbsolutePath.EndsWith("/first.m3u8", StringComparison.Ordinal) =>
+                Response(request, "#EXTM3U\n#EXTINF:3,\na.ts\n#EXT-X-ENDLIST", null),
+            _ => throw new Exception("Only the chosen variant should be resolved.")
+        });
+        using var client = new HttpClient(handler);
+        var result = HlsPlaybackManifestResolver.ResolveAsync(client, gateway, CancellationToken.None).GetAwaiter().GetResult();
+        if (!result.Url.Contains("/first.m3u8?sessionId=pinned", StringComparison.Ordinal) ||
+            !result.FrameRate.HasValue || Math.Abs(result.FrameRate.Value - 23.976f) > 0.001f)
+            throw new Exception("Use FPS and URL of the same pinned rendition, never another quality variant.");
     }
 
     public static void RejectsUnstableIncompleteAndInvalidManifests()

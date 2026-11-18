@@ -86,6 +86,10 @@ public sealed partial class YummyKodikMediaSourceProvider
         {
             throw new InvalidOperationException("The selected episode did not provide usable video and audio streams.");
         }
+
+        // MPEG-TS uses a 90 kHz clock. A bogus probed 90,000 FPS
+        // otherwise makes Jellyfin pass -g 270000 to AMD AMF for 3s HLS segments.
+        HlsVideoFrameRatePolicy.Normalize(source.MediaStreams, resolved.FrameRate);
         source.RunTimeTicks = resolved.RunTimeTicks;
         await PublishResolvedRunTimeAsync(item, new[] { source }, cancellationToken).ConfigureAwait(false);
         return new NativePlaybackStream(source);
