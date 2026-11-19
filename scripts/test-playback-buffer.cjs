@@ -69,10 +69,14 @@ class ElementMock extends EventTargetMock {
     }
 }
 
-function createHarness({ eagerHls = false } = {}) {
+function createHarness({ eagerHls = false, managedIds = [] } = {}) {
     const mediaEvents = [];
     const intervals = new Map();
+    const timeouts = new Map();
+    const statusCalls = [];
+    const managed = new Set(managedIds);
     let nextInterval = 1;
+    let nextTimeout = 1;
 
     class VideoMock extends ElementMock {
         constructor() {
@@ -175,7 +179,22 @@ function createHarness({ eagerHls = false } = {}) {
             intervals.set(id, callback);
             return id;
         },
-        clearInterval: id => intervals.delete(id)
+        clearInterval: id => intervals.delete(id),
+        setTimeout(callback) {
+            const id = nextTimeout++;
+            timeouts.set(id, callback);
+            return id;
+        },
+        clearTimeout: id => timeouts.delete(id),
+        fetch: () => Promise.resolve({ ok: true }),
+        ApiClient: {
+            getUrl: path => "http://localhost:8096/" + path,
+            ajax: ({ url }) => {
+                statusCalls.push(url);
+                const id = url.split("/").at(-1);
+                return Promise.resolve({ managed: managed.has(id) });
+            }
+        }
     };
     if (eagerHls) window.Hls = HlsMock;
     vm.runInNewContext(source, { window, document, URL, console }, { filename: sourcePath, timeout: 1000 });
@@ -187,7 +206,10 @@ function createHarness({ eagerHls = false } = {}) {
         hls,
         video,
         Hls: HlsMock,
+        window,
         intervals,
+        timeouts,
+        statusCalls,
         body,
         async flush() {
             for (let turn = 0; turn < 8; turn++) {
@@ -203,6 +225,10 @@ function createHarness({ eagerHls = false } = {}) {
         async attach(url = managedSource) {
             hls.loadSource(url);
             hls.attachMedia(video);
+            await harness.flush();
+        },
+        async requestPlayback(id) {
+            await window.fetch("http://localhost:8096/Items/" + id + "/PlaybackInfo", { method: "POST" });
             await harness.flush();
         },
         async progress(ranges) {
@@ -227,7 +253,56 @@ function createHarness({ eagerHls = false } = {}) {
     return harness;
 }
 
+
+const managedItemId = "e9758a4232a8726f110c977976103be0";
+const otherItemId = "e1e7254a4621c686d592165234187d7b";
+const remuxUrl = "/videos/e9758a42-32a8-726f-110c-977976103be0/master.m3u8";
+
 const tests = [
+    ["managed PlaybackInfo displays preparation before HLS exists", async () => {
+        const h = createHarness({ managedIds: [managedItemId] });
+        await h.requestPlayback(managedItemId);
+        assert.ok(h.overlay(), "Managed playback must show preparation before Hls.loadSource");
+        assert.match(h.overlay().children[1].textContent, /Получаю источник/);
+        assert.equal(h.statusCalls.length, 1, "One local membership check per episode");
+        assert.equal(h.hls.sources.length, 0, "Preparing must not require FFmpeg or HLS to have started");
+        assert.equal(h.video.playCalls, 0, "Preparation does not control the player's playback");
+    }],
+    ["remuxed HLS is scoped to managed item and never waits for a minute", async () => {
+        const h = createHarness({ managedIds: [managedItemId] });
+        await h.requestPlayback(managedItemId);
+        await h.attach(remuxUrl);
+        assert.ok(h.overlay(), "Native Jellyfin remux should retain its preparation overlay");
+        assert.deepEqual(h.hls.config, { maxBufferLength: 30, maxMaxBufferLength: 90 },
+            "Remux must preserve the client's buffer settings");
+        await h.progress([[0, 6]]);
+        assert.ok(h.overlay(), "Buffer progress remains visible until playback starts");
+        await h.video.play();
+        await h.flush();
+        assert.equal(h.video.paused, false, "No enforced 60-second wait for remux");
+        assert.equal(h.overlay(), undefined, "Playing hides the preparation indicator");
+        h.video.setBuffer([[0, 6]]);
+        h.video.currentTime = 6;
+        h.video.dispatch("waiting");
+        assert.ok(h.overlay(), "Buffering after start should show progress");
+        await h.progress([[6, 12]]);
+        h.video.dispatch("playing");
+        assert.equal(h.overlay(), undefined, "Recovery should hide the indicator again");
+        h.hls.destroy();
+        assert.equal(h.video.listenerCount(), 0);
+        assert.equal(h.overlay(), undefined);
+    }],
+    ["unmanaged HLS is untouched and stale preparation is cleared", async () => {
+        const h = createHarness({ managedIds: [managedItemId] });
+        await h.requestPlayback(managedItemId);
+        assert.ok(h.overlay());
+        await h.requestPlayback(otherItemId);
+        assert.equal(h.overlay(), undefined);
+        await h.attach("/videos/e1e7254a-4621-c686-d592-165234187d7b/master.m3u8");
+        assert.equal(h.overlay(), undefined);
+        assert.equal(h.video.listenerCount(), 0);
+        assert.deepEqual(h.hls.config, { maxBufferLength: 30, maxMaxBufferLength: 90 });
+    }],
     ["pinned Alloha and CVH sessions retain startup buffering", async () => {
         for (const provider of ["alloha", "cvh"]) {
             const h = createHarness();

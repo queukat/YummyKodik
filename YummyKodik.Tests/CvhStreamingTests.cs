@@ -9,6 +9,89 @@ internal static class CvhStreamingTests
     private const string ProxyBaseUrl = "/base/YummyKodik/cvh-proxy";
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(5);
 
+    public static void SessionResolvesOnceAndChecksVoiceBeforeManifest() =>
+        SessionResolvesOnceAndChecksVoiceBeforeManifestAsync().GetAwaiter().GetResult();
+
+    private static async Task SessionResolvesOnceAndChecksVoiceBeforeManifestAsync()
+    {
+        var requests = new List<string>();
+        var stage = 0;
+        using var handler = new Handler(request =>
+        {
+            var path = request.RequestUri!.AbsolutePath;
+            requests.Add(path);
+            if (path.EndsWith("/player/sv/playlist", StringComparison.Ordinal))
+            {
+                var response = new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    RequestMessage = request,
+                    Content = new StringContent(
+                        "{\"items\":[{\"vkId\":\"12345\",\"voiceStudio\":\"AniStar\",\"episode\":11,\"season\":1}]}")
+                };
+                response.Headers.TryAddWithoutValidation("Set-Cookie", "playback=ready; Path=/");
+                return response;
+            }
+
+            if (path.EndsWith("/player/sv/video/12345", StringComparison.Ordinal))
+            {
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    RequestMessage = request,
+                    Content = new StringContent(
+                        "{\"duration\":1200,\"sources\":{\"hlsUrl\":\"https://cdn.cvh.example/video.m3u8\"}}")
+                };
+            }
+
+            if (path == "/video.m3u8")
+            {
+                Check(stage == 1, "The selected voice must be validated before downloading its manifest.");
+                return new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    RequestMessage = request,
+                    Content = new StringContent("#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXTINF:6,\npart.ts\n#EXT-X-ENDLIST")
+                };
+            }
+
+            throw new Exception("Unexpected CVH session request.");
+        });
+        using var http = new HttpClient(handler);
+        var client = new CvhClient(http);
+        var source = new YummyCvhSource
+        {
+            AnimeId = 61549,
+            EpisodeNumber = 11,
+            DubbingCode = "AniStar",
+            DubbingName = "AniStar"
+        };
+
+        var session = await client.CreatePlaybackSessionAsync(source, 1080, CancellationToken.None,
+            resolved =>
+            {
+                Check(resolved.VoiceName == "AniStar", "Validate the exact chosen voice.");
+                stage = 1;
+            }).WaitAsync(Timeout);
+        Check(handler.Requests == 3 && requests.Count == 3 &&
+              requests.Count(path => path.EndsWith("/player/sv/playlist", StringComparison.Ordinal)) == 1 &&
+              requests.Count(path => path.EndsWith("/player/sv/video/12345", StringComparison.Ordinal)) == 1 &&
+              requests.Count(path => path == "/video.m3u8") == 1,
+            "One HLS session must use one playlist, one video request and one manifest download.");
+        Check(session.ManifestUrl == "https://cdn.cvh.example/video.m3u8" &&
+              session.ManifestText.Contains("#EXTINF:6,", StringComparison.Ordinal) &&
+              CvhClient.TryGetSession(session.SessionId, out _),
+            "A successfully validated session must remain available to its pinned proxy.");
+
+        stage = 0;
+        Exception? rejected = null;
+        try
+        {
+            await client.CreatePlaybackSessionAsync(source, 1080, CancellationToken.None,
+                _ => throw new InvalidOperationException("Selected voice does not match.")).WaitAsync(Timeout);
+        }
+        catch (InvalidOperationException error) { rejected = error; }
+        Check(rejected is not null && handler.Requests == 5 && stage == 0,
+            "A voice mismatch must stop before fetching the manifest or publishing another session.");
+    }
+
     public static void FirstChunkArrivesBeforeEof() => FirstChunkArrivesBeforeEofAsync().GetAwaiter().GetResult();
     public static void CookiesAndResourceHeadersArePreserved() => CookiesAndResourceHeadersArePreservedAsync().GetAwaiter().GetResult();
     public static void SniffedManifestIsRewrittenBeforeWriting() => SniffedManifestIsRewrittenBeforeWritingAsync().GetAwaiter().GetResult();

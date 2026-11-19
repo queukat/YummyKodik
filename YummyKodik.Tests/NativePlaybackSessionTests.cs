@@ -18,11 +18,34 @@ using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.Options;
 using YummyKodik;
 using YummyKodik.Configuration;
+using YummyKodik.Api;
+using Microsoft.AspNetCore.Authorization;
 using YummyKodik.Logging;
 using YummyKodik.Media;
 
 internal static class NativePlaybackSessionTests
 {
+    public static void ManagedPlaybackStatusUsesLocalLibraryMembership()
+    {
+        using var fixture = new Fixture();
+        var controller = new YummyKodikPlaybackStatusController(fixture.Library, fixture.Provider)
+        {
+            ControllerContext = new ControllerContext { HttpContext = new DefaultHttpContext() }
+        };
+
+        var own = controller.Get(fixture.First.Id) as OkObjectResult;
+        var foreign = controller.Get(Guid.NewGuid()) as OkObjectResult;
+        bool Managed(OkObjectResult? result) =>
+            result?.Value?.GetType().GetProperty("managed")?.GetValue(result.Value) is true;
+
+        Require(Managed(own), "A registered managed episode must be recognized without resolving a remote source.");
+        Require(!Managed(foreign), "Unknown library items must never be treated as managed playback.");
+        Require(controller.Response.Headers.CacheControl == "private, no-store",
+            "Membership responses must not be shared across users.");
+        Require(typeof(YummyKodikPlaybackStatusController).GetCustomAttribute<AuthorizeAttribute>() is not null,
+            "Playback membership lookup must require an authenticated Jellyfin user.");
+    }
+
     public static void HlsRequestsRespectClientCopyAndFallbackFrameRate()
     {
         using var fixture = new Fixture();

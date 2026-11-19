@@ -134,7 +134,8 @@ public sealed class CvhClient
     public async Task<CvhPlaybackSession> CreatePlaybackSessionAsync(
         YummyCvhSource source,
         int preferredQuality,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Action<CvhResolvedStream>? validateResolved = null)
     {
         ArgumentNullException.ThrowIfNull(source);
 
@@ -142,6 +143,9 @@ public sealed class CvhClient
 
         var cookies = new CvhCookieJar();
         var resolved = await ResolveEpisodeStreamAsync(source, preferredQuality, cookies, cancellationToken).ConfigureAwait(false);
+        // Validate the voice before downloading a manifest or publishing a session.
+        // Keep the resolution cookies for the selected playlist and its segments.
+        validateResolved?.Invoke(resolved);
         var manifestText = await DownloadManifestAsync(resolved.StreamUrl, source, cookies, cancellationToken).ConfigureAwait(false);
         manifestText = PinManifestToPreferredQuality(manifestText, preferredQuality);
 

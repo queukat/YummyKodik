@@ -2200,49 +2200,57 @@ namespace YummyKodik.Api
 
             var cvhHttp = _httpClientFactory.CreateClient(HttpClientNames.Cvh);
             var cvh = new CvhClient(cvhHttp);
-            var resolved = await cvh.ResolveEpisodeStreamAsync(chosenEntry.Cvh, quality, cancellationToken)
-                .ConfigureAwait(false);
-            var resolvedVoice = YummyVideoCatalog.NormalizeVoiceName(resolved.VoiceName);
-
-            if (!string.IsNullOrWhiteSpace(requestedVoice) &&
-                !VoiceNamesEquivalent(requestedVoice, resolvedVoice))
+            void ValidateResolvedVoice(CvhResolvedStream stream)
             {
+                var candidateVoice = YummyVideoCatalog.NormalizeVoiceName(stream.VoiceName);
+                if (string.IsNullOrWhiteSpace(requestedVoice) ||
+                    VoiceNamesEquivalent(requestedVoice, candidateVoice))
+                {
+                    return;
+                }
+
                 _logger.LogWarning(
                     "CVH voice mismatch: user={UserId} animeId={AnimeId} cvhAnimeId={CvhAnimeId} ep={Ep} requestedVoice={RequestedVoice} chosenVoice={ChosenVoice} sourceVoice={SourceVoice} resolvedVoice={ResolvedVoice}",
-                    userId,
-                    animeId,
-                    cvhSourceAnimeId,
-                    episode,
-                    requestedVoice,
-                    chosenEntry.DisplayVoiceName,
-                    cvhSourceVoice,
-                    resolvedVoice);
-
+                    userId, animeId, cvhSourceAnimeId, episode, requestedVoice,
+                    chosenEntry.DisplayVoiceName, cvhSourceVoice, candidateVoice);
                 throw new InvalidOperationException("Requested CVH translation is unavailable from upstream.");
             }
 
-            SetNoStoreCacheHeader();
-
-            _logger.LogInformation(
-                "CVH stream resolved: user={UserId} animeId={AnimeId} cvhAnimeId={CvhAnimeId} ep={Ep} requestedVoice={RequestedVoice} chosenVoice={ChosenVoice} sourceVoice={SourceVoice} resolvedVoice={ResolvedVoice} reason={Reason} format={Format} -> {Url}",
-                userId,
-                animeId,
-                cvhSourceAnimeId,
-                episode,
-                requestedVoice,
-                chosenEntry.DisplayVoiceName,
-                cvhSourceVoice,
-                resolvedVoice,
-                string.IsNullOrWhiteSpace(reasonPrefix) ? reason : reasonPrefix + "+" + reason,
-                format ?? "hls",
-                resolved.StreamUrl);
-
             var cvhFormat = (format ?? "hls").Trim().ToLowerInvariant();
+            CvhPlaybackSession? session = null;
+            CvhResolvedStream resolved;
             if (cvhFormat == "hls")
             {
-                var session = await cvh.CreatePlaybackSessionAsync(chosenEntry.Cvh, quality, cancellationToken)
+                // Resolve the provider once and use that same cookie-bound selection
+                // for the manifest. Validate the voice before publishing the session.
+                CvhResolvedStream? selected = null;
+                session = await cvh.CreatePlaybackSessionAsync(
+                    chosenEntry.Cvh, quality, cancellationToken,
+                    candidate =>
+                    {
+                        ValidateResolvedVoice(candidate);
+                        selected = candidate;
+                    }).ConfigureAwait(false);
+                resolved = selected ?? throw new InvalidOperationException("CVH session has no validated source.");
+            }
+            else
+            {
+                resolved = await cvh.ResolveEpisodeStreamAsync(chosenEntry.Cvh, quality, cancellationToken)
                     .ConfigureAwait(false);
-                SetNoStoreCacheHeader();
+                ValidateResolvedVoice(resolved);
+            }
+
+            SetNoStoreCacheHeader();
+            _logger.LogInformation(
+                "CVH stream resolved: user={UserId} animeId={AnimeId} cvhAnimeId={CvhAnimeId} ep={Ep} requestedVoice={RequestedVoice} chosenVoice={ChosenVoice} sourceVoice={SourceVoice} resolvedVoice={ResolvedVoice} reason={Reason} format={Format} -> {Url}",
+                userId, animeId, cvhSourceAnimeId, episode, requestedVoice,
+                chosenEntry.DisplayVoiceName, cvhSourceVoice,
+                YummyVideoCatalog.NormalizeVoiceName(resolved.VoiceName),
+                string.IsNullOrWhiteSpace(reasonPrefix) ? reason : reasonPrefix + "+" + reason,
+                format ?? "hls", resolved.StreamUrl);
+
+            if (session is not null)
+            {
                 Response.Headers.ContentLocation = CvhClient.BuildManifestProxyUrl(session, BuildCvhProxyBaseUrl());
                 return Content(
                     CvhClient.BuildManifestResponseBody(session, BuildCvhProxyBaseUrl()),
