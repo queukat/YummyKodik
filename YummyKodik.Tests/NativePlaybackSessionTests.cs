@@ -23,10 +23,14 @@ using YummyKodik.Media;
 
 internal static class NativePlaybackSessionTests
 {
-    public static void HlsRequestsEncodeOnlyTheBoundManagedStream()
+    public static void HlsRequestsRespectClientCopyAndFallbackFrameRate()
     {
-        using var f = new Fixture();
-        using var opened = f.Provider.OpenMediaSource(f.First.Id.ToString("N"), [], default).GetAwaiter().GetResult();
+        using var fixture = new Fixture();
+        using var opened = fixture.Provider.OpenMediaSource(fixture.First.Id.ToString("N"), [], default).GetAwaiter().GetResult();
+        var video = opened.MediaSource.MediaStreams.Single(stream => stream.Type == MediaStreamType.Video);
+        video.RealFrameRate = 24f;
+        video.AverageFrameRate = 24f;
+
         var manager = DispatchProxy.Create<IMediaSourceManager, Proxy>();
         ((Proxy)(object)manager).Call = (method, args) => method.Name == "GetLiveStreamInfo"
             ? ((string)args[0]! == "managed" ? opened : null)
@@ -37,38 +41,92 @@ internal static class NativePlaybackSessionTests
         {
             var context = HlsContext("DynamicHls", "managed");
             context.ActionDescriptor.RouteValues["action"] = action;
+            var original = context.HttpContext.Request.QueryString;
             filter.OnActionExecuting(context);
-            Require(context.ActionArguments["allowVideoStreamCopy"] is false, "Master, variant and seek/segment requests must consistently encode video.");
-            Require(context.HttpContext.Request.Query["AllowVideoStreamCopy"] == "false", "Child requests must inherit the same policy.");
-            Require(context.HttpContext.Request.Query["LiveStreamId"] == "managed" && context.HttpContext.Request.Query["StartTimeTicks"] == "5405000000",
-                "Keep the pinned session and seek time unchanged.");
-            Require(context.HttpContext.Request.Query["AllowAudioStreamCopy"] == "true", "Do not change audio policy.");
+            Require(context.ActionArguments["allowVideoStreamCopy"] is true,
+                "Compatible video must remain eligible for stream copy, including segment requests and seeks.");
+            Require(context.HttpContext.Request.QueryString == original,
+                "Permitted stream copy must not rewrite the pinned session, selected voice or seek URL.");
+            Require(!context.ActionArguments.ContainsKey("framerate"),
+                "Do not force a new FPS on remux requests.");
             filter.OnActionExecuting(context);
-            Require(context.HttpContext.Request.Query["AllowVideoStreamCopy"].Count == 1, "Repeated application must not accumulate query values.");
+            Require(context.HttpContext.Request.QueryString == original, "Applying the filter again must be idempotent.");
         }
 
         var omitted = HlsContext("DynamicHls", "managed");
         omitted.ActionArguments.Remove("allowVideoStreamCopy");
         omitted.HttpContext.Request.QueryString = new QueryString("?LiveStreamId=managed");
         filter.OnActionExecuting(omitted);
-        Require(omitted.ActionArguments["allowVideoStreamCopy"] is false && omitted.HttpContext.Request.Query["AllowVideoStreamCopy"] == "false",
-            "MVC leaves an omitted optional parameter out of ActionArguments; normal Web requests must still encode.");
+        Require(!omitted.ActionArguments.ContainsKey("allowVideoStreamCopy") &&
+                !omitted.ActionArguments.ContainsKey("framerate") &&
+                omitted.HttpContext.Request.QueryString == new QueryString("?LiveStreamId=managed"),
+            "Omitted optional stream-copy flags must preserve Jellyfin's default policy.");
+
+        var forced = HlsContext("DynamicHls", "managed");
+        forced.ActionArguments["allowVideoStreamCopy"] = false;
+        forced.HttpContext.Request.QueryString = new QueryString(
+            "?LiveStreamId=managed&allowVideoStreamCopy=false&AllowAudioStreamCopy=true&StartTimeTicks=5405000000");
+        filter.OnActionExecuting(forced);
+        Require(forced.ActionArguments["allowVideoStreamCopy"] is false &&
+                forced.ActionArguments["framerate"] is float forcedFps && forcedFps == 24f,
+            "When the client requires encoding, supply the actual video FPS.");
+        Require(forced.HttpContext.Request.Query["framerate"] == "24" &&
+                forced.HttpContext.Request.Query["LiveStreamId"] == "managed" &&
+                forced.HttpContext.Request.Query["StartTimeTicks"] == "5405000000" &&
+                forced.HttpContext.Request.Query["AllowAudioStreamCopy"] == "true",
+            "An encoded master, segment and seek must carry the FPS without changing session or audio policy.");
+        filter.OnActionExecuting(forced);
+        Require(forced.HttpContext.Request.Query["framerate"].Count == 1,
+            "Repeated filters must not accumulate duplicate FPS parameters.");
+
+        var max = HlsContext("DynamicHls", "managed");
+        max.ActionArguments["allowVideoStreamCopy"] = false;
+        max.ActionArguments["maxFramerate"] = 18f;
+        max.HttpContext.Request.QueryString = new QueryString(
+            "?LiveStreamId=managed&allowVideoStreamCopy=false&maxFramerate=18");
+        filter.OnActionExecuting(max);
+        Require(max.ActionArguments["framerate"] is float capped && capped == 18f,
+            "The original frame rate must not override the client's stricter limit.");
+
+        var explicitRate = HlsContext("DynamicHls", "managed");
+        explicitRate.ActionArguments["allowVideoStreamCopy"] = false;
+        explicitRate.ActionArguments["framerate"] = 30f;
+        explicitRate.HttpContext.Request.QueryString = new QueryString(
+            "?LiveStreamId=managed&allowVideoStreamCopy=false&framerate=30");
+        var explicitQuery = explicitRate.HttpContext.Request.QueryString;
+        filter.OnActionExecuting(explicitRate);
+        Require(explicitRate.ActionArguments["framerate"] is float chosen && chosen == 30f &&
+                explicitRate.HttpContext.Request.QueryString == explicitQuery,
+            "An explicit client FPS must take priority over the probe.");
+
+        video.RealFrameRate = 90000f;
+        video.AverageFrameRate = null;
+        var unknown = HlsContext("DynamicHls", "managed");
+        unknown.ActionArguments["allowVideoStreamCopy"] = false;
+        filter.OnActionExecuting(unknown);
+        Require(!unknown.ActionArguments.ContainsKey("framerate"),
+            "Never invent a frame rate from an implausible probe.");
+        video.RealFrameRate = 24f;
 
         foreach (var pair in new[] { ("DynamicHls", "foreign"), ("DynamicHls", ""), ("Videos", "managed") })
         {
             var context = HlsContext(pair.Item1, pair.Item2);
+            context.ActionArguments["allowVideoStreamCopy"] = false;
             var original = context.HttpContext.Request.QueryString;
             filter.OnActionExecuting(context);
-            Require(context.ActionArguments["allowVideoStreamCopy"] is true && context.HttpContext.Request.QueryString == original,
-                "Unmanaged, unbound and non-HLS playback must remain unchanged.");
+            Require(context.ActionArguments["allowVideoStreamCopy"] is false &&
+                    !context.ActionArguments.ContainsKey("framerate") &&
+                    context.HttpContext.Request.QueryString == original,
+                "Unmanaged and non-HLS playback must not be modified.");
         }
 
         var services = new ServiceCollection();
-        services.AddSingleton(f.Inner);
+        services.AddSingleton(fixture.Inner);
         new PluginServiceRegistrator().RegisterServices(services, null!);
         using var container = services.BuildServiceProvider();
         Require(container.GetRequiredService<IOptions<MvcOptions>>().Value.Filters.OfType<ServiceFilterAttribute>()
-            .Any(x => x.ServiceType == typeof(YummyKodikHlsVideoEncodingFilter)), "The host MVC pipeline must install the filter.");
+            .Any(x => x.ServiceType == typeof(YummyKodikHlsVideoEncodingFilter)),
+            "The host MVC pipeline must install the filter.");
     }
 
     private static ActionExecutingContext HlsContext(string controller, string liveStreamId)

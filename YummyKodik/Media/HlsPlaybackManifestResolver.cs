@@ -6,13 +6,14 @@ namespace YummyKodik.Media;
 /// <summary>Binds playback and duration to one gateway-selected provider session.</summary>
 internal static class HlsPlaybackManifestResolver
 {
-    internal sealed record ResolvedManifest(string Url, long RunTimeTicks, float? FrameRate);
+    internal sealed record ResolvedManifest(string Url, long RunTimeTicks, float? FrameRate, int? Bitrate);
 
     public static async Task<ResolvedManifest> ResolveAsync(HttpClient client, string gatewayUrl, CancellationToken cancellationToken)
     {
         var gateway = new Uri(gatewayUrl);
         var current = gateway;
         float? selectedFrameRate = null;
+        int? selectedBitrate = null;
         for (var depth = 0; depth < 4; depth++)
         {
             using var response = await client.GetAsync(current, cancellationToken).ConfigureAwait(false);
@@ -55,7 +56,7 @@ internal static class HlsPlaybackManifestResolver
                 {
                     throw new InvalidOperationException("Invalid HLS total duration.");
                 }
-                return new ResolvedManifest(resolved.AbsoluteUri, TimeSpan.FromSeconds(seconds).Ticks, selectedFrameRate);
+                return new ResolvedManifest(resolved.AbsoluteUri, TimeSpan.FromSeconds(seconds).Ticks, selectedFrameRate, selectedBitrate);
             }
 
             var variantIndex = Array.FindIndex(lines, line => !line.StartsWith('#'));
@@ -67,6 +68,7 @@ internal static class HlsPlaybackManifestResolver
                 var streamInfo = lines.Take(variantIndex)
                     .LastOrDefault(line => line.StartsWith("#EXT-X-STREAM-INF:", StringComparison.OrdinalIgnoreCase));
                 selectedFrameRate = HlsVideoFrameRatePolicy.ParseDeclaredFrameRate(streamInfo) ?? selectedFrameRate;
+                selectedBitrate = HlsVariantBitratePolicy.ParseDeclaredBitrate(streamInfo) ?? selectedBitrate;
             }
 
             if (variant == null || !Uri.TryCreate(resolved, variant, out current) || !IsLocalProxy(gateway, current))

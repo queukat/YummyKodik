@@ -43,7 +43,7 @@ internal static class HlsPlaybackManifestTests
         using var handler = new Handler((request, call) => call switch
         {
             1 => Response(request,
-                "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1500000,FRAME-RATE=23.976,RESOLUTION=852x480\nfirst.m3u8?sessionId=pinned\n#EXT-X-STREAM-INF:BANDWIDTH=5000000,FRAME-RATE=60.000,RESOLUTION=1920x1080\nsecond.m3u8?sessionId=pinned", master),
+                "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1500000,AVERAGE-BANDWIDTH=1250000,FRAME-RATE=23.976,RESOLUTION=852x480\nfirst.m3u8?sessionId=pinned\n#EXT-X-STREAM-INF:BANDWIDTH=5000000,FRAME-RATE=60.000,RESOLUTION=1920x1080\nsecond.m3u8?sessionId=pinned", master),
             2 when request.RequestUri!.AbsolutePath.EndsWith("/first.m3u8", StringComparison.Ordinal) =>
                 Response(request, "#EXTM3U\n#EXTINF:3,\na.ts\n#EXT-X-ENDLIST", null),
             _ => throw new Exception("Only the chosen variant should be resolved.")
@@ -51,8 +51,9 @@ internal static class HlsPlaybackManifestTests
         using var client = new HttpClient(handler);
         var result = HlsPlaybackManifestResolver.ResolveAsync(client, gateway, CancellationToken.None).GetAwaiter().GetResult();
         if (!result.Url.Contains("/first.m3u8?sessionId=pinned", StringComparison.Ordinal) ||
-            !result.FrameRate.HasValue || Math.Abs(result.FrameRate.Value - 23.976f) > 0.001f)
-            throw new Exception("Use FPS and URL of the same pinned rendition, never another quality variant.");
+            !result.FrameRate.HasValue || Math.Abs(result.FrameRate.Value - 23.976f) > 0.001f ||
+            result.Bitrate != 1250000)
+            throw new Exception("Use FPS, bandwidth and URL of the same pinned rendition, never another quality variant.");
     }
 
     public static void RejectsUnstableIncompleteAndInvalidManifests()
