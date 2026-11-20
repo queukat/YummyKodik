@@ -9,6 +9,14 @@
     "imageUrl": "https://raw.githubusercontent.com/queukat/YummyKodik/main/YummyKodik/Assets/logo.png",
     "versions": [
       {
+        "version": "2.1.2.0",
+        "changelog": "- Allow compatible HLS video and audio streams to be remuxed without unnecessary video re-encoding, while preserving client playback preferences.\n- Preserve selected HLS rendition bitrate and frame-rate metadata for accurate stream selection.\n- Reduce CVH playback startup work by avoiding redundant provider resolution and retaining translation validation.\n- Show a playback preparation indicator for managed episodes before HLS playback starts, including buffer progress and recovery; leave other Jellyfin media unaffected.\n- Match the active Jellyfin theme for preparation and buffering overlays, including colors, typography, borders, and accents.\n- Expand playback, CVH session, source-selection, and browser UI regression coverage.\n\nRequires Jellyfin 12.",
+        "targetAbi": "12.0.0.0",
+        "sourceUrl": "https://github.com/queukat/YummyKodik/releases/download/2.1.2.0/YummyKodik_2.1.2.0.zip",
+        "checksum": "d9d54e9ebbe8b8ef9851f181a68de607",
+        "timestamp": "2026-11-20T07:06:15Z"
+      },
+      {
         "version": "2.1.1.0",
         "changelog": "- Fixed HLS frame-rate metadata that could expose the MPEG-TS 90 kHz clock as 90,000 FPS and produce a huge AMD AMF keyframe interval.\n- Use the selected local HLS media rendition for playback instead of asking FFmpeg to probe all variants in the master playlist.\n- Preserve legitimate probed FPS or an explicit HLS FRAME-RATE for that rendition; unknown frame rates remain unknown.\n- Added regression tests for pinned HLS sessions, frame-rate validation, and multiple renditions.\n\nRequires Jellyfin 12.",
         "targetAbi": "12.0.0.0",
