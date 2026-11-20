@@ -259,6 +259,39 @@ const otherItemId = "e1e7254a4621c686d592165234187d7b";
 const remuxUrl = "/videos/e9758a42-32a8-726f-110c-977976103be0/master.m3u8";
 
 const tests = [
+    ["early and buffered overlays follow Jellyfin palette variables", async () => {
+        const assertTheme = overlay => {
+            assert.ok(overlay, "Playback preparation overlay should be present");
+            for (const name of [
+                "--jf-palette-background-paper",
+                "--jf-palette-text-primary",
+                "--jf-palette-divider",
+                "--jf-card-borderRadius"
+            ]) {
+                assert.ok(overlay.style.cssText.includes("var(" + name),
+                    "The panel must inherit " + name + " from the active Jellyfin theme");
+            }
+            assert.ok(overlay.style.cssText.includes("font-family:inherit"),
+                "The panel must follow the configured Jellyfin font");
+            assert.doesNotMatch(overlay.style.cssText, /rgba\(12,16,23|color:#fff|font:16px\/1\.5 sans-serif/i,
+                "The panel must not override light or custom themes with a hard-coded dark style");
+            const button = overlay.children.find(element => element.tagName === "BUTTON");
+            assert.ok(button);
+            assert.ok(button.style.cssText.includes("var(--jf-palette-primary-main"),
+                "The button must inherit the theme accent");
+            assert.ok(button.style.cssText.includes("var(--jf-palette-divider"),
+                "The button border must inherit the theme divider");
+        };
+
+        const remux = createHarness({ managedIds: [managedItemId] });
+        await remux.requestPlayback(managedItemId);
+        assertTheme(remux.overlay());
+        await remux.attach(remuxUrl);
+        assertTheme(remux.overlay());
+        const native = createHarness();
+        await native.attach(managedSource);
+        assertTheme(native.overlay());
+    }],
     ["managed PlaybackInfo displays preparation before HLS exists", async () => {
         const h = createHarness({ managedIds: [managedItemId] });
         await h.requestPlayback(managedItemId);

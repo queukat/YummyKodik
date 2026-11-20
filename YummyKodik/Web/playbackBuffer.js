@@ -3,6 +3,27 @@
     "use strict";
 
     const TARGET_SECONDS = 60;
+    // Jellyfin uses these CSS variables for all built-in and custom themes.
+    // Keep them as CSS var() references so an in-session theme change updates
+    // an already visible panel without re-creating it.
+    const PANEL_STYLE = [
+        "position:fixed", "z-index:100000", "left:50%", "top:36%",
+        "transform:translate(-50%,-50%)", "width:min(360px,85vw)",
+        "box-sizing:border-box", "padding:22px", "text-align:center",
+        "background:var(--jf-palette-background-paper,Canvas)",
+        "color:var(--jf-palette-text-primary,CanvasText)",
+        "border:1px solid var(--jf-palette-divider,transparent)",
+        "border-radius:var(--jf-card-borderRadius,0.75rem)",
+        "font-family:inherit", "font-size:1rem", "line-height:1.5",
+        "box-shadow:var(--jf-shadows-16,0 8px 36px rgb(0 0 0 / 0.24))"
+    ].join(";");
+    const BUTTON_STYLE = [
+        "margin-top:14px", "padding:8px 14px",
+        "border:1px solid var(--jf-palette-divider,currentColor)",
+        "border-radius:var(--jf-card-borderRadius,0.5rem)",
+        "color:var(--jf-palette-primary-main,inherit)",
+        "background:transparent", "font:inherit", "cursor:pointer"
+    ].join(";");
     const gates = new WeakMap();
     const installed = new WeakSet();
 
@@ -95,7 +116,7 @@
         if (!preparation) {
             const panel = document.createElement("div");
             panel.id = "ykPlaybackBuffer";
-            panel.style.cssText = "position:fixed;z-index:100000;left:50%;top:36%;transform:translate(-50%,-50%);width:min(360px,85vw);box-sizing:border-box;padding:22px;border-radius:14px;background:rgba(12,16,23,.94);color:#fff;text-align:center;font:16px/1.5 sans-serif;box-shadow:0 8px 36px #0008";
+            panel.style.cssText = PANEL_STYLE;
             const title = document.createElement("div");
             title.textContent = "Подготовка воспроизведения";
             title.style.cssText = "font-size:18px;font-weight:600;margin-bottom:8px";
@@ -105,7 +126,7 @@
             const close = document.createElement("button");
             close.type = "button";
             close.textContent = "Скрыть";
-            close.style.cssText = "margin-top:14px;padding:8px 14px;border:1px solid #ffffff60;border-radius:8px;color:white;background:transparent;font:inherit;cursor:pointer";
+            close.style.cssText = BUTTON_STYLE;
             close.addEventListener("click", () => hidePreparation(id));
             panel.append(title, status, close);
             (document.fullscreenElement || document.body).appendChild(panel);
@@ -208,7 +229,7 @@
             if (!overlay) {
                 overlay = document.createElement("div");
                 overlay.id = "ykPlaybackBuffer";
-                overlay.style.cssText = "position:fixed;z-index:100000;left:50%;top:36%;transform:translate(-50%,-50%);width:min(360px,85vw);box-sizing:border-box;padding:22px;border-radius:14px;background:rgba(12,16,23,.94);color:#fff;text-align:center;font:16px/1.5 sans-serif;box-shadow:0 8px 36px #0008";
+                overlay.style.cssText = PANEL_STYLE;
                 const title = document.createElement("div");
                 title.textContent = "Подготовка воспроизведения";
                 title.style.cssText = "font-size:18px;font-weight:600;margin-bottom:8px";
@@ -217,7 +238,7 @@
                 status.setAttribute("aria-live", "polite");
                 button = document.createElement("button");
                 button.type = "button";
-                button.style.cssText = "margin-top:14px;padding:8px 14px;border:1px solid #ffffff60;border-radius:8px;color:white;background:transparent;font:inherit;cursor:pointer";
+                button.style.cssText = BUTTON_STYLE;
                 button.addEventListener("click", () => {
                     resumeRequested = !resumeRequested;
                     tick();
