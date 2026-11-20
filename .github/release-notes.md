@@ -1,6 +1,8 @@
-- Fixed HLS frame-rate metadata that could expose the MPEG-TS 90 kHz clock as 90,000 FPS and produce a huge AMD AMF keyframe interval.
-- Use the selected local HLS media rendition for playback instead of asking FFmpeg to probe all variants in the master playlist.
-- Preserve legitimate probed FPS or an explicit HLS FRAME-RATE for that rendition; unknown frame rates remain unknown.
-- Added regression tests for pinned HLS sessions, frame-rate validation, and multiple renditions.
+- Allow compatible HLS video and audio streams to be remuxed without unnecessary video re-encoding, while preserving client playback preferences.
+- Preserve selected HLS rendition bitrate and frame-rate metadata for accurate stream selection.
+- Reduce CVH playback startup work by avoiding redundant provider resolution and retaining translation validation.
+- Show a playback preparation indicator for managed episodes before HLS playback starts, including buffer progress and recovery; leave other Jellyfin media unaffected.
+- Match the active Jellyfin theme for preparation and buffering overlays, including colors, typography, borders, and accents.
+- Expand playback, CVH session, source-selection, and browser UI regression coverage.
 
 Requires Jellyfin 12.
